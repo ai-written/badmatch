@@ -1,0 +1,50 @@
+# BadMatch 生产环境部署
+# 只需这一个文件 + .env 即可启动
+# docker compose -f docker-compose.prod.yml up -d
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: badminton
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-badminton}
+      POSTGRES_DB: badminton
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      TZ: Asia/Shanghai
+    restart: always
+
+  server:
+    image: hsiangleev/badmatch:server-latest
+    environment:
+      DATABASE_URL: postgresql+asyncpg://badminton:${DB_PASSWORD:-badminton}@db:5432/badminton
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-to-a-random-string}
+      TZ: Asia/Shanghai
+    volumes:
+      - uploads:/app/static/uploads
+    depends_on:
+      - db
+      - redis
+    restart: always
+
+  client:
+    image: hsiangleev/badmatch:client-latest
+    ports:
+      - "${PORT:-80}:80"
+    environment:
+      TZ: Asia/Shanghai
+    depends_on:
+      - server
+    restart: always
+
+volumes:
+  pgdata:
+  uploads:

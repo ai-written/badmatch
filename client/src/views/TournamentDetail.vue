@@ -1,0 +1,215 @@
+<template>
+  <div class="detail-page">
+    <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="$router.back()">
+      <template #right>
+        <van-icon v-if="isCreator && tournament?.status === 'open'" name="delete-o" size="20" @click="doDelete" />
+      </template>
+    </van-nav-bar>
+
+    <van-loading v-if="!tournament" class="loading" />
+    <template v-else>
+      <div class="info-card">
+        <div class="info-head">
+          <h2>{{ tournament.title }}</h2>
+          <van-tag :type="statusType" size="medium" round>{{ tournament.status === 'open' ? '报名中' : tournament.status === 'ongoing' ? '进行中' : '已结束' }}</van-tag>
+        </div>
+        <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
+        <div class="info-grid">
+          <div class="ig-item"><van-icon name="location-o" /><span>{{ tournament.location || '待定' }}</span></div>
+          <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDate(tournament.start_date) }} ~ {{ fmtDate(tournament.end_date) }}</span></div>
+          <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
+          <div class="ig-item"><van-icon name="gold-coin-o" /><span>{{ tournament.entry_fee > 0 ? `¥${Math.round(tournament.entry_fee / 100)}` : '免费' }}</span></div>
+          <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
+        </div>
+      </div>
+
+      <div class="action-block" v-if="tournament.status === 'open'">
+        <van-button type="primary" block round :disabled="tournament.is_registered" @click="doRegister">
+          {{ tournament.is_registered ? '已报名' : '立即报名' }}
+        </van-button>
+        <van-button v-if="tournament.is_registered" plain block round style="margin-top:8px" @click="doCancelRegister">
+          取消报名
+        </van-button>
+      </div>
+
+      <div class="player-section" @click="showRegistrations = true">
+        <div class="player-head">
+          <span class="ph-title">已报名 ({{ tournament.registered_count }})</span>
+          <van-icon name="arrow" size="14" color="#999" />
+        </div>
+        <div class="player-grid" v-if="registrations.length > 0">
+          <div v-for="r in registrations.slice(0, 10)" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
+            <van-image round width="32" height="32" :src="r.avatar || defaultAvatar" />
+            <span class="player-name">{{ r.username }}</span>
+            <span class="player-time">{{ formatTime(r.created_at) }}</span>
+          </div>
+          <div v-if="registrations.length > 10" class="player-chip more">+{{ registrations.length - 10 }}</div>
+        </div>
+        <p v-else class="empty-hint">暂无报名</p>
+      </div>
+
+      <div class="creator-block" v-if="isCreator && tournament.status === 'ongoing'">
+        <van-button type="danger" block round @click="doEndTournament">提前结束赛事</van-button>
+      </div>
+
+      <div class="nav-block" v-if="tournament.status !== 'open'">
+        <van-grid :column-num="2" clickable :border="false">
+          <van-grid-item icon="clock-o" text="对阵表" @click="$router.push(`/tournament/${tournament.id}/schedule`)" />
+          <van-grid-item icon="chart-trending-o" text="积分榜" @click="$router.push(`/tournament/${tournament.id}/rankings`)" />
+        </van-grid>
+      </div>
+
+      <div class="creator-block" v-if="isCreator && tournament.status === 'open'">
+        <van-button type="danger" block round @click="doStart" :disabled="tournament.registered_count < 4">
+          开始比赛（需满 {{ Math.max(4 - tournament.registered_count, 0) }} 人）
+        </van-button>
+      </div>
+
+      <van-popup v-model:show="showPlayerStats" round position="bottom" :style="{ height: '45%' }" class="stats-popup">
+        <div class="popup-content">
+          <div class="popup-player-head">
+            <van-image round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
+            <h3>{{ playerDetail.username }}</h3>
+          </div>
+          <van-cell-group inset v-if="playerStats.total_matches > 0">
+            <van-cell title="总场次" :value="String(playerStats.total_matches)" />
+            <van-cell title="胜场" :value="String(playerStats.total_wins)" />
+            <van-cell title="负场" :value="String(playerStats.total_matches - playerStats.total_wins)" />
+            <van-cell title="胜率" :value="`${playerStats.win_rate}%`">
+              <template #label>双打胜率，按参与场次统计</template>
+            </van-cell>
+            <van-cell title="参赛次数" :value="String(playerStats.tournaments_played)" />
+          </van-cell-group>
+          <van-empty v-else description="暂无比赛记录" />
+        </div>
+      </van-popup>
+
+      <van-popup v-model:show="showRegistrations" round position="bottom" :style="{ height: '55%' }">
+        <div class="popup-content">
+          <h3>报名列表 ({{ tournament.registered_count }})</h3>
+          <div class="popup-grid">
+            <div v-for="r in registrations" :key="r.id" class="popup-player" @click="viewPlayer(r)">
+              <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+              <span>{{ r.username }}</span>
+              <span class="popup-time">{{ formatTime(r.created_at) }}</span>
+            </div>
+          </div>
+          <van-empty v-if="registrations.length === 0" description="暂无报名" />
+        </div>
+      </van-popup>
+    </template>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+import api from '@/api/client'
+import { showToast, showConfirmDialog } from 'vant'
+
+const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
+
+const tournament = ref<any>(null)
+const registrations = ref<any[]>([])
+const showRegistrations = ref(false)
+const showPlayerStats = ref(false)
+const playerDetail = ref<any>({})
+const playerStats = ref<any>({})
+const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
+
+const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
+const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
+
+function fmtDate(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(0, 16) }
+function formatTime(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(5, 16) }
+
+async function viewPlayer(r: any) {
+  playerDetail.value = r
+  showPlayerStats.value = true
+  try {
+    const res = await api.get(`/auth/stats/${r.user_id}`)
+    playerStats.value = res.data
+  } catch {
+    playerStats.value = {}
+  }
+}
+
+async function fetchDetail() {
+  const res = await api.get(`/tournaments/${route.params.id}`)
+  tournament.value = res.data
+}
+async function fetchRegistrations() {
+  const res = await api.get(`/tournaments/${route.params.id}/registrations`)
+  registrations.value = res.data
+}
+async function doRegister() {
+  await api.post(`/tournaments/${route.params.id}/register`)
+  showToast('报名成功')
+  await Promise.all([fetchDetail(), fetchRegistrations()])
+}
+async function doCancelRegister() {
+  await api.post(`/tournaments/${route.params.id}/cancel-register`)
+  showToast('已取消报名')
+  await Promise.all([fetchDetail(), fetchRegistrations()])
+}
+async function doStart() {
+  await api.post(`/tournaments/${route.params.id}/start`)
+  showToast('比赛已开始')
+  await fetchDetail()
+}
+async function doDelete() {
+  try { await showConfirmDialog({ title: '确认删除', message: '删除后不可恢复，确定要删除？' }) } catch { return }
+  await api.delete(`/tournaments/${route.params.id}`)
+  showToast('已删除')
+  router.replace('/')
+}
+
+async function doEndTournament() {
+  try { await showConfirmDialog({ title: '确认结束', message: '提前结束赛事？结束后无法恢复。' }) } catch { return }
+  await api.post(`/tournaments/${route.params.id}/end-tournament`)
+  showToast('赛事已结束')
+  await fetchDetail()
+}
+
+onMounted(async () => {
+  await auth.fetchMe()
+  await fetchDetail()
+  await fetchRegistrations()
+})
+</script>
+
+<style scoped>
+.detail-page { height: 100vh; overflow-y: auto; background: #f5f6f8; padding-bottom: 60px; }
+.loading { display: flex; justify-content: center; margin-top: 100px; }
+.info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
+.info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.info-head h2 { font-size: 18px; font-weight: 700; }
+.info-desc { color: #666; font-size: 13px; margin-bottom: 12px; }
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.ig-item { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #888; }
+.ig-item .van-icon { font-size: 13px; flex-shrink: 0; }
+.action-block { padding: 10px 12px; }
+.player-section { margin: 8px 12px; padding: 14px; background: #fff; border-radius: 10px; }
+.player-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.ph-title { font-size: 15px; font-weight: 600; }
+.player-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.player-chip { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 60px; cursor: pointer; }
+.player-name { font-size: 11px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 56px; }
+.player-time { font-size: 9px; color: #bbb; }
+.player-chip.more { justify-content: center; font-size: 13px; color: #999; cursor: default; }
+.empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
+.nav-block { margin: 8px 12px; }
+.creator-block { padding: 10px 12px; }
+.popup-content { padding: 20px; overflow-y: auto; max-height: 100%; }
+.popup-content h3 { margin-bottom: 14px; font-size: 16px; }
+.popup-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.popup-player { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px; cursor: pointer; }
+.popup-player span { font-size: 12px; color: #666; }
+.popup-time { font-size: 10px !important; color: #bbb !important; }
+.popup-player-head { display: flex; flex-direction: column; align-items: center; margin-bottom: 16px; }
+.popup-player-head h3 { margin-top: 8px; }
+</style>
+.stats-popup { overflow: hidden !important; }
