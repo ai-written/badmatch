@@ -6,6 +6,10 @@
       </template>
     </van-nav-bar>
 
+    <div class="detail-scroll">
+    <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+      <div class="pull-inner">
+      <div class="pull-inner">
     <van-loading v-if="!tournament" class="loading" />
     <template v-else>
       <div class="info-card">
@@ -16,7 +20,7 @@
         <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
         <div class="info-grid">
           <div class="ig-item"><van-icon name="location-o" /><span>{{ tournament.location || '待定' }}</span></div>
-          <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDate(tournament.start_date) }} ~ {{ fmtDate(tournament.end_date) }}</span></div>
+          <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="gold-coin-o" /><span>{{ tournament.entry_fee > 0 ? `¥${Math.round(tournament.entry_fee / 100)}` : '免费' }}</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
@@ -98,24 +102,50 @@
         </div>
       </van-popup>
     </template>
+      </div>
+    </div>
+    </van-pull-refresh>
+    </div>
   </div>
+      <!-- 场次重选弹窗 -->
+      <van-popup v-model:show="showMatchPicker" position="bottom" round :style="{ height: '45%' }">
+        <div class="picker-toolbar">
+          <span @click="showMatchPicker = false">取消</span>
+          <span class="picker-title">当前报名 {{ tournament.registered_count }} 人，请选择总场次</span>
+        </div>
+        <van-cell-group inset style="margin-top:10px">
+          <van-cell
+            v-for="opt in matchOptions" :key="opt.total"
+            :title="`${opt.total} 场`" :label="`每人 ${opt.per_person} 场`"
+            @click="selectMatchStart(opt.total)" :class="{ active: matchTotal === opt.total }"
+          />
+        </van-cell-group>
+      </van-popup>
+
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
+import { useWebSocket } from '@/composables/useWebSocket'
 import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const tid = Number(route.params.id)
+const { lastMessage } = useWebSocket(tid)
 
+const refreshing = ref(false)
 const tournament = ref<any>(null)
 const registrations = ref<any[]>([])
 const showRegistrations = ref(false)
 const showPlayerStats = ref(false)
+const showMatchPicker = ref(false)
+const matchOptions = ref<{ total: number; per_person: number }[]>([])
+const matchTotal = ref(0)
 const playerDetail = ref<any>({})
 const playerStats = ref<any>({})
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
@@ -123,7 +153,16 @@ const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
 
-function fmtDate(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(0, 16) }
+const WEEKDAYS2 = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+function fmtDateTime(start: string, end: string) {
+  if (!start || !end) return ''
+  const d = new Date(start)
+  const y = d.getFullYear()
+  const m = d.getMonth() + 1
+  const day = d.getDate()
+  const w = WEEKDAYS2[d.getDay()]
+  return `${y}年${m}月${day}日(${w}) ${start.slice(11, 16)}~${end.slice(11, 16)}`
+}
 function formatTime(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(5, 16) }
 
 async function viewPlayer(r: any) {
@@ -155,10 +194,38 @@ async function doCancelRegister() {
   showToast('已取消报名')
   await Promise.all([fetchDetail(), fetchRegistrations()])
 }
-async function doStart() {
-  await api.post(`/tournaments/${route.params.id}/start`)
+async function fetchMatchOptionsForStart() {
+  const n = tournament.value?.registered_count || 0
+  if (n < 4) return
+  try {
+    const res = await api.get(`/tournaments/match-options/${n}`)
+    matchOptions.value = res.data.options || []
+  } catch {}
+}
+
+function selectMatchStart(total: number) {
+  matchTotal.value = total
+  showMatchPicker.value = false
+  doStartWithTotal()
+}
+
+async function doStartWithTotal() {
+  await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
   showToast('比赛已开始')
   await fetchDetail()
+}
+
+async function doStart() {
+  const count = tournament.value?.registered_count || 0
+  const max = tournament.value?.max_participants || 0
+  if (count < max) {
+    await fetchMatchOptionsForStart()
+    showMatchPicker.value = true
+  } else {
+    await api.post(`/tournaments/${route.params.id}/start`)
+    showToast('比赛已开始')
+    await fetchDetail()
+  }
 }
 async function doDelete() {
   try { await showConfirmDialog({ title: '确认删除', message: '删除后不可恢复，确定要删除？' }) } catch { return }
@@ -174,6 +241,19 @@ async function doEndTournament() {
   await fetchDetail()
 }
 
+async function onRefresh() {
+  try {
+    await Promise.all([fetchDetail(), fetchRegistrations()])
+  } finally {
+    refreshing.value = false
+  }
+}
+
+watch(lastMessage, () => {
+  fetchDetail()
+  fetchRegistrations()
+})
+
 onMounted(async () => {
   await auth.fetchMe()
   await fetchDetail()
@@ -182,7 +262,10 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.detail-page { height: 100vh; overflow-y: auto; background: #f5f6f8; padding-bottom: 60px; }
+.detail-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.detail-scroll { flex: 1; overflow-y: auto; }
+.pull-fill { min-height: 100%; }
+.pull-inner { padding-bottom: 60px; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
 .info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -211,5 +294,9 @@ onMounted(async () => {
 .popup-time { font-size: 10px !important; color: #bbb !important; }
 .popup-player-head { display: flex; flex-direction: column; align-items: center; margin-bottom: 16px; }
 .popup-player-head h3 { margin-top: 8px; }
+
+.picker-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; font-size: 15px; }
+.picker-title { font-weight: 600; }
+.van-cell.active { background: #e8f4ff; }
 </style>
 .stats-popup { overflow: hidden !important; }

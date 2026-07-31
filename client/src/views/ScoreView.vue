@@ -1,6 +1,6 @@
 <template>
   <div class="score-root">
-    <van-nav-bar title="记分" left-text="返回" left-arrow @click-left="$router.back()" />
+    <van-nav-bar :title="matchNum" left-text="返回" left-arrow @click-left="$router.back()" />
 
     <van-loading v-if="!match" class="loading" />
     <template v-else>
@@ -18,9 +18,9 @@
 
         <div class="sb-center" @click="swapTeams">
           <div class="sb-score-row">
-            <span class="sb-big">{{ leftScore }}</span>
+            <span class="sb-big" :class="{ red: leftScore > rightScore }">{{ leftScore }}</span>
             <span class="sb-colon">:</span>
-            <span class="sb-big">{{ rightScore }}</span>
+            <span class="sb-big" :class="{ red: rightScore > leftScore }">{{ rightScore }}</span>
           </div>
           <div class="sb-status">
             <van-tag :type="match.status === 'finished' ? 'success' : 'warning'" size="medium" round>
@@ -44,6 +44,28 @@
             <span>{{ rightTeam.b.username }}</span>
           </div>
         </div>
+      </div>
+
+      <div class="support-bar" v-if="match">
+        <div class="support-track">
+          <div class="support-inner">
+            <div class="support-fill a" :style="{ flex: supportA }" @click.stop="doSupport('a')">
+              <div class="support-avatars">
+                <img v-for="(av, i) in (swapped ? (swapped ? match.support_a_users : match.support_b_users) : match.support_a_users)" :key="'a'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: match.support_a_users.length - i }" />
+              </div>
+            </div>
+            <div class="support-fill b" :style="{ flex: supportB }" @click.stop="doSupport('b')">
+              <div class="support-avatars">
+                <img v-for="(av, i) in match.support_b_users" :key="'b'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: match.support_b_users.length - i }" />
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="support-labels">
+          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'b' : 'a') }" @click="doSupport('a')">🔥 {{ swapped ? (match.support_b || 0) : (match.support_a || 0) }} 票</span>
+          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'a' : 'b') }" @click="doSupport('b')">🔥 {{ swapped ? (match.support_a || 0) : (match.support_b || 0) }} 票</span>
+        </div>
+        <div class="support-hint" v-if="canSupport && match.status !== 'finished'">点击支持你喜欢的队伍</div>
       </div>
 
       <div v-if="isReferee" class="controls">
@@ -79,9 +101,10 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocket } from '@/composables/useWebSocket'
 import api from '@/api/client'
-import { showToast } from 'vant'
+import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
+const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
 const swapped = ref(false)
@@ -106,6 +129,28 @@ const rightTeam = computed(() => {
 })
 const leftScore = computed(() => swapped.value ? (match.value?.score_b ?? 0) : (match.value?.score_a ?? 0))
 const rightScore = computed(() => swapped.value ? (match.value?.score_a ?? 0) : (match.value?.score_b ?? 0))
+const canSupport = computed(() => {
+  if (!match.value || !auth.user) return false
+  const players = [
+    match.value.pairing_a?.player_a?.id, match.value.pairing_a?.player_b?.id,
+    match.value.pairing_b?.player_a?.id, match.value.pairing_b?.player_b?.id,
+  ]
+  if (players.includes(auth.user.id)) return false
+  if (match.value.referee?.id === auth.user.id) return false
+  return true
+})
+const supportA = computed(() => {
+  const a = match.value?.support_a || 0
+  const b = match.value?.support_b || 0
+  if (a + b === 0) return 1
+  return swapped.value ? b : a
+})
+const supportB = computed(() => {
+  const a = match.value?.support_a || 0
+  const b = match.value?.support_b || 0
+  if (a + b === 0) return 1
+  return swapped.value ? a : b
+})
 const leftWin = computed(() => {
   const w = match.value?.winner_pairing_id
   if (!w) return false
@@ -125,11 +170,41 @@ async function fetchMatch() {
   match.value = res.data
 }
 
+async function doSupport(side: string) {
+  if (!canSupport.value || match.value?.status === 'finished') return
+  const actualSide = swapped.value ? (side === 'a' ? 'b' : 'a') : side
+  try {
+    const res = await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/support`, { side: actualSide })
+    match.value.support_a = res.data.support_a
+    match.value.support_b = res.data.support_b
+    match.value.my_support = actualSide
+  } catch {}
+}
+
+let scoreTimer: ReturnType<typeof setTimeout> | null = null
+let pendingScore: { score_a: number; score_b: number } | null = null
+
+async function flushScoreNow() {
+  if (!pendingScore || !match.value) return
+  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, pendingScore).catch(() => {})
+  pendingScore = null
+}
+
+function flushScore() {
+  flushScoreNow()
+}
+
+function scheduleFlush() {
+  if (scoreTimer) clearTimeout(scoreTimer)
+  scoreTimer = setTimeout(flushScore, 300)
+}
+
 async function addScore(side: string) {
   if (!match.value) return
   if (side === 'a') match.value.score_a = (match.value.score_a ?? 0) + 1
   else match.value.score_b = (match.value.score_b ?? 0) + 1
-  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, { score_a: match.value.score_a, score_b: match.value.score_b })
+  pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
+  scheduleFlush()
 }
 
 async function subScore(side: string) {
@@ -137,10 +212,14 @@ async function subScore(side: string) {
   if (side === 'a' && (match.value.score_a ?? 0) > 0) match.value.score_a -= 1
   else if (side === 'b' && (match.value.score_b ?? 0) > 0) match.value.score_b -= 1
   else return
-  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, { score_a: match.value.score_a, score_b: match.value.score_b })
+  pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
+  scheduleFlush()
 }
 
 async function endMatch() {
+  try { await showConfirmDialog({ title: '确认结束', message: '确定要结束本场比赛吗？结束后无法恢复。' }) } catch { return }
+  if (scoreTimer) { clearTimeout(scoreTimer); scoreTimer = null }
+  if (pendingScore) { await flushScoreNow() }
   await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
     score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0, force_end: true
   })
@@ -156,38 +235,73 @@ async function claimReferee() {
 
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
-watch(lastMessage, (msg) => { if (msg?.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) fetchMatch() })
+watch(lastMessage, (msg) => {
+  if (!msg) return
+  if (msg.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) fetchMatch()
+  if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
+    match.value.support_a = msg.support_a
+    match.value.support_b = msg.support_b
+    fetchMatch()
+  }
+})
 
 onMounted(async () => { await auth.fetchMe(); await fetchMatch() })
 </script>
 
 <style scoped>
-.score-root { min-height: 100vh; height: 100vh; overflow: hidden; position: fixed; inset: 0; z-index: 1; background: linear-gradient(180deg, #0d1b2a 0%, #1b2838 50%, #0d1b2a 100%); color: #fff; }
+.score-root { min-height: 100vh; background: #f0f2f5; padding-bottom: 40px; }
 .loading { display: flex; justify-content: center; margin-top: 120px; }
 
-.scoreboard { display: flex; align-items: center; padding: 20px 8px 16px; }
+.scoreboard { display: flex; align-items: center; padding: 16px 8px; background: #fff; margin: 10px 12px; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
 .sb-team { flex: 1; display: flex; justify-content: center; gap: 4px; cursor: pointer; }
-.sb-player { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 12px; color: #ccc; }
-.sb-team.win .sb-player span { color: #ffd700; font-weight: 600; }
+.sb-player { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 12px; color: #666; }
+.sb-team.win .sb-player span { color: #07c160; font-weight: 600; }
 
-.sb-center { width: 130px; text-align: center; cursor: pointer; }
-.sb-score-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 8px; }
-.sb-big { font-size: 52px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; color: #fff; text-shadow: 0 0 20px rgba(255,255,255,.3); }
-.sb-colon { font-size: 40px; color: rgba(255,255,255,.3); }
+.sb-center { width: 120px; text-align: center; cursor: pointer; }
+.sb-score-row { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px; }
+.sb-big { font-size: 48px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; color: #222; }
+.sb-big.red { color: #e74c3c; }
+.sb-colon { font-size: 36px; color: #ccc; }
 .sb-status { margin-bottom: 6px; }
-.sb-info { font-size: 11px; color: #8899aa; display: flex; flex-direction: column; gap: 2px; }
-.swap-hint { margin-top: 6px; font-size: 10px; color: #445566; }
+.sb-info { font-size: 11px; color: #999; display: flex; flex-direction: column; gap: 2px; }
+.swap-hint { margin-top: 4px; font-size: 10px; color: #ccc; }
 
 .controls { padding: 20px 20px 40px; }
 .ctrl-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .ctrl-btn { width: 56px; height: 56px; border-radius: 50%; border: none; font-size: 22px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform .1s, opacity .1s; }
 .ctrl-btn:active { transform: scale(.92); }
-.ctrl-btn.plus { background: #07c160; color: #fff; }
-.ctrl-btn.minus { background: rgba(255,255,255,.12); color: #fff; }
+.ctrl-btn.plus { background: #07c160; color: #fff; box-shadow: 0 2px 8px rgba(7,193,96,.3); }
+.ctrl-btn.minus { background: #eee; color: #666; }
 .ctrl-btn:disabled { opacity: .25; }
-.ctrl-label { font-size: 13px; color: #8899aa; }
-.ctrl-hint { font-size: 11px; color: #556677; }
+.ctrl-label { font-size: 13px; color: #999; }
+.ctrl-hint { font-size: 11px; color: #ccc; }
+
+.support-bar { margin: 0 12px 8px; background: #fff; border-radius: 14px; padding: 12px 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.support-track { height: 32px; border-radius: 16px; overflow: hidden; background: #f0f0f0; }
+.support-fill.a { background: #1989fa; transition: flex .3s; cursor: pointer; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; min-width: 0; overflow: hidden; }
+.support-fill.b { background: #e74c3c; transition: flex .3s; cursor: pointer; display: flex; align-items: center; padding-left: 8px; min-width: 0; overflow: hidden; }
+.support-inner { display: flex; height: 100%; }
+.support-divider {
+  position: absolute; top: 50%; transform: translate(-50%, -50%);
+  font-size: 26px;  pointer-events: none; line-height: 1;
+  color: #ffd700;
+  text-shadow: 0 0 8px #ffd700, 0 0 2px #fff;
+  filter: drop-shadow(0 0 2px rgba(0,0,0,.3));
+  animation: flicker 1.5s ease-in-out infinite alternate;
+}
+@keyframes flicker {
+  0% { transform: translate(-50%, -50%) scale(1); }
+  100% { transform: translate(-50%, -50%) scale(1.2); }
+}
+.support-avatars { display: flex; align-items: center; gap: 1px; flex-shrink: 0; }
+.support-av { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid #fff; object-fit: cover; margin-left: -6px; }
+.support-av:first-child { margin-left: 0; }
+.support-labels { display: flex; justify-content: space-between; margin-top: 6px; }
+.support-label { font-size: 13px; color: #999; cursor: pointer; user-select: none; }
+.support-label .flame { display: inline-block; animation: flicker 1.5s ease-in-out infinite alternate; }
+.support-label.active { color: #1989fa; font-weight: 600; }
+.support-hint { text-align: center; font-size: 10px; color: #ccc; margin-top: 4px; }
 
 .no-role { padding: 60px 20px; text-align: center; }
-.no-role p { color: #667788; font-size: 14px; margin-top: 16px; }
+.no-role p { color: #999; font-size: 14px; margin-top: 16px; }
 </style>

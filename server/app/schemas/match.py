@@ -33,6 +33,11 @@ class MatchOut(BaseModel):
     referee: PlayerInfo | None = None
     status: str
     can_referee: bool = False
+    support_a: int = 0
+    support_b: int = 0
+    my_support: str | None = None
+    support_a_users: list[str] = []
+    support_b_users: list[str] = []
 
     class Config:
         from_attributes = True
@@ -58,3 +63,13 @@ class ScoreUpdate(BaseModel):
 
 class ClaimRefereeRequest(BaseModel):
     match_id: int
+
+
+class SupportUpdate(BaseModel):
+    side: str  # 'a' or 'b'
+
+
+class SupportResponse(BaseModel):
+    support_a: int
+    support_b: int
+    my_side: str | None = None

@@ -22,6 +22,7 @@ export default defineConfig({
     host: '0.0.0.0',
     proxy: {
       '/api': `http://${API_HOST}:8000`,
+      '/static': `http://${API_HOST}:8000`,
       '/ws': {
         target: `ws://${API_HOST}:8000`,
         ws: true,

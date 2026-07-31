@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
+    UniqueConstraint,
     String, Integer, Boolean, DateTime, ForeignKey, func, Enum as SAEnum,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -93,4 +94,15 @@ class Notification(Base):
     type: Mapped[str] = mapped_column(String(32), default="schedule_changed")
     message: Mapped[str] = mapped_column(String(512))
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MatchSupport(Base):
+    __tablename__ = "match_supports"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    __table_args__ = (UniqueConstraint("match_id", "user_id"),)
+    side: Mapped[str] = mapped_column(String(1), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

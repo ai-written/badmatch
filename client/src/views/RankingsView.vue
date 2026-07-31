@@ -2,6 +2,9 @@
   <div class="rank-page">
     <van-nav-bar title="积分榜" left-text="返回" left-arrow @click-left="$router.back()" />
 
+    <div class="rank-scroll">
+    <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+      <div class="pull-inner">
     <van-loading v-if="!ranking" class="loading" />
     <template v-else>
       <div class="rank-head">
@@ -16,30 +19,40 @@
           class="rank-row"
           :class="{ active: p.user_id === auth.user?.id, dropped: !p.is_active }"
         >
-          <span class="col-rank">{{ p.is_active ? p.rank : '-' }}</span>
+          <span class="col-rank">
+            <template v-if="p.is_active && p.rank === 1">🥇</template>
+            <template v-else-if="p.is_active && p.rank === 2">🥈</template>
+            <template v-else-if="p.is_active && p.rank === 3">🥉</template>
+            <template v-else>{{ p.is_active ? p.rank : '-' }}</template>
+          </span>
           <div class="col-player">
-            <van-image round width="36" height="36" :src="p.avatar || defaultAvatar" />
+            <van-image round width="28" height="28" :src="p.avatar || defaultAvatar" />
             <span class="p-name">{{ p.username }}</span>
           </div>
-          <div class="col-stats">
-            <span>{{ p.matches_won }}胜{{ p.matches_lost }}负</span>
-            <em :class="p.point_diff >= 0 ? 'positive' : 'negative'">{{ p.point_diff > 0 ? '+' : '' }}{{ p.point_diff }}</em>
-          </div>
+          <span class="col-wl"><em class="wl-win">{{ p.matches_won }}</em>-{{ p.matches_lost }}</span>
+          <span class="col-diff" :class="p.point_diff >= 0 ? 'positive' : 'negative'">{{ p.point_diff > 0 ? '+' : '' }}{{ p.point_diff }}</span>
           <span class="col-rate">{{ winRate(p) }}%</span>
         </div>
       </div>
     </template>
+      </div>
+    </van-pull-refresh>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
+import { useWebSocket } from '@/composables/useWebSocket'
 
 const route = useRoute()
 const auth = useAuthStore()
+const tid = Number(route.params.id)
+const { lastMessage } = useWebSocket(tid)
+const refreshing = ref(false)
 const ranking = ref<any>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
@@ -60,6 +73,10 @@ async function fetchRankings() {
   ranking.value = res.data
 }
 
+async function onRefresh() {
+  try { await fetchRankings() } finally { refreshing.value = false }
+}
+watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRankings() })
 onMounted(async () => {
   await auth.fetchMe()
   await fetchRankings()
@@ -67,7 +84,10 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.rank-page { height: 100vh; overflow-y: auto; background: #f0f2f5; padding-bottom: 60px; }
+.rank-page { height: 100vh; display: flex; flex-direction: column; background: #f0f2f5; }
+.rank-scroll { flex: 1; overflow-y: auto; }
+.pull-fill { min-height: 100%; }
+.pull-inner { padding-bottom: 60px; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .rank-head { padding: 14px 16px 8px; }
 .rank-head h3 { font-size: 17px; font-weight: 700; }
@@ -82,12 +102,13 @@ onMounted(async () => {
 .rank-row.active { background: #e8f5e9; }
 .rank-row.dropped { opacity: .45; background: #fafafa; }
 
-.col-rank { width: 28px; font-weight: 700; font-size: 16px; color: #333; }
-.col-player { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.col-rank { width: 22px; font-weight: 700; font-size: 15px; color: #333; text-align: center; flex-shrink: 0; }
+.col-player { flex: 1.5; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .p-name { font-size: 12px; color: #333; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-stats { width: 90px; text-align: center; font-size: 13px; color: #666; display: flex; flex-direction: column; gap: 2px; }
-.col-stats em { font-style: normal; font-size: 11px; }
+.col-wl { flex: 1; text-align: center; font-size: 15px; color: #666; letter-spacing: 2px; }
+.wl-win { font-style: normal; color: #e74c3c; font-weight: 600; margin-right: 2px; }
+.col-diff { flex: 1; text-align: center; font-size: 15px; font-weight: 600; }
 .positive { color: #07c160; }
 .negative { color: #e74c3c; }
-.col-rate { width: 40px; text-align: right; font-weight: 700; font-size: 15px; color: #333; }
+.col-rate { flex: 1; text-align: center; font-weight: 700; font-size: 17px; color: #333; }
 </style>

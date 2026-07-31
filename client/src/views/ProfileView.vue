@@ -1,6 +1,7 @@
 <template>
   <div class="profile-page">
     <template v-if="!auth.user">
+      <div class="form-scroll">
       <van-tabs v-model:active="loginTab" class="auth-tabs" color="#1989fa">
         <van-tab title="登录" />
         <van-tab title="注册" />
@@ -30,9 +31,13 @@
         </van-cell-group>
         <div class="form-submit"><van-button round block type="primary" native-type="submit" :loading="submitting">注册</van-button></div>
       </van-form>
+      </div>
     </template>
 
     <template v-else>
+      <div class="profile-scroll">
+      <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+      <div class="pull-inner">
       <div class="profile-header">
         <div class="avatar-wrapper" @click="triggerUpload">
           <van-image round width="72" height="72" :src="auth.user.avatar || defaultAvatar" />
@@ -67,6 +72,9 @@
       <div class="logout-btn">
         <van-button plain type="danger" block @click="auth.logout()">退出登录</van-button>
       </div>
+      </div>
+      </van-pull-refresh>
+      </div>
     </template>
 
     <van-dialog v-model:show="showEditGender" title="修改性别" show-cancel-button @confirm="saveGender">
@@ -94,6 +102,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const hasUsers = ref(false)
 const loginTab = ref(0)
+const refreshing = ref(false)
 const submitting = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
@@ -152,6 +161,16 @@ async function savePassword() {
   try { await api.put('/auth/me/password', { old_password: oldPwd.value, new_password: newPwd.value }); showToast('密码已修改'); oldPwd.value = ''; newPwd.value = '' } catch {}
 }
 
+async function onRefresh() {
+  try {
+    await fetchStats()
+    await auth.fetchMe()
+    if (auth.user?.invite_code) inviteCode.value = auth.user.invite_code
+  } finally {
+    refreshing.value = false
+  }
+}
+
 onMounted(async () => {
   try { const r = await api.get('/auth/has-users'); hasUsers.value = r.data.exists } catch {}
   const urlParams = new URLSearchParams(window.location.search)
@@ -163,7 +182,11 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.profile-page { height: 100vh; overflow-y: auto; background: #f5f6f8; padding-bottom: 60px; }
+.profile-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.profile-scroll { flex: 1; overflow-y: auto; }
+.pull-fill { min-height: 100%; }
+.pull-inner { padding-bottom: 60px; }
+.form-scroll { flex: 1; overflow-y: auto; padding-bottom: 60px; }
 .auth-tabs { margin-top: 0; }
 .auth-form { margin-top: 16px; }
 .form-submit { margin: 16px; }

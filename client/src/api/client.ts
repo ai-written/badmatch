@@ -1,15 +1,37 @@
 import axios from 'axios'
-import { showFailToast } from 'vant'
+import { showFailToast, showLoadingToast } from 'vant'
 
 const api = axios.create({
   baseURL: '/api',
   timeout: 10000,
 })
 
+// --- global loading ---
+let pendingCount = 0
+let loadingTimer: ReturnType<typeof setTimeout> | null = null
+let closeLoading: (() => void) | null = null
+
+function showLoading() {
+  loadingTimer = setTimeout(() => {
+    const toast = showLoadingToast({ message: '加载中...', forbidClick: true, duration: 0 })
+    closeLoading = toast.close
+  }, 200)
+}
+
+function hideLoading() {
+  if (loadingTimer) { clearTimeout(loadingTimer); loadingTimer = null }
+  if (closeLoading) { closeLoading(); closeLoading = null }
+}
+// --- end global loading ---
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+  if (!(config as any).skipLoading) {
+    pendingCount++
+    if (pendingCount === 1) showLoading()
   }
   return config
 })
@@ -19,8 +41,19 @@ function toastError(msg: string) {
 }
 
 api.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    if (!(res.config as any).skipLoading) {
+      pendingCount--
+      if (pendingCount <= 0) { pendingCount = 0; hideLoading() }
+    }
+    return res
+  },
   (err) => {
+    if (!err.config?.skipLoading) {
+      pendingCount--
+      if (pendingCount <= 0) { pendingCount = 0; hideLoading() }
+    }
+
     if (err.config?.skipGlobalError) {
       return Promise.reject(err)
     }

@@ -3,14 +3,16 @@
     <!-- Header -->
     <div class="top-header">
       <div class="header-title">
-        <van-icon name="location-o" size="16" />
-        <span>羽毛球赛事</span>
+        <img src="/favicon.png" class="header-logo" />
+        <span>爱玩羽社</span>
       </div>
       <van-icon name="plus" size="22" class="add-btn" @click="$router.push('/create')" />
     </div>
 
     <!-- List -->
-    <van-pull-refresh v-model="refreshing" @refresh="onRefresh">
+    <div class="home-scroll">
+    <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+      <div class="pull-inner">
       <van-list v-model:loading="store.loading" :finished="finished" @load="onLoad">
         <div
           v-for="t in store.list"
@@ -24,7 +26,7 @@
               <van-icon name="location-o" size="11" />
               {{ t.location || '待定' }}
             </div>
-            <div class="t-card-date">{{ formatDate(t.start_date) }} ~ {{ formatDate(t.end_date) }}</div>
+            <div class="t-card-date">{{ fmtDateTime(t.start_date, t.end_date) }}</div>
           </div>
           <div class="t-card-right">
             <van-tag :type="statusType(t.status)" size="medium" round>{{ statusLabel(t.status) }}</van-tag>
@@ -33,12 +35,14 @@
           </div>
         </div>
       </van-list>
+    </div>
     </van-pull-refresh>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { useTournamentStore } from '@/stores/tournament'
 
 const store = useTournamentStore()
@@ -47,27 +51,42 @@ const finished = ref(false)
 
 function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
 function statusLabel(s: string) { return s === 'open' ? '报名中' : s === 'ongoing' ? '进行中' : '已结束' }
-function formatDate(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(5, 16) }
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+function fmtDateTime(start: string, end: string) {
+  if (!start || !end) return ''
+  const d = new Date(start)
+  const y = d.getFullYear()
+  const m = d.getMonth() + 1
+  const day = d.getDate()
+  const w = WEEKDAYS[d.getDay()]
+  return `${y}年${m}月${day}日(${w}) ${start.slice(11, 16)}~${end.slice(11, 16)}`
+}
 
 async function onLoad() {
-  await store.fetchList()
   finished.value = true
+  await store.fetchList()
 }
 
 async function onRefresh() {
   finished.value = false
   store.list = []
-  await store.fetchList()
-  refreshing.value = false
-  finished.value = true
+  try {
+    await store.fetchList()
+  } finally {
+    refreshing.value = false
+    finished.value = true
+  }
 }
 
-onMounted(() => onLoad())
 </script>
 
 <style scoped>
-.home-page {  background: #f5f6f8; }
+.home-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.home-scroll { flex: 1; overflow-y: auto; }
+.pull-fill { min-height: 100%; }
+.pull-inner { padding-bottom: 60px; }
 
+.header-logo { width: 20px; height: 20px; border-radius: 4px; }
 .top-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 16px 6px; background: #1989fa;

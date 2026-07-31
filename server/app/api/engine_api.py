@@ -9,7 +9,12 @@ from app.core.security import require_user
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
+from pydantic import BaseModel
 from app.engine.scheduler import generate_schedule, compute_match_count, compute_rounds
+
+
+class StartRequest(BaseModel):
+    total_matches: int | None = None
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["engine"])
 
@@ -17,6 +22,7 @@ router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["engine"])
 @router.post("/start")
 async def start_tournament(
     tournament_id: int,
+    body: StartRequest | None = None,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -41,12 +47,9 @@ async def start_tournament(
     if len(player_ids) < 4:
         raise HTTPException(status_code=400, detail="至少需要 4 人参赛")
 
-    # check player count
-    if tournament.total_matches and len(player_ids) != tournament.max_participants:
-        raise HTTPException(
-            status_code=400,
-            detail=f"当前报名人数({len(player_ids)})与创建时设定({tournament.max_participants})不一致，请重新选择场次",
-        )
+    # update total_matches if provided
+    if body and body.total_matches is not None:
+        tournament.total_matches = body.total_matches
     M = compute_match_count(len(player_ids))
     if tournament.total_matches:
         M = tournament.total_matches

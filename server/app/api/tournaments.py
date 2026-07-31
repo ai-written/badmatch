@@ -7,6 +7,7 @@ from app.models.user import User
 from app.models.tournament import (
     Tournament, TournamentStatus, Registration, PlayerStats, Court, TimeSlot,
 )
+from app.core.websocket import manager
 from app.schemas.tournament import (
     TournamentCreate, TournamentBrief, TournamentDetail, RegistrationOut, CourtOut, TimeSlotOut,
 )
@@ -141,6 +142,7 @@ async def register(
         else:
             reg.is_active = True
             await db.flush()
+            await manager.broadcast(tournament_id, {"type": "registration_updated"})
             return {"ok": True}
 
     cnt_result = await db.execute(
@@ -154,6 +156,7 @@ async def register(
 
     db.add(Registration(tournament_id=tournament_id, user_id=user.id))
     await db.flush()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 
@@ -174,6 +177,7 @@ async def cancel_register(
         raise HTTPException(status_code=400, detail="未报名")
     reg.is_active = False
     await db.flush()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 
@@ -266,8 +270,9 @@ async def match_options(num_players: int):
     while start < 6:
         start += step
     options = []
-    for i in range(5):
-        m = start + i * step
+    m = start
+    while m <= 30:
         per = (4 * m) // num_players
         options.append({"total": m, "per_person": per})
+        m += step
     return {"options": options, "per_person": (4 * start) // num_players}
