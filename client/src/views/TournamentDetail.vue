@@ -36,18 +36,16 @@
         </van-button>
       </div>
 
-      <div class="player-section" @click="showRegistrations = true">
+      <div class="player-section">
         <div class="player-head">
           <span class="ph-title">已报名 ({{ tournament.registered_count }})</span>
-          <van-icon name="arrow" size="14" color="#999" />
         </div>
         <div class="player-grid" v-if="registrations.length > 0">
-          <div v-for="r in registrations.slice(0, 10)" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
-            <van-image round width="32" height="32" :src="r.avatar || defaultAvatar" />
+          <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
+            <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
             <span class="player-name">{{ r.username }}</span>
             <span class="player-time">{{ formatTime(r.created_at) }}</span>
           </div>
-          <div v-if="registrations.length > 10" class="player-chip more">+{{ registrations.length - 10 }}</div>
         </div>
         <p v-else class="empty-hint">暂无报名</p>
       </div>
@@ -69,8 +67,8 @@
         </van-button>
       </div>
 
-      <van-popup v-model:show="showPlayerStats" round position="bottom" :style="{ height: '45%' }" class="stats-popup">
-        <div class="popup-content">
+    <van-popup v-model:show="showPlayerStats" round position="bottom" :style="{ height: '65%' }" class="stats-popup" lock-scroll>
+       <div class="popup-content" @touchmove.stop>
           <div class="popup-player-head">
             <van-image round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
             <h3>{{ playerDetail.username }}</h3>
@@ -88,19 +86,6 @@
         </div>
       </van-popup>
 
-      <van-popup v-model:show="showRegistrations" round position="bottom" :style="{ height: '55%' }">
-        <div class="popup-content">
-          <h3>报名列表 ({{ tournament.registered_count }})</h3>
-          <div class="popup-grid">
-            <div v-for="r in registrations" :key="r.id" class="popup-player" @click="viewPlayer(r)">
-              <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
-              <span>{{ r.username }}</span>
-              <span class="popup-time">{{ formatTime(r.created_at) }}</span>
-            </div>
-          </div>
-          <van-empty v-if="registrations.length === 0" description="暂无报名" />
-        </div>
-      </van-popup>
     </template>
       </div>
     </div>
@@ -141,7 +126,6 @@ const { lastMessage } = useWebSocket(tid)
 const refreshing = ref(false)
 const tournament = ref<any>(null)
 const registrations = ref<any[]>([])
-const showRegistrations = ref(false)
 const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
@@ -279,9 +263,9 @@ onMounted(async () => {
 .player-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .ph-title { font-size: 15px; font-weight: 600; }
 .player-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.player-chip { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 60px; cursor: pointer; }
-.player-name { font-size: 11px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 56px; }
-.player-time { font-size: 9px; color: #bbb; }
+.player-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 70px; cursor: pointer; }
+.player-name { font-size: 12px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
+.player-time { font-size: 10px; color: #bbb; }
 .player-chip.more { justify-content: center; font-size: 13px; color: #999; cursor: default; }
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
 .nav-block { margin: 8px 12px; }

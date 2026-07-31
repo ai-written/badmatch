@@ -5,7 +5,6 @@
     <van-form @submit="onSubmit" class="create-form">
       <van-cell-group inset>
         <van-field v-model="form.title" label="赛事名称" placeholder="请输入赛事名称" required :rules="[{ required: true, message: '请输入赛事名称' }]" />
-        <van-field v-model="form.description" label="描述" placeholder="赛事描述" type="textarea" />
         <van-field v-model="form.location" label="地点" placeholder="比赛地点" />
 
         <!-- 日期 -->
@@ -13,6 +12,12 @@
 
         <!-- 时间段 -->
         <van-field :model-value="timeDisplay" readonly clickable label="时间段" placeholder="请选择时间段" required :rules="[{ required: true, message: '请选择时间段' }]" @click="showTimePicker = true" />
+
+        <van-field name="halfCourt" label="上下场">
+          <template #input>
+            <van-switch v-model="halfCourt" size="20" />
+          </template>
+        </van-field>
 
         <van-field v-model.number="form.max_participants" label="最大人数" type="digit" placeholder="8" required :rules="[{ required: true, message: '请输入最大人数' }]" @blur="fetchOptions" />
         <van-field v-model.number="form.entry_fee" label="报名费(元)" type="digit" placeholder="0" />
@@ -87,10 +92,10 @@ import { showToast } from 'vant'
 
 const router = useRouter()
 const submitting = ref(false)
+const halfCourt = ref(false)
 
 const form = reactive({
   title: '',
-  description: '',
   location: '',
   start_date: '',
   end_date: '',
@@ -223,24 +228,45 @@ function selectMatch(val: number | null) {
 
 function clean(val: any) { return val === '' || val == null ? null : val }
 
+function buildPayload(title: string, start: string, end: string) {
+  return {
+    title,
+    location: clean(form.location),
+    start_date: start,
+    end_date: end,
+    max_participants: Number(form.max_participants) || 0,
+    entry_fee: (Number(form.entry_fee) || 0) * 100,
+    total_matches: form.total_matches,
+    points_to_win: Number(form.points_to_win) || 11,
+    courts: [],
+  }
+}
+
 async function onSubmit() {
   submitting.value = true
   try {
-    const payload: Record<string, any> = {
-      title: form.title,
-      description: clean(form.description),
-      location: clean(form.location),
-      start_date: form.start_date,
-      end_date: form.end_date,
-      max_participants: Number(form.max_participants) || 0,
-      entry_fee: (Number(form.entry_fee) || 0) * 100,
-      total_matches: form.total_matches,
-      points_to_win: Number(form.points_to_win) || 11,
-      courts: [],
+    if (halfCourt.value) {
+      const sh = startHour.value * 60 + startMinute.value
+      const eh = endHour.value * 60 + endMinute.value
+      const mid = sh + Math.floor((eh - sh) / 2)
+      const mh = Math.floor(mid / 60)
+      const mm = mid % 60
+      const midTime = `${String(mh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`
+      const d = selectedDate.value
+      const y = d.getFullYear()
+      const mo = String(d.getMonth() + 1).padStart(2, '0')
+      const day = String(d.getDate()).padStart(2, '0')
+      const dp = `${y}-${mo}-${day}T`
+      const st = `${String(startHour.value).padStart(2, '0')}:${String(startMinute.value).padStart(2, '0')}:00`
+      const et = `${String(endHour.value).padStart(2, '0')}:${String(endMinute.value).padStart(2, '0')}:00`
+      await api.post('/tournaments', buildPayload(form.title + '（上半场）', dp + st, dp + midTime))
+      await api.post('/tournaments', buildPayload(form.title + '（下半场）', dp + midTime, dp + et))
+      showToast('上下场赛事已创建')
+    } else {
+      await api.post('/tournaments', buildPayload(form.title, form.start_date, form.end_date))
+      showToast('创建成功')
     }
-    const res = await api.post('/tournaments', payload)
-    showToast('创建成功')
-    router.replace(`/tournament/${res.data.id}`)
+    router.replace('/')
   } catch {} finally { submitting.value = false }
 }
 

@@ -185,8 +185,8 @@ onMounted(async () => {
 .profile-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
 .profile-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; }
-.form-scroll { flex: 1; overflow-y: auto; padding-bottom: 60px; }
+.pull-inner { padding-bottom: 80px; }
+.form-scroll { flex: 1; overflow-y: auto; padding-bottom: 80px; }
 .auth-tabs { margin-top: 0; }
 .auth-form { margin-top: 16px; }
 .form-submit { margin: 16px; }

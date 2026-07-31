@@ -166,7 +166,7 @@ function swapTeams() { swapped.value = !swapped.value }
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
-  const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`)
+  const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
   match.value = res.data
 }
 
@@ -174,7 +174,7 @@ async function doSupport(side: string) {
   if (!canSupport.value || match.value?.status === 'finished') return
   const actualSide = swapped.value ? (side === 'a' ? 'b' : 'a') : side
   try {
-    const res = await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/support`, { side: actualSide })
+    const res = await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/support`, { side: actualSide }, { skipLoading: true } as any)
     match.value.support_a = res.data.support_a
     match.value.support_b = res.data.support_b
     match.value.my_support = actualSide
@@ -186,7 +186,7 @@ let pendingScore: { score_a: number; score_b: number } | null = null
 
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
-  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, pendingScore).catch(() => {})
+  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, pendingScore, { skipLoading: true } as any).catch(() => {})
   pendingScore = null
 }
 
