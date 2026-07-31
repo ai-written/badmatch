@@ -34,6 +34,8 @@ async def list_tournaments(
             )
         )
         registered_count = cnt_result.scalar() or 0
+        court_result = await db.execute(select(Court).where(Court.tournament_id == t.id).order_by(Court.sort_order).limit(1))
+        first_court = court_result.scalar_one_or_none()
         out.append(TournamentBrief(
             id=t.id,
             title=t.title,
@@ -46,6 +48,7 @@ async def list_tournaments(
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
             registered_count=registered_count,
+            court_name=first_court.name if first_court else None,
             created_at=t.created_at.isoformat() if t.created_at else "",
         ))
     return out
@@ -107,9 +110,33 @@ async def delete_tournament(
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
     if t.creator_id != user.id:
-        raise HTTPException(status_code=403, detail="只有创建者可以删除")
+        if user.role != "admin":
+            raise HTTPException(status_code=403, detail="只有创建者可以删除")
     if t.status != TournamentStatus.OPEN:
-        raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
+        if user.role != "admin":
+            raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
+
+    # delete related courts and time slots
+    # delete match supports, matches, pairings, rounds
+    from app.models.round import Round, RoundPairing, Match, MatchSupport, Notification
+    matches = await db.execute(select(Match.id).where(Match.tournament_id == tournament_id))
+    for (mid,) in matches.all():
+        await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
+    rounds = await db.execute(select(Round.id).where(Round.tournament_id == tournament_id))
+    for (rid,) in rounds.all():
+        await db.execute(delete(Match).where(Match.round_id == rid))
+        await db.execute(delete(RoundPairing).where(RoundPairing.round_id == rid))
+        await db.execute(delete(Round).where(Round.id == rid))
+    # delete player stats and notifications
+    await db.execute(delete(PlayerStats).where(PlayerStats.tournament_id == tournament_id))
+    await db.execute(delete(Notification).where(Notification.tournament_id == tournament_id))
+    from app.models.tournament import Court, TimeSlot
+    courts = await db.execute(select(Court).where(Court.tournament_id == tournament_id))
+    for court in courts.scalars().all():
+        await db.execute(delete(TimeSlot).where(TimeSlot.court_id == court.id))
+        await db.delete(court)
+    # delete registrations  
+    await db.execute(delete(Registration).where(Registration.tournament_id == tournament_id))
 
     await db.delete(t)
     await db.flush()

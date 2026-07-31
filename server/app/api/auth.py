@@ -64,6 +64,7 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.put("/me/profile")
 async def update_profile(
+    username: str = "",
     avatar: str = "",
     gender: str = "",
     user: User = Depends(get_current_user),
@@ -71,6 +72,11 @@ async def update_profile(
 ):
     if user is None:
         raise HTTPException(status_code=401)
+    if username:
+        exist = await db.execute(select(User).where(User.username == username, User.id != user.id))
+        if exist.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="用户名已存在")
+        user.username = username
     if avatar:
         user.avatar = avatar
     if gender:

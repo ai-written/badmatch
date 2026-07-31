@@ -48,8 +48,8 @@
       </div>
 
       <van-cell-group inset>
-        <van-cell title="用户名" :value="auth.user.username" />
-        <van-cell title="性别" is-link :value="auth.user.gender === 'M' ? '男' : auth.user.gender === 'F' ? '女' : '未设置'" @click="showEditGender = true" />
+        <van-cell title="用户名" is-link :value="auth.user.username" @click="newUsername = auth.user?.username || ''; showEditName = true" />
+        <van-cell title="性别" is-link :value="auth.user.gender === 'M' ? '男' : auth.user.gender === 'F' ? '女' : '未设置'" @click="editGender = auth.user?.gender || ''; showEditGender = true" />
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px">
@@ -88,6 +88,10 @@
       <van-field v-model="oldPwd" type="password" placeholder="原密码" style="margin:8px 0" />
       <van-field v-model="newPwd" type="password" placeholder="新密码（至少6位）" />
     </van-dialog>
+
+    <van-dialog v-model:show="showEditName" title="修改用户名" show-cancel-button @confirm="saveUsername">
+      <van-field v-model="newUsername" placeholder="新用户名" style="margin:10px 0" />
+    </van-dialog>
   </div>
 </template>
 
@@ -116,6 +120,7 @@ const inviteLink = computed(() => inviteCode.value ? `${window.location.origin}$
 
 const showEditGender = ref(false); const editGender = ref('')
 const showEditPwd = ref(false); const oldPwd = ref(''); const newPwd = ref('')
+const showEditName = ref(false); const newUsername = ref('')
 
 async function fetchStats() {
   try { const res = await api.get('/auth/stats'); Object.assign(stats, res.data) } catch {}
@@ -159,6 +164,16 @@ function saveGender() {
 async function savePassword() {
   if (!oldPwd.value || !newPwd.value) return
   try { await api.put('/auth/me/password', { old_password: oldPwd.value, new_password: newPwd.value }); showToast('密码已修改'); oldPwd.value = ''; newPwd.value = '' } catch {}
+}
+
+async function saveUsername() {
+  if (!newUsername.value) return
+  try {
+    await api.put('/auth/me/profile', { username: newUsername.value })
+    auth.user!.username = newUsername.value
+    showToast('用户名已修改')
+    newUsername.value = ''
+  } catch {}
 }
 
 async function onRefresh() {

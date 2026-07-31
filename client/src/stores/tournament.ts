@@ -12,6 +12,7 @@ export interface TournamentBrief {
   entry_fee: number
   status: string
   registered_count: number
+  court_name: string | null
   created_at: string
 }
 

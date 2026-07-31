@@ -2,6 +2,7 @@
 引擎触发 API: 开始赛事、退赛重排
 """
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.core.database import get_db
@@ -9,6 +10,7 @@ from app.core.security import require_user
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
+from app.models.round import MatchSupport
 from pydantic import BaseModel
 from app.engine.scheduler import generate_schedule, compute_match_count, compute_rounds
 
@@ -91,10 +93,14 @@ async def start_tournament(
     return {"ok": True, "rounds": len(rounds_data), "matches": M}
 
 
+class WithdrawBody(BaseModel):
+    new_creator_id: int | None = None
+
 @router.post("/withdraw/{player_id}")
 async def withdraw_player(
     tournament_id: int,
     player_id: int,
+    body: WithdrawBody = WithdrawBody(),
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -102,8 +108,26 @@ async def withdraw_player(
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404)
-    if tournament.creator_id != user.id:
-        raise HTTPException(status_code=403)
+    is_self = player_id == user.id
+    if not is_self and tournament.creator_id != user.id:
+        raise HTTPException(status_code=403, detail="无权操作")
+
+    # self-withdraw before tournament starts: just cancel registration
+    if is_self and tournament.status == TournamentStatus.OPEN:
+        reg = await db.execute(
+            select(Registration).where(
+                Registration.tournament_id == tournament_id,
+                Registration.user_id == user.id,
+                Registration.is_active == True,
+            )
+        )
+        r = reg.scalar_one_or_none()
+        if not r:
+            raise HTTPException(status_code=400, detail="未报名")
+        r.is_active = False
+        await db.flush()
+        return {"ok": True, "message": "已取消报名"}
+
     if tournament.status != TournamentStatus.ONGOING:
         raise HTTPException(status_code=400, detail="赛事未在进行中")
 
@@ -117,6 +141,24 @@ async def withdraw_player(
     if not ps or not ps.is_active:
         raise HTTPException(status_code=400, detail="选手不存在或已退赛")
     ps.is_active = False
+
+    from app.models.user import User as UserModel
+    # handle creator transfer
+    if tournament.creator_id == player_id and body.new_creator_id:
+        new_creator = await db.execute(select(UserModel).where(UserModel.id == body.new_creator_id))
+        if new_creator.scalar_one_or_none():
+            tournament.creator_id = body.new_creator_id
+    elif tournament.creator_id == player_id:
+        remaining_players = await db.execute(
+            select(PlayerStats.user_id).where(
+                PlayerStats.tournament_id == tournament_id,
+                PlayerStats.is_active == True,
+                PlayerStats.user_id != player_id,
+            ).limit(1)
+        )
+        first = remaining_players.scalar_one_or_none()
+        if first:
+            tournament.creator_id = first
 
     completed_rounds = await db.execute(
         select(Round).where(
@@ -138,6 +180,10 @@ async def withdraw_player(
         ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id != None))
         for m in ms.scalars().all():
             affected_referees.add(m.referee_id)
+        # delete match supports first
+        match_ids = await db.execute(select(Match.id).where(Match.round_id == r.id))
+        for (mid,) in match_ids.all():
+            await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
         await db.execute(delete(Match).where(Match.round_id == r.id))
         await db.execute(delete(RoundPairing).where(RoundPairing.round_id == r.id))
         await db.execute(delete(Round).where(Round.id == r.id))

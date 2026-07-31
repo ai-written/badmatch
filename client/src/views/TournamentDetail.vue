@@ -2,7 +2,7 @@
   <div class="detail-page">
     <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="$router.back()">
       <template #right>
-        <van-icon v-if="isCreator && tournament?.status === 'open'" name="delete-o" size="20" @click="doDelete" />
+        <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
       </template>
     </van-nav-bar>
 
@@ -20,6 +20,7 @@
         <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
         <div class="info-grid">
           <div class="ig-item"><van-icon name="location-o" /><span>{{ tournament.location || '待定' }}</span></div>
+          <div class="ig-item" v-if="tournament.courts && tournament.courts.length > 0"><van-icon name="guide-o" /><span>场地号{{ tournament.courts[0].name }}</span></div>
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="gold-coin-o" /><span>{{ tournament.entry_fee > 0 ? `¥${Math.round(tournament.entry_fee / 100)}` : '免费' }}</span></div>
@@ -31,8 +32,14 @@
         <van-button type="primary" block round :disabled="tournament.is_registered" @click="doRegister">
           {{ tournament.is_registered ? '已报名' : '立即报名' }}
         </van-button>
-        <van-button v-if="tournament.is_registered" plain block round style="margin-top:8px" @click="doCancelRegister">
+        <van-button v-if="tournament.is_registered && tournament.status === 'open'" plain block round style="margin-top:8px" @click="doCancelRegister">
           取消报名
+        </van-button>
+      </div>
+
+      <div class="action-block" v-if="tournament.is_registered && tournament.status === 'ongoing'">
+        <van-button type="warning" plain block round @click="doWithdraw">
+          退出比赛
         </van-button>
       </div>
 
@@ -42,7 +49,10 @@
         </div>
         <div class="player-grid" v-if="registrations.length > 0">
           <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
-            <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+            <div class="avatar-badge-sm">
+              <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+              <span v-if="r.user_id === tournament.creator_id" class="host-badge">房主</span>
+            </div>
             <span class="player-name">{{ r.username }}</span>
             <span class="player-time">{{ formatTime(r.created_at) }}</span>
           </div>
@@ -107,6 +117,27 @@
         </van-cell-group>
       </van-popup>
 
+    <van-popup v-model:show="showTransferPicker" round position="bottom" :style="{ height: '50%' }" lock-scroll>
+      <div class="popup-content" @touchmove.stop>
+        <h3>选择新房主</h3>
+        <div class="popup-grid">
+          <div
+            v-for="r in registrations.filter(p => p.user_id !== auth.user?.id)"
+            :key="r.id"
+            class="transfer-player"
+            :class="{ selected: selectedNewCreator === r.user_id }"
+            @click="selectedNewCreator = r.user_id"
+          >
+            <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+            <span>{{ r.username }}</span>
+          </div>
+        </div>
+        <div style="padding: 12px 16px;">
+          <van-button type="primary" block round :disabled="!selectedNewCreator" @click="doTransferAndWithdraw">确认转让并退出</van-button>
+        </div>
+      </div>
+    </van-popup>
+
 </template>
 
 <script setup lang="ts">
@@ -128,6 +159,8 @@ const tournament = ref<any>(null)
 const registrations = ref<any[]>([])
 const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
+const showTransferPicker = ref(false)
+const selectedNewCreator = ref(0)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const matchTotal = ref(0)
 const playerDetail = ref<any>({})
@@ -135,6 +168,11 @@ const playerStats = ref<any>({})
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
+const canDelete = computed(() => {
+  if (!auth.user || !tournament.value) return false
+  if (auth.user.role === 'admin') return true
+  return auth.user.id === tournament.value.creator_id && tournament.value.status === 'open'
+})
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
 
 const WEEKDAYS2 = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
@@ -177,6 +215,34 @@ async function doCancelRegister() {
   await api.post(`/tournaments/${route.params.id}/cancel-register`)
   showToast('已取消报名')
   await Promise.all([fetchDetail(), fetchRegistrations()])
+}
+
+async function doWithdraw() {
+  const iAmCreator = auth.user?.id === tournament.value?.creator_id
+  if (iAmCreator) {
+    showTransferPicker.value = true
+    return
+  } else {
+    try { await showConfirmDialog({ title: '确认退出', message: '退出比赛后赛程将重新排列，确定退出？' }) } catch { return }
+    await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
+    showToast('已退出比赛')
+    await fetchDetail()
+  }
+}
+
+async function doTransferAndWithdraw() {
+  if (!selectedNewCreator.value) return
+  try {
+    const target = registrations.value.find(r => r.user_id === selectedNewCreator.value)
+    await showConfirmDialog({
+      title: '转让房主并退出',
+      message: `退出后房主将转让给 ${target?.username || '所选用户'}，确定退出？`,
+    })
+  } catch { return }
+  await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
+  showToast('已退出比赛')
+  showTransferPicker.value = false
+  await fetchDetail()
 }
 async function fetchMatchOptionsForStart() {
   const n = tournament.value?.registered_count || 0
@@ -265,6 +331,12 @@ onMounted(async () => {
 .player-grid { display: flex; flex-wrap: wrap; gap: 8px; }
 .player-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 70px; cursor: pointer; }
 .player-name { font-size: 12px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
+.avatar-badge-sm { position: relative; display: inline-block; }
+.host-badge {
+  position: absolute; top: -2px; left: -2px;
+  font-size: 8px; color: #fff; background: #e74c3c;
+  padding: 0 3px; border-radius: 6px; line-height: 14px; white-space: nowrap;
+}
 .player-time { font-size: 10px; color: #bbb; }
 .player-chip.more { justify-content: center; font-size: 13px; color: #999; cursor: default; }
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
@@ -277,6 +349,12 @@ onMounted(async () => {
 .popup-player span { font-size: 12px; color: #666; }
 .popup-time { font-size: 10px !important; color: #bbb !important; }
 .popup-player-head { display: flex; flex-direction: column; align-items: center; margin-bottom: 16px; }
+.transfer-player {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  width: 68px; cursor: pointer; padding: 6px; border-radius: 8px;
+}
+.transfer-player.selected { background: #e8f4ff; }
+.transfer-player span { font-size: 12px; color: #666; }
 .popup-player-head h3 { margin-top: 8px; }
 
 .picker-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; font-size: 15px; }

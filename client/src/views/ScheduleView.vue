@@ -19,6 +19,7 @@
               <div class="player-block" :class="{ win: m.winner_pairing_id === m.pairing_a.id }">
                 <div class="avatar-badge">
                   <van-image round width="36" height="36" :src="m.pairing_a.player_a.avatar || defaultAvatar" />
+                  <span v-if="m.pairing_a.player_a.id === auth.user?.id" class="me-badge">我</span>
                   <span class="badge-icon" v-if="m.status === 'finished' && m.winner_pairing_id === m.pairing_a.id">🏆</span>
                 </div>
                 <span class="player-name">{{ m.pairing_a.player_a.username }}</span>
@@ -26,6 +27,7 @@
               <div class="player-block" :class="{ win: m.winner_pairing_id === m.pairing_a.id }">
                 <div class="avatar-badge">
                   <van-image round width="36" height="36" :src="m.pairing_a.player_b.avatar || defaultAvatar" />
+                  <span v-if="m.pairing_a.player_b.id === auth.user?.id" class="me-badge">我</span>
                   <span class="badge-icon" v-if="m.status === 'finished' && m.winner_pairing_id === m.pairing_a.id">🏆</span>
                 </div>
                 <span class="player-name">{{ m.pairing_a.player_b.username }}</span>
@@ -50,6 +52,7 @@
               <div class="player-block" :class="{ win: m.winner_pairing_id === m.pairing_b.id }">
                 <div class="avatar-badge">
                   <van-image round width="36" height="36" :src="m.pairing_b.player_a.avatar || defaultAvatar" />
+                  <span v-if="m.pairing_b.player_a.id === auth.user?.id" class="me-badge">我</span>
                   <span class="badge-icon" v-if="m.status === 'finished' && m.winner_pairing_id === m.pairing_b.id">🏆</span>
                 </div>
                 <span class="player-name">{{ m.pairing_b.player_a.username }}</span>
@@ -57,6 +60,7 @@
               <div class="player-block" :class="{ win: m.winner_pairing_id === m.pairing_b.id }">
                 <div class="avatar-badge">
                   <van-image round width="36" height="36" :src="m.pairing_b.player_b.avatar || defaultAvatar" />
+                  <span v-if="m.pairing_b.player_b.id === auth.user?.id" class="me-badge">我</span>
                   <span class="badge-icon" v-if="m.status === 'finished' && m.winner_pairing_id === m.pairing_b.id">🏆</span>
                 </div>
                 <span class="player-name">{{ m.pairing_b.player_b.username }}</span>

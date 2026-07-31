@@ -237,7 +237,13 @@ const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
 watch(lastMessage, (msg) => {
   if (!msg) return
-  if (msg.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) fetchMatch()
+  if (msg.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) {
+    if (!pendingScore) {
+      if (msg.score_a != null) match.value.score_a = msg.score_a
+      if (msg.score_b != null) match.value.score_b = msg.score_b
+    }
+    if (msg.status) match.value.status = msg.status
+  }
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
     match.value.support_a = msg.support_a
     match.value.support_b = msg.support_b

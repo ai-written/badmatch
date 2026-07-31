@@ -56,6 +56,7 @@ class TournamentBrief(BaseModel):
     entry_fee: int
     status: str
     registered_count: int = 0
+    court_name: str | None = None
     total_matches: int | None = None
     points_to_win: int = 11
     points_to_win: int = 11

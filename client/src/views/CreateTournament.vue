@@ -6,6 +6,7 @@
       <van-cell-group inset>
         <van-field v-model="form.title" label="赛事名称" placeholder="请输入赛事名称" required :rules="[{ required: true, message: '请输入赛事名称' }]" />
         <van-field v-model="form.location" label="地点" placeholder="比赛地点" />
+        <van-field v-model="form.court" label="场地号" placeholder="如 A1、1号场" />
 
         <!-- 日期 -->
         <van-field :model-value="dateDisplay" readonly clickable label="日期" placeholder="请选择日期" required :rules="[{ required: true, message: '请选择日期' }]" @click="showCalendar = true" />
@@ -97,6 +98,7 @@ const halfCourt = ref(false)
 const form = reactive({
   title: '',
   location: '',
+  court: '',
   start_date: '',
   end_date: '',
   max_participants: 8,
@@ -238,7 +240,7 @@ function buildPayload(title: string, start: string, end: string) {
     entry_fee: (Number(form.entry_fee) || 0) * 100,
     total_matches: form.total_matches,
     points_to_win: Number(form.points_to_win) || 11,
-    courts: [],
+    courts: form.court ? [{ name: form.court, sort_order: 0 }] : [],
   }
 }
 

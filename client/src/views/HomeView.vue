@@ -25,6 +25,9 @@
             <div class="t-card-meta">
               <van-icon name="location-o" size="11" />
               {{ t.location || '待定' }}
+              <template v-if="t.court_name">
+                <span class="t-card-court">场地号{{ t.court_name }}</span>
+              </template>
             </div>
             <div class="t-card-date">{{ fmtDateTime(t.start_date, t.end_date) }}</div>
           </div>
@@ -103,6 +106,7 @@ async function onRefresh() {
 .t-card-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-card-meta { font-size: 12px; color: #999; display: flex; align-items: center; gap: 3px; margin-bottom: 2px; }
 .t-card-date { font-size: 11px; color: #bbb; }
+.t-card-court { font-size: 11px; color: #1989fa; background: #e8f4ff; padding: 0 4px; border-radius: 3px; margin-left: 6px; }
 .t-card-right { text-align: center; flex-shrink: 0; margin-left: 10px; }
 .t-card-count { font-size: 13px; color: #666; margin-top: 4px; }
 .t-card-fee { font-size: 13px; color: #e74c3c; font-weight: 600; }
