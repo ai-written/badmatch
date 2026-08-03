@@ -226,7 +226,7 @@ async function doWithdraw() {
     try { await showConfirmDialog({ title: '确认退出', message: '退出比赛后赛程将重新排列，确定退出？' }) } catch { return }
     await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
     showToast('已退出比赛')
-    await fetchDetail()
+    await Promise.all([fetchDetail(), fetchRegistrations()])
   }
 }
 
@@ -242,7 +242,7 @@ async function doTransferAndWithdraw() {
   await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
   showToast('已退出比赛')
   showTransferPicker.value = false
-  await fetchDetail()
+  await Promise.all([fetchDetail(), fetchRegistrations()])
 }
 async function fetchMatchOptionsForStart() {
   const n = tournament.value?.registered_count || 0

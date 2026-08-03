@@ -20,6 +20,10 @@ export default defineConfig({
   },
   server: {
     host: '0.0.0.0',
+    watch: {
+      // Windows -> Docker bind mount 常不触发文件事件，轮询可保证 HMR 生效
+      usePolling: true,
+    },
     proxy: {
       '/api': `http://${API_HOST}:8000`,
       '/static': `http://${API_HOST}:8000`,

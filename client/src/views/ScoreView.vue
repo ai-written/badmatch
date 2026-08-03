@@ -69,17 +69,42 @@
       </div>
 
       <div v-if="isReferee" class="controls">
-        <div class="ctrl-row">
-          <button class="ctrl-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('a'))">+1</button>
-          <span class="ctrl-label">左队加分</span>
-          <span class="ctrl-label">右队加分</span>
-          <button class="ctrl-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('b'))">+1</button>
-        </div>
-        <div class="ctrl-row">
-          <button class="ctrl-btn minus" :disabled="match.status === 'finished' || leftScore <= 0" @click="subScore(swapSide('a'))" >-1</button>
-          <span class="ctrl-hint">减分</span>
-          <span class="ctrl-hint">减分</span>
-          <button class="ctrl-btn minus" :disabled="match.status === 'finished' || rightScore <= 0" @click="subScore(swapSide('b'))" >-1</button>
+        <div class="wheel-board">
+          <div class="wheel-side">
+            <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('a'))">+</button>
+            <div
+              class="wheel"
+              :class="{ dragging: wheelSide === 'a' }"
+              @pointerdown="wheelDown($event, 'a')"
+              @pointermove="wheelMove($event)"
+              @pointerup="wheelUp($event)"
+              @pointercancel="wheelUp($event)"
+            >
+              <span class="wheel-item top" :class="{ empty: leftScore === 0 }">{{ leftScore > 0 ? leftScore - 1 : '' }}</span>
+              <span class="wheel-item mid">{{ leftScore }}</span>
+              <span class="wheel-item bot">{{ leftScore + 1 }}</span>
+            </div>
+            <button class="wheel-btn minus" :disabled="match.status === 'finished' || leftScore <= 0" @click="subScore(swapSide('a'))">-</button>
+          </div>
+
+          <div class="wheel-colon">:</div>
+
+          <div class="wheel-side">
+            <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('b'))">+</button>
+            <div
+              class="wheel"
+              :class="{ dragging: wheelSide === 'b' }"
+              @pointerdown="wheelDown($event, 'b')"
+              @pointermove="wheelMove($event)"
+              @pointerup="wheelUp($event)"
+              @pointercancel="wheelUp($event)"
+            >
+              <span class="wheel-item top" :class="{ empty: rightScore === 0 }">{{ rightScore > 0 ? rightScore - 1 : '' }}</span>
+              <span class="wheel-item mid">{{ rightScore }}</span>
+              <span class="wheel-item bot">{{ rightScore + 1 }}</span>
+            </div>
+            <button class="wheel-btn minus" :disabled="match.status === 'finished' || rightScore <= 0" @click="subScore(swapSide('b'))">-</button>
+          </div>
         </div>
         <van-button type="danger" block round size="large" style="margin-top:20px" @click="endMatch" :disabled="match.status === 'finished'">结束比赛</van-button>
       </div>
@@ -183,6 +208,8 @@ async function doSupport(side: string) {
 
 let scoreTimer: ReturnType<typeof setTimeout> | null = null
 let pendingScore: { score_a: number; score_b: number } | null = null
+const wheelSide = ref<string | null>(null)
+let wheelGesture: { id: number; y: number; acc: number; side: string } | null = null
 
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
@@ -214,6 +241,38 @@ async function subScore(side: string) {
   else return
   pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
   scheduleFlush()
+}
+
+function wheelDown(e: PointerEvent, side: string) {
+  if (match.value?.status === 'finished') return
+  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+  wheelGesture = { id: e.pointerId, y: e.clientY, acc: 0, side }
+  wheelSide.value = side
+}
+
+function wheelMove(e: PointerEvent) {
+  const g = wheelGesture
+  if (!g || e.pointerId !== g.id) return
+  // 上滑 clientY 变小，dy 为正代表加分
+  const dy = g.y - e.clientY
+  g.y = e.clientY
+  g.acc += dy
+  const step = 26
+  while (g.acc >= step) {
+    addScore(swapSide(g.side))
+    g.acc -= step
+  }
+  while (g.acc <= -step) {
+    subScore(swapSide(g.side))
+    g.acc += step
+  }
+}
+
+function wheelUp(e: PointerEvent) {
+  const g = wheelGesture
+  if (!g || e.pointerId !== g.id) return
+  wheelGesture = null
+  wheelSide.value = null
 }
 
 async function endMatch() {
@@ -273,14 +332,22 @@ onMounted(async () => { await auth.fetchMe(); await fetchMatch() })
 .swap-hint { margin-top: 4px; font-size: 10px; color: #ccc; }
 
 .controls { padding: 20px 20px 40px; }
-.ctrl-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.ctrl-btn { width: 56px; height: 56px; border-radius: 50%; border: none; font-size: 22px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform .1s, opacity .1s; }
-.ctrl-btn:active { transform: scale(.92); }
-.ctrl-btn.plus { background: #07c160; color: #fff; box-shadow: 0 2px 8px rgba(7,193,96,.3); }
-.ctrl-btn.minus { background: #eee; color: #666; }
-.ctrl-btn:disabled { opacity: .25; }
-.ctrl-label { font-size: 13px; color: #999; }
-.ctrl-hint { font-size: 11px; color: #ccc; }
+
+.wheel-board { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 18px 12px; background: #fff; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.wheel-side { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.wheel-btn { width: 42px; height: 42px; border-radius: 50%; border: none; font-size: 24px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform .1s, opacity .1s; color: #fff; }
+.wheel-btn:active { transform: scale(.92); }
+.wheel-btn.plus { background: #ff9800; box-shadow: 0 2px 8px rgba(255,152,0,.3); }
+.wheel-btn.minus { background: #eee; color: #666; }
+.wheel-btn:disabled { opacity: .3; }
+.wheel { width: 88px; height: 128px; position: relative; overflow: hidden; touch-action: none; user-select: none; }
+.wheel.dragging { background: rgba(25,137,250,.08); box-shadow: inset 0 0 0 3px rgba(25,137,250,.12); }
+.wheel-item { position: absolute; left: 0; right: 0; text-align: center; line-height: 1; font-variant-numeric: tabular-nums; transition: transform .2s, opacity .2s; }
+.wheel-item.top { top: 8px; font-size: 24px; color: #c8c9cc; }
+.wheel-item.mid { top: 50%; transform: translateY(-50%); font-size: 34px; font-weight: 700; color: #323233; }
+.wheel-item.bot { bottom: 8px; font-size: 24px; color: #c8c9cc; }
+.wheel-item.empty { opacity: 0; }
+.wheel-colon { font-size: 44px; font-weight: 600; color: #969799; }
 
 .support-bar { margin: 0 12px 8px; background: #fff; border-radius: 14px; padding: 12px 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
 .support-track { height: 32px; border-radius: 16px; overflow: hidden; background: #f0f0f0; }

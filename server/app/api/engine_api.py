@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.core.database import get_db
 from app.core.security import require_user
+from app.core.websocket import manager
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
@@ -28,7 +29,10 @@ async def start_tournament(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    # 行级锁：并发退赛时串行化读取-修改-写入，避免房主转让被后提交的事务覆盖丢失
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404, detail="赛事不存在")
@@ -126,6 +130,7 @@ async def withdraw_player(
             raise HTTPException(status_code=400, detail="未报名")
         r.is_active = False
         await db.flush()
+        await manager.broadcast(tournament_id, {"type": "registration_updated"})
         return {"ok": True, "message": "已取消报名"}
 
     if tournament.status != TournamentStatus.ONGOING:
@@ -138,8 +143,41 @@ async def withdraw_player(
         )
     )
     ps = stat.scalar_one_or_none()
-    if not ps or not ps.is_active:
-        raise HTTPException(status_code=400, detail="选手不存在或已退赛")
+    if not ps:
+        raise HTTPException(status_code=400, detail="选手不存在")
+
+    # 退赛同时取消报名记录，保证报名列表/报名人数不再显示该选手。
+    # 放在最前兜底：旧版本退赛只失效 PlayerStats、漏掉了 Registration，
+    # 已退赛选手再次点击退出时也能清理残留的报名记录。
+    reg = await db.execute(
+        select(Registration).where(
+            Registration.tournament_id == tournament_id,
+            Registration.user_id == player_id,
+            Registration.is_active == True,
+        )
+    )
+    reg_record = reg.scalar_one_or_none()
+    if reg_record:
+        reg_record.is_active = False
+
+    if not ps.is_active:
+        # 已退赛（如旧版本残留状态）：若本人仍是房主，先把房主转给剩余活跃选手，
+        # 避免赛事处于"无房主"状态
+        if tournament.creator_id == player_id:
+            remaining_players = await db.execute(
+                select(PlayerStats.user_id).where(
+                    PlayerStats.tournament_id == tournament_id,
+                    PlayerStats.is_active == True,
+                    PlayerStats.user_id != player_id,
+                ).limit(1)
+            )
+            first = remaining_players.scalar_one_or_none()
+            if first:
+                tournament.creator_id = first
+        await db.flush()
+        await manager.broadcast(tournament_id, {"type": "registration_updated"})
+        return {"ok": True, "message": "选手已退赛"}
+
     ps.is_active = False
 
     from app.models.user import User as UserModel
@@ -208,17 +246,16 @@ async def withdraw_player(
     for s in stats.scalars().all():
         remaining.append(s.user_id)
 
-    if len(remaining) >= 4:
-        N = len(remaining)
-    # check player count
-    if tournament.total_matches and len(player_ids) != tournament.max_participants:
-        raise HTTPException(
-            status_code=400,
-            detail=f"当前报名人数({len(player_ids)})与创建时设定({tournament.max_participants})不一致，请重新选择场次",
-        )
-        new_M = compute_match_count(N)
+    remaining_count = len(remaining)
+    if remaining_count < 4:
+        # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事
+        tournament.status = TournamentStatus.FINISHED
+        await db.flush()
+        await manager.broadcast(tournament_id, {"type": "registration_updated"})
+        return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
+
     if tournament.total_matches:
-        M = tournament.total_matches
+        new_M = compute_match_count(remaining_count)
         new_schedule = generate_schedule(remaining, new_M, partner_history)
         new_rounds_data = compute_rounds(new_schedule, 2)
 
@@ -264,6 +301,7 @@ async def withdraw_player(
             ))
 
     await db.flush()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 
