@@ -170,7 +170,7 @@ const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
 const canDelete = computed(() => {
   if (!auth.user || !tournament.value) return false
-  if (auth.user.role === 'admin') return true
+  if (auth.user.role === 'admin' || auth.user.role === 'superadmin') return true
   return auth.user.id === tournament.value.creator_id && tournament.value.status === 'open'
 })
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')

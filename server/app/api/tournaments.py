@@ -225,10 +225,10 @@ async def delete_tournament(
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
     if t.creator_id != user.id:
-        if user.role != "admin":
+        if user.role not in ("admin", "superadmin"):
             raise HTTPException(status_code=403, detail="只有创建者可以删除")
     if t.status != TournamentStatus.OPEN:
-        if user.role != "admin":
+        if user.role not in ("admin", "superadmin"):
             raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
 
     # delete related courts and time slots

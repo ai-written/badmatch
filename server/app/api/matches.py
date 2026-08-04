@@ -126,7 +126,7 @@ async def start_round(
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404, detail="赛事不存在")
-    if tournament.creator_id != user.id and user.role != "admin":
+    if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="只有赛事创建者可以开始轮次")
     if tournament.status != TournamentStatus.ONGOING:
         raise HTTPException(status_code=400, detail="赛事未在进行中")
