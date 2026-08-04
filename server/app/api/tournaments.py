@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
 from app.core.database import get_db
@@ -8,6 +8,8 @@ from app.models.tournament import (
     Tournament, TournamentStatus, Registration, PlayerStats, Court, TimeSlot,
 )
 from app.core.websocket import manager
+from app.core.mailer import send_tournament_invite
+from app.core.config import get_settings
 from app.schemas.tournament import (
     TournamentCreate, TournamentBrief, TournamentDetail, RegistrationOut, CourtOut, TimeSlotOut,
 )
@@ -57,27 +59,34 @@ async def list_tournaments(
 @router.post("", response_model=TournamentDetail)
 async def create_tournament(
     data: TournamentCreate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    t = await _create_tournament(data, user, db)
+    t = await _create_tournament(data, user, db, background_tasks)
     return await _tournament_detail(t, db)
 
 
 @router.post("/batch")
 async def create_tournaments_batch(
     data: list[TournamentCreate],
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
     tournament_ids = []
     for item in data:
-        t = await _create_tournament(item, user, db)
+        t = await _create_tournament(item, user, db, background_tasks)
         tournament_ids.append(t.id)
     return {"ok": True, "tournament_ids": tournament_ids}
 
 
-async def _create_tournament(data: TournamentCreate, user: User, db: AsyncSession) -> Tournament:
+async def _create_tournament(
+    data: TournamentCreate,
+    user: User,
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+) -> Tournament:
     if data.max_participants < 4:
         raise HTTPException(status_code=400, detail="最大人数至少为 4")
 
@@ -88,10 +97,12 @@ async def _create_tournament(data: TournamentCreate, user: User, db: AsyncSessio
         if len(preselected) > data.max_participants:
             raise HTTPException(status_code=400, detail="预选人数超过最大人数")
         users_result = await db.execute(select(User).where(User.id.in_(preselected)))
-        found_ids = {u.id for u in users_result.scalars().all()}
+        found_users = users_result.scalars().all()
+        found_ids = {u.id for u in found_users}
         missing = [uid for uid in preselected if uid not in found_ids]
         if missing:
             raise HTTPException(status_code=400, detail="部分预选用户不存在")
+        users_map = {u.id: u for u in found_users}
 
     t = Tournament(
         creator_id=user.id,
@@ -115,8 +126,29 @@ async def _create_tournament(data: TournamentCreate, user: User, db: AsyncSessio
         for ts_data in c_data.time_slots:
             db.add(TimeSlot(court_id=court.id, start_time=ts_data.start_time, end_time=ts_data.end_time))
 
+    from app.models.round import Notification
+
+    settings = get_settings()
+    start_text = data.start_date.strftime("%Y-%m-%d %H:%M")
     for uid in preselected:
         db.add(Registration(tournament_id=t.id, user_id=uid, is_active=True))
+        db.add(Notification(
+            user_id=uid,
+            tournament_id=t.id,
+            type="tournament_invited",
+            message=f"您已被预选加入赛事「{data.title}」",
+        ))
+        target_user = users_map.get(uid)
+        if target_user and target_user.email:
+            invite_url = f"{settings.FRONTEND_URL}/tournament/{t.id}"
+            background_tasks.add_task(
+                send_tournament_invite,
+                target_user.email,
+                data.title,
+                start_text,
+                data.location,
+                invite_url,
+            )
 
     await db.flush()
     return t

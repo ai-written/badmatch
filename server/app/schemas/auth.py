@@ -6,6 +6,7 @@ class RegisterRequest(BaseModel):
     password: str
     gender: str | None = None
     invite_code: str | None = None
+    email: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -22,6 +23,7 @@ class TokenResponse(BaseModel):
 class UserProfile(BaseModel):
     id: int
     username: str
+    email: str | None = None
     avatar: str
     gender: str | None = None
     role: str = "user"
@@ -39,6 +41,13 @@ class AdminResetPassword(BaseModel):
 class AdminSetRole(BaseModel):
     user_id: int
     role: str
+
+
+class UpdateProfile(BaseModel):
+    username: str | None = None
+    avatar: str | None = None
+    gender: str | None = None
+    email: str | None = None
 
 
 class SelectableUser(BaseModel):

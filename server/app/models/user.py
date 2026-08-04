@@ -9,6 +9,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     avatar: Mapped[str] = mapped_column(String(512), default="")
     gender: Mapped[str | None] = mapped_column(String(1), nullable=True)  # M or F

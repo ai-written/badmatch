@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/create', name: 'create', component: () => import('@/views/CreateTournament.vue') },
     { path: '/profile', name: 'profile', component: () => import('@/views/ProfileView.vue') },
     { path: '/admin', name: 'admin', component: () => import('@/views/AdminView.vue') },
+    { path: '/notifications', name: 'notifications', component: () => import('@/views/NotificationsView.vue') },
   ],
 })
 

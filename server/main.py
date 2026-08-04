@@ -9,6 +9,7 @@ from app.api.matches import router as match_router
 from app.api.rankings import router as ranking_router
 from app.api.referee import router as referee_router
 from app.api.engine_api import router as engine_router
+from app.api.notifications import router as notification_router
 from app.core.config import get_settings
 from app.core.database import engine, Base
 from app.core.websocket import manager
@@ -40,6 +41,7 @@ app.include_router(match_router)
 app.include_router(ranking_router)
 app.include_router(referee_router)
 app.include_router(engine_router)
+app.include_router(notification_router)
 
 # Static files for avatars
 static_dir = os.path.join(os.path.dirname(__file__), "static")

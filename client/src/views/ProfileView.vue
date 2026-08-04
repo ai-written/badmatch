@@ -27,6 +27,7 @@
             </template>
           </van-field>
           <van-field v-model="registerForm.invite_code" label="邀请码" :placeholder="hasUsers ? '注册邀请码（必填）' : '注册邀请码（首个用户可跳过）'" :required="hasUsers" />
+          <van-field v-model="registerForm.email" label="邮箱（选填）" type="email" placeholder="用于接收赛事通知" />
           <van-field v-model="registerForm.password" label="密码" placeholder="至少6位" type="password" required :rules="[{ required: true, message: '请输入密码' }, { pattern: /^.{6,}$/, message: '密码至少6位' }]" />
         </van-cell-group>
         <div class="form-submit"><van-button round block type="primary" native-type="submit" :loading="submitting">注册</van-button></div>
@@ -50,10 +51,12 @@
       <van-cell-group inset>
         <van-cell title="用户名" is-link :value="auth.user.username" @click="newUsername = auth.user?.username || ''; showEditName = true" />
         <van-cell title="性别" is-link :value="auth.user.gender === 'M' ? '男' : auth.user.gender === 'F' ? '女' : '未设置'" @click="editGender = auth.user?.gender || ''; showEditGender = true" />
+        <van-cell title="邮箱" is-link :value="auth.user?.email || '未设置'" @click="editEmail = auth.user?.email || ''; showEditEmail = true" />
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px">
         <van-cell title="修改密码" is-link @click="showEditPwd = true" />
+        <van-cell title="站内消息" is-link :value="unreadCount > 0 ? `${unreadCount} 条未读` : ''" to="/notifications" />
         <van-cell title="总场次" :value="String(stats.total_matches)" />
         <van-cell title="胜场" :value="String(stats.total_wins)" />
         <van-cell title="胜率" :value="`${stats.win_rate}%`" label="双打胜率" />
@@ -92,6 +95,10 @@
     <van-dialog v-model:show="showEditName" title="修改用户名" show-cancel-button @confirm="saveUsername">
       <van-field v-model="newUsername" placeholder="新用户名" style="margin:10px 0" />
     </van-dialog>
+
+    <van-dialog v-model:show="showEditEmail" title="修改邮箱" show-cancel-button @confirm="saveEmail">
+      <van-field v-model="editEmail" type="email" placeholder="邮箱（选填，留空可清除）" style="margin:10px 0" />
+    </van-dialog>
   </div>
 </template>
 
@@ -112,18 +119,27 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 const loginForm = reactive({ username: '', password: '' })
-const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '' })
+const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '', email: '' })
 const stats = reactive({ total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 })
 
 const inviteCode = ref('')
 const inviteLink = computed(() => inviteCode.value ? `${window.location.origin}${window.location.pathname}?invite=${inviteCode.value}` : '')
+const unreadCount = ref(0)
 
 const showEditGender = ref(false); const editGender = ref('')
 const showEditPwd = ref(false); const oldPwd = ref(''); const newPwd = ref('')
 const showEditName = ref(false); const newUsername = ref('')
+const showEditEmail = ref(false); const editEmail = ref('')
 
 async function fetchStats() {
   try { const res = await api.get('/auth/stats'); Object.assign(stats, res.data) } catch {}
+}
+
+async function fetchUnread() {
+  try {
+    const res = await api.get('/notifications/unread-count')
+    unreadCount.value = res.data.count || 0
+  } catch {}
 }
 
 function doRedirect() {
@@ -145,7 +161,7 @@ async function onLogin() {
 
 async function onRegister() {
   submitting.value = true
-  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.invite_code); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
+  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.invite_code, registerForm.email); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
 }
 
 async function generateInvite() {
@@ -176,9 +192,18 @@ async function saveUsername() {
   } catch {}
 }
 
+async function saveEmail() {
+  try {
+    await api.put('/auth/me/profile', { email: editEmail.value })
+    auth.user!.email = editEmail.value || null
+    showToast('邮箱已更新')
+  } catch {}
+}
+
 async function onRefresh() {
   try {
     await fetchStats()
+    await fetchUnread()
     await auth.fetchMe()
     if (auth.user?.invite_code) inviteCode.value = auth.user.invite_code
   } finally {
@@ -192,7 +217,7 @@ onMounted(async () => {
   const ip = urlParams.get('invite')
   if (ip) { loginTab.value = 1; registerForm.invite_code = ip }
   await auth.fetchMe()
-  if (auth.user) { await fetchStats(); if (auth.user.invite_code) inviteCode.value = auth.user.invite_code }
+  if (auth.user) { await fetchStats(); await fetchUnread(); if (auth.user.invite_code) inviteCode.value = auth.user.invite_code }
 })
 </script>
 

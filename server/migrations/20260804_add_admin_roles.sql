@@ -5,6 +5,18 @@ BEGIN;
 
 UPDATE users SET role = 'superadmin' WHERE role = 'admin';
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_users_email'
+  ) THEN
+    ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);
+  END IF;
+END $$;
+
 -- 清理历史重复报名后再加唯一约束
 DELETE FROM registrations a
 USING registrations b

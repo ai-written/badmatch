@@ -1,4 +1,4 @@
-import os, uuid
+import os, re, uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update
@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
-    AdminResetPassword, AdminSetRole, SelectableUser,
+    AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
 )
 from app.models.user import User
 from app.models.tournament import PlayerStats
@@ -21,6 +21,14 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     exist = await db.execute(select(User).where(User.username == req.username))
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
+
+    email = req.email.strip() if req.email else None
+    if email:
+        if not _is_valid_email(email):
+            raise HTTPException(status_code=400, detail="邮箱格式不正确")
+        email_exist = await db.execute(select(User).where(User.email == email))
+        if email_exist.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="邮箱已被使用")
 
     first_check = await db.execute(select(func.count(User.id)))
     is_first = first_check.scalar() == 0
@@ -40,6 +48,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         password_hash=hash_password(req.password),
         gender=req.gender,
         invited_by=invited_by_id,
+        email=email,
         role="superadmin" if is_first else "user",
     )
     db.add(user)
@@ -68,23 +77,35 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.put("/me/profile")
 async def update_profile(
-    username: str = "",
-    avatar: str = "",
-    gender: str = "",
+    body: UpdateProfile,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user is None:
         raise HTTPException(status_code=401)
-    if username:
+    if body.username is not None:
+        username = body.username.strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="用户名不能为空")
         exist = await db.execute(select(User).where(User.username == username, User.id != user.id))
         if exist.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="用户名已存在")
         user.username = username
-    if avatar:
-        user.avatar = avatar
-    if gender:
-        user.gender = gender
+    if body.avatar:
+        user.avatar = body.avatar
+    if body.gender is not None:
+        user.gender = body.gender or None
+    if body.email is not None:
+        email = body.email.strip() or None
+        if email:
+            if not _is_valid_email(email):
+                raise HTTPException(status_code=400, detail="邮箱格式不正确")
+            email_exist = await db.execute(
+                select(User).where(User.email == email, User.id != user.id)
+            )
+            if email_exist.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="邮箱已被使用")
+        user.email = email
     await db.flush()
     return {"ok": True}
 
@@ -296,10 +317,17 @@ async def admin_reset_password(
 
 def _profile(u: User) -> UserProfile:
     return UserProfile(
-        id=u.id, username=u.username, 
+        id=u.id, username=u.username, email=u.email,
         avatar=u.avatar, gender=u.gender, role=u.role,
         invite_code=u.invite_code,
     )
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.match(email))
 
 
 def _looks_like_image(content: bytes, ext: str) -> bool:

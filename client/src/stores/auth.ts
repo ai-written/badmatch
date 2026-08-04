@@ -5,6 +5,7 @@ import api from '@/api/client'
 export interface UserProfile {
   id: number
   username: string
+  email?: string | null
   avatar: string
   gender?: string | null
   role: string
@@ -40,8 +41,14 @@ export const useAuthStore = defineStore('auth', () => {
     setAuth(res.data.access_token, res.data.user)
   }
 
-  async function register(username: string, password: string, gender: string, invite_code?: string) {
-    const res = await api.post('/auth/register', { username, password, gender, invite_code: invite_code || null })
+  async function register(username: string, password: string, gender: string, invite_code?: string, email?: string) {
+    const res = await api.post('/auth/register', {
+      username,
+      password,
+      gender,
+      invite_code: invite_code || null,
+      email: email || null,
+    })
     setAuth(res.data.access_token, res.data.user)
   }
 

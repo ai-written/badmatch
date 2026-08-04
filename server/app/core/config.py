@@ -11,7 +11,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://badminton:badminton@localhost:5432/badminton"
 
-    # Scoring
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # Email notifications
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
 
     class Config:
         env_file = ".env"
