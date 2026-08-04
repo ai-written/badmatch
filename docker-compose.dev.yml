@@ -17,11 +17,6 @@ services:
       timeout: 3s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
   server:
     build:
       context: ./server
@@ -30,14 +25,11 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://badminton:badminton@db:5432/badminton
-      REDIS_URL: redis://redis:6379/0
       DEBUG: "true"
       SECRET_KEY: docker-dev-secret-key-not-for-production
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_started
     volumes:
       - ./server:/app
 

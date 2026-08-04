@@ -1,7 +1,7 @@
 import os, uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete, update
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
 from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats, AdminResetPassword
@@ -117,6 +117,10 @@ async def upload_avatar(
     filename = f"{uuid.uuid4().hex}.{ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
     content = await file.read()
+    if not content or len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小不能超过 2MB")
+    if not _looks_like_image(content, ext.lower()):
+        raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
     with open(filepath, "wb") as f:
         f.write(content)
     user.avatar = f"/static/uploads/{filename}"
@@ -198,6 +202,27 @@ async def delete_user(
         raise HTTPException(status_code=404)
     if user.id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己")
+    from app.models.tournament import Registration, Tournament, PlayerStats as PS
+    from app.models.round import Match, MatchSupport, Notification, RoundPairing
+
+    created = await db.execute(
+        select(Tournament).where(Tournament.creator_id == user.id).limit(1)
+    )
+    if created.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该用户创建过赛事，请先删除其赛事")
+    has_pairings = await db.execute(
+        select(RoundPairing.id).where(
+            (RoundPairing.player_a_id == user.id) | (RoundPairing.player_b_id == user.id)
+        ).limit(1)
+    )
+    if has_pairings.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该用户有比赛记录，不能删除")
+    await db.execute(delete(Registration).where(Registration.user_id == user.id))
+    await db.execute(delete(PS).where(PS.user_id == user.id))
+    await db.execute(delete(MatchSupport).where(MatchSupport.user_id == user.id))
+    await db.execute(delete(Notification).where(Notification.user_id == user.id))
+    await db.execute(update(Match).where(Match.referee_id == user.id).values(referee_id=None))
+    await db.execute(update(User).where(User.invited_by == user.id).values(invited_by=None))
     await db.delete(user)
     await db.flush()
     return {"ok": True}
@@ -228,3 +253,15 @@ def _profile(u: User) -> UserProfile:
         avatar=u.avatar, gender=u.gender, role=u.role,
         invite_code=u.invite_code,
     )
+
+
+def _looks_like_image(content: bytes, ext: str) -> bool:
+    if ext in ("jpg", "jpeg"):
+        return content[:3] == b"\xff\xd8\xff"
+    if ext == "png":
+        return content[:8] == b"\x89PNG\r\n\x1a\n"
+    if ext == "gif":
+        return content[:6] in (b"GIF87a", b"GIF89a")
+    if ext == "webp":
+        return content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    return False

@@ -42,7 +42,6 @@ class TournamentCreate(BaseModel):
     max_participants: int
     total_matches: int | None = None
     points_to_win: int = 11
-    points_to_win: int = 11
     courts: list[CourtCreate] = []
 
 
@@ -58,7 +57,6 @@ class TournamentBrief(BaseModel):
     registered_count: int = 0
     court_name: str | None = None
     total_matches: int | None = None
-    points_to_win: int = 11
     points_to_win: int = 11
     created_at: str
 
@@ -80,7 +78,6 @@ class TournamentDetail(BaseModel):
     courts: list[CourtOut] = []
     registered_count: int = 0
     total_matches: int | None = None
-    points_to_win: int = 11
     points_to_win: int = 11
     is_registered: bool = False
     created_at: str

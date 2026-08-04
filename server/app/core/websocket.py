@@ -16,18 +16,24 @@ class ConnectionManager:
     def disconnect(self, tournament_id: int, ws: WebSocket):
         room = self._rooms.get(tournament_id)
         if room and ws in room:
-            room.remove(ws)
+            try:
+                room.remove(ws)
+            except ValueError:
+                pass
 
     async def broadcast(self, tournament_id: int, message: dict[str, Any]):
         room = self._rooms.get(tournament_id, [])
         stale = []
-        for ws in room:
+        for ws in list(room):
             try:
                 await ws.send_json(message)
             except Exception:
                 stale.append(ws)
         for ws in stale:
-            room.remove(ws)
+            try:
+                room.remove(ws)
+            except ValueError:
+                pass
 
 
 manager = ConnectionManager()

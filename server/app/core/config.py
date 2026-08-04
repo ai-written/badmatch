@@ -11,9 +11,6 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://badminton:badminton@localhost:5432/badminton"
 
-    # Redis
-    REDIS_URL: str = "redis://localhost:6379/0"
-
     # Scoring
 
     class Config:

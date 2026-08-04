@@ -49,6 +49,8 @@ def _greedy_build(players, total_matches, target, partner_history):
                 best_group = ((a, b), (c, d))
 
         if best_group is None:
+            if not eligible:
+                raise ValueError("总场次无法为每名选手安排相同比赛场次")
             a, b, c, d = eligible[:4]
             best_group = ((a, b), (c, d))
 

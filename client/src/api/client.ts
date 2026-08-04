@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { showFailToast, showLoadingToast } from 'vant'
+import router from '@/router'
 
 const api = axios.create({
   baseURL: '/api',
@@ -64,11 +65,11 @@ api.interceptors.response.use(
     if (status === 401) {
       localStorage.removeItem('token')
       // 保存当前路径，登录后跳回
-      const currentPath = window.location.hash.slice(1) || '/'
+      const currentPath = window.location.pathname + window.location.search || '/'
       if (currentPath !== '/profile') {
         sessionStorage.setItem('loginRedirect', currentPath)
-        window.location.hash = '#/profile'
       }
+      router.replace('/profile')
       toastError('请先登录')
     } else if (status === 403) {
       toastError(detail || '权限不足')

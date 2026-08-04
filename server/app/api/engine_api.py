@@ -55,7 +55,10 @@ async def start_tournament(
 
     # update total_matches if provided
     if body and body.total_matches is not None:
-        tournament.total_matches = body.total_matches
+        requested = body.total_matches
+        if requested < 1 or requested > 100 or (4 * requested) % len(player_ids) != 0:
+            raise HTTPException(status_code=400, detail="总场次需在 1-100 之间且保证每名选手场次相同")
+        tournament.total_matches = requested
     M = compute_match_count(len(player_ids))
     if tournament.total_matches:
         M = tournament.total_matches
@@ -108,7 +111,9 @@ async def withdraw_player(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404)
@@ -210,7 +215,7 @@ async def withdraw_player(
     unstarted_rounds = await db.execute(
         select(Round).where(
             Round.tournament_id == tournament_id,
-            Round.status != RoundStatus.FINISHED,
+            Round.status == RoundStatus.PENDING,
         )
     )
     affected_referees = set()
@@ -254,51 +259,53 @@ async def withdraw_player(
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
-    if tournament.total_matches:
+    if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
+        new_M = tournament.total_matches
+    else:
         new_M = compute_match_count(remaining_count)
-        new_schedule = generate_schedule(remaining, new_M, partner_history)
-        new_rounds_data = compute_rounds(new_schedule, 2)
+    new_schedule = generate_schedule(remaining, new_M, partner_history)
+    new_rounds_data = compute_rounds(new_schedule, 2)
 
-        last_num_result = await db.execute(
-            select(Round.round_number)
-            .where(Round.tournament_id == tournament_id)
-            .order_by(Round.round_number.desc())
-            .limit(1)
+    last_num_result = await db.execute(
+        select(Round.round_number)
+        .where(Round.tournament_id == tournament_id)
+        .order_by(Round.round_number.desc())
+        .limit(1)
+    )
+    last_num = last_num_result.scalar() or 0
+
+    for round_idx, round_matches in enumerate(new_rounds_data, start=1):
+        r = Round(
+            tournament_id=tournament_id,
+            round_number=last_num + round_idx,
+            is_regenerated=True,
         )
-        last_num = last_num_result.scalar() or 0
+        db.add(r)
+        await db.flush()
 
-        for round_idx, round_matches in enumerate(new_rounds_data, start=1):
-            r = Round(
-                tournament_id=tournament_id,
-                round_number=last_num + round_idx,
-                is_regenerated=True,
-            )
-            db.add(r)
+        for match_data in round_matches:
+            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+            pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
+            pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
+            db.add(pairing_a)
+            db.add(pairing_b)
             await db.flush()
-
-            for match_data in round_matches:
-                (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
-                pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
-                pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
-                db.add(pairing_a)
-                db.add(pairing_b)
-                await db.flush()
-                db.add(Match(
-                    tournament_id=tournament_id,
-                    round_id=r.id,
-                    pairing_a_id=pairing_a.id,
-                    pairing_b_id=pairing_b.id,
-                    court_id=court_id,
-                    time_slot_id=slot_id,
-                ))
-
-        for ref_id in affected_referees:
-            db.add(Notification(
-                user_id=ref_id,
+            db.add(Match(
                 tournament_id=tournament_id,
-                type="schedule_changed",
-                message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
+                round_id=r.id,
+                pairing_a_id=pairing_a.id,
+                pairing_b_id=pairing_b.id,
+                court_id=court_id,
+                time_slot_id=slot_id,
             ))
+
+    for ref_id in affected_referees:
+        db.add(Notification(
+            user_id=ref_id,
+            tournament_id=tournament_id,
+            type="schedule_changed",
+            message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
+        ))
 
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})

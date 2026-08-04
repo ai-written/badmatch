@@ -9,7 +9,6 @@
     <div class="detail-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-      <div class="pull-inner">
     <van-loading v-if="!tournament" class="loading" />
     <template v-else>
       <div class="info-card">
@@ -98,7 +97,6 @@
 
     </template>
       </div>
-    </div>
     </van-pull-refresh>
     </div>
   </div>
@@ -316,6 +314,7 @@ onMounted(async () => {
 .detail-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
+.stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
 .info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -361,4 +360,3 @@ onMounted(async () => {
 .picker-title { font-weight: 600; }
 .van-cell.active { background: #e8f4ff; }
 </style>
-.stats-popup { overflow: hidden !important; }

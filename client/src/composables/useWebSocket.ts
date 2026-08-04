@@ -3,9 +3,12 @@ import { ref, onMounted, onUnmounted } from 'vue'
 export function useWebSocket(tournamentId: number | null) {
   const ws = ref<WebSocket | null>(null)
   const lastMessage = ref<any>(null)
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let disposed = false
 
   function connect() {
-    if (!tournamentId) return
+    if (!tournamentId || disposed) return
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${protocol}//${location.host}/ws/tournaments/${tournamentId}`
     ws.value = new WebSocket(url)
@@ -13,8 +16,10 @@ export function useWebSocket(tournamentId: number | null) {
       lastMessage.value = JSON.parse(ev.data)
     }
     ws.value.onclose = () => {
+      if (disposed) return
       // auto-reconnect after 3s
-      setTimeout(connect, 3000)
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      reconnectTimer = setTimeout(connect, 3000)
     }
   }
 
@@ -26,12 +31,15 @@ export function useWebSocket(tournamentId: number | null) {
 
   onMounted(() => {
     connect()
-    const interval = setInterval(sendHeartbeat, 30000)
-    onUnmounted(() => clearInterval(interval))
+    heartbeatTimer = setInterval(sendHeartbeat, 30000)
   })
 
   onUnmounted(() => {
+    disposed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
     ws.value?.close()
+    ws.value = null
   })
 
   return { lastMessage }

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.security import require_user, get_current_user
 from app.core.websocket import manager
@@ -26,16 +27,17 @@ async def list_rounds(
     )
     rounds = result.scalars().all()
 
+    bye_map = await _get_bye_players(rounds, db)
     out = []
     for r in rounds:
         matches_result = await db.execute(
             select(Match).where(Match.round_id == r.id)
         )
         matches = matches_result.scalars().all()
-        match_outs = []
-        for m in matches:
-            match_outs.append(await _build_match_out(m, db, user))
-        bye_player = await _get_bye_player(r, db)
+        match_outs = await _build_matches_out(matches, db, user)
+        for mo in match_outs:
+            mo.round_number = r.round_number
+        bye_player = bye_map.get(r.id)
         out.append(RoundOut(
             id=r.id,
             round_number=r.round_number,
@@ -72,7 +74,7 @@ async def update_score(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id)
+        select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id).with_for_update()
     )
     m = result.scalar_one_or_none()
     if not m:
@@ -99,7 +101,23 @@ async def update_score(
         await manager.broadcast(tournament_id, {"type": "match_updated", "match_id": match_id, "score_a": m.score_a, "score_b": m.score_b, "status": m.status.value})
         return {"ok": True, "finished": True}
 
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # 并发投票时唯一约束冲突，回滚后按已有记录更新
+        await db.rollback()
+        exist = await db.execute(
+            select(MatchSupport).where(
+                MatchSupport.match_id == match_id,
+                MatchSupport.user_id == user.id,
+            ).with_for_update()
+        )
+        support = exist.scalar_one_or_none()
+        if support:
+            support.side = body.side
+        else:
+            db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
+        await db.flush()
     # broadcast update
     await manager.broadcast(tournament_id, {
         "type": "match_updated",
@@ -119,10 +137,20 @@ async def start_round(
     db: AsyncSession = Depends(get_db),
 ):
     """Start a round. Call after all matches are scheduled."""
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    if not tournament:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    if tournament.creator_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="只有赛事创建者可以开始轮次")
+    if tournament.status != TournamentStatus.ONGOING:
+        raise HTTPException(status_code=400, detail="赛事未在进行中")
     r = await db.execute(select(Round).where(Round.id == round_id, Round.tournament_id == tournament_id))
     round_obj = r.scalar_one_or_none()
     if not round_obj:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="轮次不存在")
+    if round_obj.status != RoundStatus.PENDING:
+        raise HTTPException(status_code=400, detail="该轮次已开始或已结束")
     round_obj.status = RoundStatus.ONGOING
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "round_started", "round_id": round_id})
@@ -214,106 +242,167 @@ async def _count_supports(match_id: int, db: AsyncSession):
 
 
 async def _build_match_out(m: Match, db: AsyncSession, user: User | None = None) -> MatchOut:
-    # resolve pairings
-    pa = await db.execute(
-        select(RoundPairing).where(RoundPairing.id == m.pairing_a_id)
-    )
-    pb = await db.execute(
-        select(RoundPairing).where(RoundPairing.id == m.pairing_b_id)
-    )
-    pairing_a = pa.scalar_one()
-    pairing_b = pb.scalar_one()
+    return (await _build_matches_out([m], db, user))[0]
 
-    # resolve player info
-    users = {}
-    for uid in [pairing_a.player_a_id, pairing_a.player_b_id, pairing_b.player_a_id, pairing_b.player_b_id]:
-        if uid not in users:
-            u = await db.execute(select(User).where(User.id == uid))
-            users[uid] = u.scalar_one()
 
-    def make_pairing(pairing: RoundPairing):
-        return RoundPairingOut(
-            id=pairing.id,
-            player_a=PlayerInfo(id=pairing.player_a_id, username=users[pairing.player_a_id].username, avatar=users[pairing.player_a_id].avatar or ""),
-            player_b=PlayerInfo(id=pairing.player_b_id, username=users[pairing.player_b_id].username, avatar=users[pairing.player_b_id].avatar or ""),
+async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User | None = None) -> list[MatchOut]:
+    """批量组装比赛信息，避免 rounds 接口逐场 N+1 查询。"""
+    if not matches:
+        return []
+
+    match_ids = [m.id for m in matches]
+    pairing_ids = list({m.pairing_a_id for m in matches} | {m.pairing_b_id for m in matches})
+
+    pairings_map: dict[int, RoundPairing] = {}
+    if pairing_ids:
+        pairings = await db.execute(select(RoundPairing).where(RoundPairing.id.in_(pairing_ids)))
+        pairings_map = {p.id: p for p in pairings.scalars().all()}
+
+    user_ids = {m.referee_id for m in matches if m.referee_id}
+    for p in pairings_map.values():
+        user_ids.add(p.player_a_id)
+        user_ids.add(p.player_b_id)
+
+    users_map: dict[int, User] = {}
+    if user_ids:
+        users = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users_map = {u.id: u for u in users.scalars().all()}
+
+    courts_map: dict[int, Court] = {}
+    court_ids = {m.court_id for m in matches if m.court_id}
+    if court_ids:
+        courts = await db.execute(select(Court).where(Court.id.in_(court_ids)))
+        courts_map = {c.id: c for c in courts.scalars().all()}
+
+    slots_map: dict[int, TimeSlot] = {}
+    slot_ids = {m.time_slot_id for m in matches if m.time_slot_id}
+    if slot_ids:
+        slots = await db.execute(select(TimeSlot).where(TimeSlot.id.in_(slot_ids)))
+        slots_map = {s.id: s for s in slots.scalars().all()}
+
+    support_counts: dict[int, dict[str, int]] = {}
+    support_avatars: dict[int, dict[str, list[str]]] = {}
+    if match_ids:
+        count_rows = await db.execute(
+            select(MatchSupport.match_id, MatchSupport.side, func.count(MatchSupport.id))
+            .where(MatchSupport.match_id.in_(match_ids))
+            .group_by(MatchSupport.match_id, MatchSupport.side)
         )
+        for mid, side, cnt in count_rows.all():
+            support_counts.setdefault(mid, {})[side] = cnt
 
-    # court and time info
-    court_name = None
-    start_time = None
-    end_time = None
-    if m.court_id:
-        c = await db.execute(select(Court).where(Court.id == m.court_id))
-        court = c.scalar_one_or_none()
-        if court:
-            court_name = court.name
-            ts = await db.execute(select(TimeSlot).where(TimeSlot.id == m.time_slot_id))
-            slot = ts.scalar_one_or_none()
-            if slot:
-                start_time = slot.start_time
-                end_time = slot.end_time
-
-    # referee
-    referee = None
-    if m.referee_id:
-        ref = await db.execute(select(User).where(User.id == m.referee_id))
-        ref_user = ref.scalar_one_or_none()
-        if ref_user:
-            referee = PlayerInfo(id=ref_user.id, username=ref_user.username, avatar=ref_user.avatar or "", gender=ref_user.gender)
-
-    # can_referee: current user can be referee if not in the match
-    can_referee = False
-    if user and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING) and m.referee_id is None:
-        match_player_ids = {
-            pairing_a.player_a_id, pairing_a.player_b_id,
-            pairing_b.player_a_id, pairing_b.player_b_id,
-        }
-        if user.id not in match_player_ids:
-            can_referee = True
-
-    # support counts and voter avatars
-    support_a, support_b = await _count_supports(m.id, db)
-    support_a_users = []
-    support_b_users = []
-    supporters = await db.execute(
-        select(MatchSupport, User.avatar).join(User, MatchSupport.user_id == User.id)
-        .where(MatchSupport.match_id == m.id).order_by(MatchSupport.created_at.desc()).limit(20)
-    )
-    for s, av in supporters.all():
-        if s.side == 'a':
-            support_a_users.append(av or '')
-        else:
-            support_b_users.append(av or '')
-    my_support = None
-    if user:
-        s = await db.execute(
-            select(MatchSupport.side).where(MatchSupport.match_id == m.id, MatchSupport.user_id == user.id)
+        rn = func.row_number().over(
+            partition_by=MatchSupport.match_id,
+            order_by=MatchSupport.created_at.desc(),
+        ).label("rn")
+        av_subq = (
+            select(MatchSupport.match_id, MatchSupport.side, User.avatar, rn)
+            .join(User, MatchSupport.user_id == User.id)
+            .where(MatchSupport.match_id.in_(match_ids))
+            .subquery()
         )
-        row = s.scalar_one_or_none()
-        if row:
-            my_support = row
+        av_rows = await db.execute(
+            select(av_subq.c.match_id, av_subq.c.side, av_subq.c.avatar)
+            .where(av_subq.c.rn <= 20)
+        )
+        for mid, side, av in av_rows.all():
+            bucket = support_avatars.setdefault(mid, {"a": [], "b": []})
+            if len(bucket[side]) < 20:
+                bucket[side].append(av or "")
 
-    return MatchOut(
-        id=m.id,
-        round_id=m.round_id,
-        round_number=0,  # filled by caller
-        pairing_a=make_pairing(pairing_a),
-        pairing_b=make_pairing(pairing_b),
-        court_name=court_name,
-        start_time=start_time,
-        end_time=end_time,
-        score_a=m.score_a,
-        score_b=m.score_b,
-        winner_pairing_id=m.winner_pairing_id,
-        referee=referee,
-        status=m.status.value,
-        can_referee=can_referee,
-        support_a=support_a,
-        support_b=support_b,
-        my_support=my_support,
-        support_a_users=support_a_users,
-        support_b_users=support_b_users,
-    )
+    my_supports: dict[int, str] = {}
+    if user and match_ids:
+        rows = await db.execute(
+            select(MatchSupport.match_id, MatchSupport.side).where(
+                MatchSupport.match_id.in_(match_ids),
+                MatchSupport.user_id == user.id,
+            )
+        )
+        my_supports = {mid: side for mid, side in rows.all()}
+
+    out = []
+    for m in matches:
+        pairing_a = pairings_map.get(m.pairing_a_id)
+        pairing_b = pairings_map.get(m.pairing_b_id)
+        if not pairing_a or not pairing_b:
+            raise HTTPException(status_code=500, detail="比赛数据不完整")
+
+        def make_pairing(pairing: RoundPairing):
+            ua = users_map.get(pairing.player_a_id)
+            ub = users_map.get(pairing.player_b_id)
+            return RoundPairingOut(
+                id=pairing.id,
+                player_a=PlayerInfo(
+                    id=pairing.player_a_id,
+                    username=ua.username if ua else "",
+                    avatar=(ua.avatar or "") if ua else "",
+                ),
+                player_b=PlayerInfo(
+                    id=pairing.player_b_id,
+                    username=ub.username if ub else "",
+                    avatar=(ub.avatar or "") if ub else "",
+                ),
+            )
+
+        court_name = None
+        start_time = None
+        end_time = None
+        if m.court_id:
+            court = courts_map.get(m.court_id)
+            if court:
+                court_name = court.name
+                slot = slots_map.get(m.time_slot_id)
+                if slot:
+                    start_time = slot.start_time
+                    end_time = slot.end_time
+
+        referee = None
+        if m.referee_id:
+            ref_user = users_map.get(m.referee_id)
+            if ref_user:
+                referee = PlayerInfo(
+                    id=ref_user.id,
+                    username=ref_user.username,
+                    avatar=ref_user.avatar or "",
+                    gender=ref_user.gender,
+                )
+
+        can_referee = False
+        if user and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING) and m.referee_id is None:
+            match_player_ids = {
+                pairing_a.player_a_id, pairing_a.player_b_id,
+                pairing_b.player_a_id, pairing_b.player_b_id,
+            }
+            if user.id not in match_player_ids:
+                can_referee = True
+
+        support_a = support_counts.get(m.id, {}).get("a", 0)
+        support_b = support_counts.get(m.id, {}).get("b", 0)
+        support_a_users = support_avatars.get(m.id, {}).get("a", [])
+        support_b_users = support_avatars.get(m.id, {}).get("b", [])
+
+        out.append(MatchOut(
+            id=m.id,
+            round_id=m.round_id,
+            round_number=0,  # filled by caller
+            pairing_a=make_pairing(pairing_a),
+            pairing_b=make_pairing(pairing_b),
+            court_name=court_name,
+            start_time=start_time,
+            end_time=end_time,
+            score_a=m.score_a,
+            score_b=m.score_b,
+            winner_pairing_id=m.winner_pairing_id,
+            referee=referee,
+            status=m.status.value,
+            can_referee=can_referee,
+            support_a=support_a,
+            support_b=support_b,
+            my_support=my_supports.get(m.id),
+            support_a_users=support_a_users,
+            support_b_users=support_b_users,
+        ))
+    return out
 
 
 async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
@@ -352,29 +441,46 @@ async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
             stat.points_against += m.score_b if uid in {pairing_a.player_a_id, pairing_a.player_b_id} else m.score_a
 
 
-async def _get_bye_player(r: Round, db: AsyncSession) -> PlayerInfo | None:
-    """Find player not in any pairing this round — the bye."""
-    pairings = await db.execute(
-        select(RoundPairing).where(RoundPairing.round_id == r.id)
-    )
-    paired_ids = set()
-    for p in pairings.scalars().all():
-        paired_ids.add(p.player_a_id)
-        paired_ids.add(p.player_b_id)
+async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, PlayerInfo | None]:
+    """批量计算每轮的轮空选手，避免逐轮查询。"""
+    if not rounds:
+        return {}
 
-    # get all active players
+    round_ids = [r.id for r in rounds]
+    paired_by_round: dict[int, set[int]] = {rid: set() for rid in round_ids}
+    pairings = await db.execute(
+        select(RoundPairing).where(RoundPairing.round_id.in_(round_ids))
+    )
+    for p in pairings.scalars().all():
+        paired_by_round.setdefault(p.round_id, set()).add(p.player_a_id)
+        paired_by_round.setdefault(p.round_id, set()).add(p.player_b_id)
+
     stats = await db.execute(
         select(PlayerStats).where(
-            PlayerStats.tournament_id == r.tournament_id, PlayerStats.is_active == True
+            PlayerStats.tournament_id == rounds[0].tournament_id,
+            PlayerStats.is_active == True,
         )
     )
     all_player_ids = {s.user_id for s in stats.scalars().all()}
 
-    bye_ids = all_player_ids - paired_ids
-    if bye_ids:
-        uid = bye_ids.pop()
-        u = await db.execute(select(User).where(User.id == uid))
-        user = u.scalar_one_or_none()
-        if user:
-            return PlayerInfo(id=user.id, username=user.username, avatar=user.avatar or "", gender=user.gender)
-    return None
+    users_map: dict[int, User] = {}
+    if all_player_ids:
+        rows = await db.execute(select(User).where(User.id.in_(all_player_ids)))
+        users_map = {u.id: u for u in rows.scalars().all()}
+
+    result: dict[int, PlayerInfo | None] = {}
+    for r in rounds:
+        bye_ids = all_player_ids - paired_by_round.get(r.id, set())
+        bye_player = None
+        if bye_ids:
+            uid = bye_ids.pop()
+            u = users_map.get(uid)
+            if u:
+                bye_player = PlayerInfo(
+                    id=u.id,
+                    username=u.username,
+                    avatar=u.avatar or "",
+                    gender=u.gender,
+                )
+        result[r.id] = bye_player
+    return result

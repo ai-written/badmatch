@@ -240,7 +240,11 @@ function buildPayload(title: string, start: string, end: string) {
     entry_fee: (Number(form.entry_fee) || 0) * 100,
     total_matches: form.total_matches,
     points_to_win: Number(form.points_to_win) || 11,
-    courts: form.court ? [{ name: form.court, sort_order: 0 }] : [],
+    courts: form.court ? [{
+      name: form.court,
+      sort_order: 0,
+      time_slots: [{ start_time: start.slice(11), end_time: end.slice(11) }],
+    }] : [],
   }
 }
 

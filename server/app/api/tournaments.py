@@ -92,7 +92,9 @@ async def get_tournament(
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(get_current_user),
 ):
-    result = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id)
+    )
     t = result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
@@ -149,7 +151,9 @@ async def register(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
     t = result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
@@ -193,6 +197,12 @@ async def cancel_register(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    t_result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
+    t = t_result.scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="赛事不存在")
     result = await db.execute(
         select(Registration).where(
             Registration.tournament_id == tournament_id,
