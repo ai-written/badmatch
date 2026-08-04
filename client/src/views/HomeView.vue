@@ -34,7 +34,6 @@
           <div class="t-card-right">
             <van-tag :type="statusType(t.status)" size="medium" round>{{ statusLabel(t.status) }}</van-tag>
             <div class="t-card-count">{{ t.registered_count }}/{{ t.max_participants }}</div>
-            <span v-if="t.entry_fee > 0" class="t-card-fee">¥{{ Math.round(t.entry_fee / 100) }}</span>
           </div>
         </div>
       </van-list>
@@ -109,5 +108,4 @@ async function onRefresh() {
 .t-card-court { font-size: 11px; color: #1989fa; background: #e8f4ff; padding: 0 4px; border-radius: 3px; margin-left: 6px; }
 .t-card-right { text-align: center; flex-shrink: 0; margin-left: 10px; }
 .t-card-count { font-size: 13px; color: #666; margin-top: 4px; }
-.t-card-fee { font-size: 13px; color: #e74c3c; font-weight: 600; }
 </style>

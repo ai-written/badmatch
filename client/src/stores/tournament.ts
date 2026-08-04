@@ -9,7 +9,6 @@ export interface TournamentBrief {
   start_date: string
   end_date: string
   max_participants: number
-  entry_fee: number
   status: string
   registered_count: number
   court_name: string | null

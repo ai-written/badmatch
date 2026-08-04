@@ -67,7 +67,7 @@
         <van-cell title="用户管理" is-link to="/admin" />
       </van-cell-group>
 
-      <van-cell-group inset style="margin-top:12px">
+      <van-cell-group inset style="margin-top:12px" v-if="canInvite">
         <van-cell title="邀请码" :value="inviteCode || '点击生成'" @click="generateInvite" clickable />
         <van-cell v-if="inviteCode" title="邀请链接" label="点击复制" :value="inviteLink" @click="copyInviteLink" clickable />
       </van-cell-group>
@@ -123,6 +123,7 @@ const registerForm = reactive({ username: '', password: '', gender: '', invite_c
 const stats = reactive({ total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 })
 
 const inviteCode = ref('')
+const canInvite = computed(() => !!auth.user && (auth.user.role === 'admin' || auth.user.role === 'superadmin'))
 const inviteLink = computed(() => inviteCode.value ? `${window.location.origin}${window.location.pathname}?invite=${inviteCode.value}` : '')
 const unreadCount = ref(0)
 

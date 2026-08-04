@@ -38,7 +38,6 @@ class TournamentCreate(BaseModel):
     location: str | None = None
     start_date: datetime
     end_date: datetime
-    entry_fee: int = 0
     max_participants: int
     total_matches: int | None = None
     points_to_win: int = 11
@@ -53,7 +52,6 @@ class TournamentBrief(BaseModel):
     start_date: datetime
     end_date: datetime
     max_participants: int
-    entry_fee: int
     status: str
     registered_count: int = 0
     court_name: str | None = None
@@ -73,7 +71,6 @@ class TournamentDetail(BaseModel):
     location: str | None
     start_date: datetime
     end_date: datetime
-    entry_fee: int
     max_participants: int
     status: str
     courts: list[CourtOut] = []

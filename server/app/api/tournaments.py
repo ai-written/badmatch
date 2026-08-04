@@ -45,7 +45,6 @@ async def list_tournaments(
             start_date=t.start_date,
             end_date=t.end_date,
             max_participants=t.max_participants,
-            entry_fee=t.entry_fee,
             status=t.status.value,
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
@@ -119,7 +118,6 @@ async def _create_tournament(
         location=data.location,
         start_date=data.start_date,
         end_date=data.end_date,
-        entry_fee=data.entry_fee,
         max_participants=data.max_participants,
         total_matches=data.total_matches,
         points_to_win=data.points_to_win,
@@ -184,9 +182,7 @@ async def default_title(
         "一月", "二月", "三月", "四月", "五月", "六月",
         "七月", "八月", "九月", "十月", "十一月", "十二月",
     ]
-    first = d.replace(day=1)
-    week = ((d.day - 1 + first.weekday()) // 7) + 1
-    prefix = f"{month_names[d.month - 1]}第{week}周"
+    prefix = month_names[d.month - 1]
     count_result = await db.execute(
         select(func.count(Tournament.id)).where(
             or_(
@@ -397,7 +393,6 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         location=t.location,
         start_date=t.start_date,
         end_date=t.end_date,
-        entry_fee=t.entry_fee,
         max_participants=t.max_participants,
         status=t.status.value,
             total_matches=t.total_matches,

@@ -27,7 +27,6 @@ class Tournament(Base):
     total_matches: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 总场次，null=自动计算
     points_to_win: Mapped[int] = mapped_column(Integer, default=11)
     end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    entry_fee: Mapped[int] = mapped_column(Integer, default=0)  # 单位: 分
     max_participants: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[TournamentStatus] = mapped_column(
         SAEnum(TournamentStatus), default=TournamentStatus.OPEN

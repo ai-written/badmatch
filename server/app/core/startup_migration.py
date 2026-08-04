@@ -91,3 +91,8 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
                 await conn.execute(
                     text(f"ALTER TABLE matches ADD COLUMN {column} TIMESTAMP")
                 )
+
+    # 移除已废弃的报名费列
+    if await _column_exists(conn, "tournaments", "entry_fee"):
+        logger.info("migration: dropping tournaments.entry_fee column")
+        await conn.execute(text("ALTER TABLE tournaments DROP COLUMN entry_fee"))

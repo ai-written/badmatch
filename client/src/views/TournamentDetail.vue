@@ -22,7 +22,6 @@
           <div class="ig-item" v-if="tournament.courts && tournament.courts.length > 0"><van-icon name="guide-o" /><span>场地号{{ tournament.courts[0].name }}</span></div>
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
-          <div class="ig-item"><van-icon name="gold-coin-o" /><span>{{ tournament.entry_fee > 0 ? `¥${Math.round(tournament.entry_fee / 100)}` : '免费' }}</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>

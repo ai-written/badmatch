@@ -21,7 +21,6 @@
         </van-field>
 
         <van-field v-model.number="form.max_participants" label="最大人数" type="digit" placeholder="8" required :rules="[{ required: true, message: '请输入最大人数' }]" @blur="fetchOptions" />
-        <van-field v-model.number="form.entry_fee" label="报名费(元)" type="digit" placeholder="0" />
         <van-field v-model.number="form.points_to_win" label="计分制" type="digit" placeholder="11" />
 
         <van-field
@@ -138,7 +137,6 @@ const form = reactive({
   start_date: '',
   end_date: '',
   max_participants: 8,
-  entry_fee: 0,
   points_to_win: 11,
   total_matches: null as number | null,
 })
@@ -312,7 +310,6 @@ function buildPayload(title: string, start: string, end: string) {
     start_date: start,
     end_date: end,
     max_participants: Number(form.max_participants) || 0,
-    entry_fee: (Number(form.entry_fee) || 0) * 100,
     total_matches: form.total_matches,
     points_to_win: Number(form.points_to_win) || 11,
     preselect_player_ids: preselectedIds.value,

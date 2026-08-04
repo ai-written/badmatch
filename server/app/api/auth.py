@@ -192,6 +192,8 @@ async def generate_invite(
 ):
     if user is None:
         raise HTTPException(status_code=401)
+    if user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有管理员可以生成邀请码")
     code = uuid.uuid4().hex[:8]
     user.invite_code = code
     await db.flush()
