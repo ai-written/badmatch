@@ -12,6 +12,8 @@ from app.api.engine_api import router as engine_router
 from app.api.notifications import router as notification_router
 from app.core.config import get_settings
 from app.core.database import engine, Base
+from app.core.security import decode_access_token
+from app.core.startup_migration import run_startup_migrations
 from app.core.websocket import manager
 from app.models import user, tournament, round
 
@@ -21,6 +23,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
+        await run_startup_migrations(conn)
         await conn.run_sync(Base.metadata.create_all)
     yield
 
@@ -29,7 +32,7 @@ app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +59,12 @@ async def health():
 
 @app.websocket("/ws/tournaments/{tournament_id}")
 async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
+    token = websocket.query_params.get("token")
+    payload = decode_access_token(token) if token else None
+    await websocket.accept()
+    if not payload or payload.get("sub") is None:
+        await websocket.close(code=4401, reason="未授权")
+        return
     await manager.connect(tournament_id, websocket)
     try:
         while True:

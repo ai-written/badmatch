@@ -13,6 +13,9 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = "http://localhost:5173"
 
+    # CORS 允许来源；"*" 表示全部，多个用逗号分隔
+    CORS_ORIGINS: str = "*"
+
     # Email notifications
     SMTP_HOST: str = ""
     SMTP_PORT: int = 465

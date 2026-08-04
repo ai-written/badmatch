@@ -1,6 +1,6 @@
 <template>
   <div class="notify-page">
-    <van-nav-bar title="站内消息" left-text="返回" left-arrow @click-left="$router.back()">
+    <van-nav-bar title="站内消息" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <span v-if="hasUnread" class="read-all" @click="markAllRead">全部已读</span>
       </template>
@@ -34,9 +34,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/client'
+import { useGoBack } from '@/composables/useGoBack'
 import { showToast } from 'vant'
 
 const router = useRouter()
+const { goBack } = useGoBack()
 const notifications = ref<any[]>([])
 const refreshing = ref(false)
 

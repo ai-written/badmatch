@@ -38,6 +38,7 @@ class MatchOut(BaseModel):
     my_support: str | None = None
     support_a_users: list[str] = []
     support_b_users: list[str] = []
+    duration_seconds: int | None = None
 
     class Config:
         from_attributes = True

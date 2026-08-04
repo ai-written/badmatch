@@ -1,6 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
 from app.core.security import require_user, get_current_user
 from app.models.user import User
@@ -189,11 +189,14 @@ async def default_title(
     prefix = f"{month_names[d.month - 1]}第{week}周"
     count_result = await db.execute(
         select(func.count(Tournament.id)).where(
-            Tournament.title.like(f"{prefix}%友谊赛")
+            or_(
+                Tournament.title.like(f"{prefix}%友谊赛"),
+                Tournament.title.like(f"{prefix}%养生局"),
+            )
         )
     )
     count = (count_result.scalar() or 0) + 1
-    return {"title": f"{prefix}第{count}次友谊赛"}
+    return {"title": f"{prefix}第{count}次养生局"}
 
 
 @router.get("/{tournament_id}", response_model=TournamentDetail)

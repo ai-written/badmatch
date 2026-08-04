@@ -10,6 +10,7 @@ from app.core.ratelimit import RateLimiter
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
     AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
+    ChangePasswordRequest,
 )
 from app.models.user import User
 from app.models.tournament import PlayerStats
@@ -142,18 +143,17 @@ async def update_profile(
 
 @router.put("/me/password")
 async def change_password(
-    old_password: str = "",
-    new_password: str = "",
+    body: ChangePasswordRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user is None:
         raise HTTPException(status_code=401)
-    if not verify_password(old_password, user.password_hash):
+    if not verify_password(body.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
-    if len(new_password) < 6:
+    if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少6位")
-    user.password_hash = hash_password(new_password)
+    user.password_hash = hash_password(body.new_password)
     login_limiter.reset(user.username)
     await db.flush()
     return {"ok": True}
@@ -179,6 +179,7 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
     with open(filepath, "wb") as f:
         f.write(content)
+    _remove_avatar_file(user.avatar)
     user.avatar = f"/static/uploads/{filename}"
     await db.flush()
     return {"avatar": user.avatar}
@@ -322,6 +323,7 @@ async def delete_user(
     await db.execute(delete(Notification).where(Notification.user_id == user.id))
     await db.execute(update(Match).where(Match.referee_id == user.id).values(referee_id=None))
     await db.execute(update(User).where(User.invited_by == user.id).values(invited_by=None))
+    _remove_avatar_file(user.avatar)
     await db.delete(user)
     await db.flush()
     return {"ok": True}
@@ -379,3 +381,18 @@ def _looks_like_image(content: bytes, ext: str) -> bool:
     if ext == "webp":
         return content[:4] == b"RIFF" and content[8:12] == b"WEBP"
     return False
+
+
+def _remove_avatar_file(avatar: str | None) -> None:
+    """删除本地上传的头像文件；远程/空头像跳过。"""
+    if not avatar:
+        return
+    if not avatar.startswith("/static/uploads/"):
+        return
+    filename = avatar.rsplit("/", 1)[-1]
+    path = os.path.join(UPLOAD_DIR, filename)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass

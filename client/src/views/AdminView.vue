@@ -1,6 +1,6 @@
 <template>
   <div class="admin-page">
-    <van-nav-bar title="用户管理" left-text="返回" left-arrow @click-left="$router.back()" />
+    <van-nav-bar title="用户管理" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="admin-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
@@ -28,10 +28,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { useGoBack } from '@/composables/useGoBack'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
 
 const auth = useAuthStore()
+const { goBack } = useGoBack()
 const refreshing = ref(false)
 const users = ref<any[]>([])
 const showReset = ref(false)

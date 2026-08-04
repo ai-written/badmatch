@@ -10,7 +10,7 @@ class ConnectionManager:
         self._rooms: dict[int, list[WebSocket]] = {}
 
     async def connect(self, tournament_id: int, ws: WebSocket):
-        await ws.accept()
+        # 握手已由调用方完成（websocket_endpoint 中已 accept），这里只登记
         self._rooms.setdefault(tournament_id, []).append(ws)
 
     def disconnect(self, tournament_id: int, ws: WebSocket):

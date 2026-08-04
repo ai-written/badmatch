@@ -1,6 +1,6 @@
 <template>
   <div class="detail-page">
-    <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="$router.back()">
+    <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
       </template>
@@ -144,11 +144,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useGoBack } from '@/composables/useGoBack'
 import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const { goBack } = useGoBack()
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
 

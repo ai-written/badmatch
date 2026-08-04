@@ -10,10 +10,26 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self._data: dict[str, dict] = {}
         self._lock = Lock()
+        self._op_count = 0
+
+    def _prune(self) -> None:
+        """清理过期 key，防止内存无限增长。"""
+        now = time.time()
+        expired = [
+            key for key, entry in self._data.items()
+            if now - entry["start"] >= self.window_seconds
+        ]
+        for key in expired:
+            del self._data[key]
 
     def check(self, key: str) -> bool:
         with self._lock:
             now = time.time()
+            self._op_count += 1
+            # 每 500 次操作或数据量过大时清理一次，均摊 O(1)
+            if self._op_count >= 500 or len(self._data) > 10000:
+                self._op_count = 0
+                self._prune()
             entry = self._data.get(key)
             if entry and now - entry["start"] >= self.window_seconds:
                 del self._data[key]

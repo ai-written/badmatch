@@ -1,6 +1,6 @@
 <template>
   <div class="schedule-page">
-    <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="$router.back()" />
+    <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="schedule-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
@@ -69,8 +69,9 @@
 
             <div class="match-info">
               <span class="match-num">第{{ m.globalIdx }}场</span>
+              <span v-if="m.status === 'finished' && m.duration_seconds != null" class="match-dur">{{ fmtDuration(m.duration_seconds) }}</span>
               <span v-if="m.referee" class="foot-ref has">裁 {{ m.referee.username }}</span>
-              <van-button v-if="m.can_referee" size="mini" type="primary" round @click.stop="claimReferee(m.id)">认领</van-button>
+              <van-button v-if="m.can_referee" size="mini" type="primary" round @click.stop="claimReferee(m.id)">裁判</van-button>
             </div>
           </div>
         </div>
@@ -88,11 +89,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useGoBack } from '@/composables/useGoBack'
 import { showToast } from 'vant'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const { goBack } = useGoBack()
 const refreshing = ref(false)
 const rounds = ref<any[]>([])
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
@@ -101,6 +104,11 @@ function isMyMatch(m: any) {
   if (!auth.user) return false
   const uid = auth.user.id
   return [m.pairing_a?.player_a?.id, m.pairing_a?.player_b?.id, m.pairing_b?.player_a?.id, m.pairing_b?.player_b?.id].includes(uid)
+}
+
+function fmtDuration(sec: number) {
+  if (sec < 60) return `${sec}秒`
+  return `${Math.round(sec / 60)}分钟`
 }
 
 async function fetchRounds() {
@@ -180,6 +188,7 @@ onMounted(() => fetchRounds())
   display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 .match-num { font-size: 10px; color: #aaa; }
+.match-dur { font-size: 10px; color: #bbb; }
 .match-info .van-button { font-size: 10px; height: 22px; padding: 0 6px; }
 
 .avatar-badge { position: relative; display: inline-block; }

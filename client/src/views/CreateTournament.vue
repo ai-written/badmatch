@@ -1,6 +1,6 @@
 <template>
   <div class="page-container">
-    <van-nav-bar title="创建赛事" left-text="取消" left-arrow @click-left="$router.back()" />
+    <van-nav-bar title="创建赛事" left-text="取消" left-arrow @click-left="goBack" />
 
     <van-form @submit="onSubmit" class="create-form">
       <van-cell-group inset>
@@ -122,10 +122,12 @@ import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
+import { useGoBack } from '@/composables/useGoBack'
 import { showToast } from 'vant'
 
 const router = useRouter()
 const auth = useAuthStore()
+const { goBack } = useGoBack()
 const submitting = ref(false)
 const halfCourt = ref(false)
 

@@ -97,6 +97,7 @@ async def start_tournament(
 
     tournament.status = TournamentStatus.ONGOING
     await db.flush()
+    await manager.broadcast(tournament_id, {"type": "tournament_started"})
     return {"ok": True, "rounds": len(rounds_data), "matches": M}
 
 
@@ -256,7 +257,7 @@ async def withdraw_player(
         # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事
         tournament.status = TournamentStatus.FINISHED
         await db.flush()
-        await manager.broadcast(tournament_id, {"type": "registration_updated"})
+        await manager.broadcast(tournament_id, {"type": "tournament_finished"})
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
     if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
@@ -328,4 +329,5 @@ async def end_tournament(
         raise HTTPException(status_code=400, detail="只能结束进行中的赛事")
     tournament.status = TournamentStatus.FINISHED
     await db.flush()
+    await manager.broadcast(tournament_id, {"type": "tournament_finished"})
     return {"ok": True}

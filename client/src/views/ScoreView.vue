@@ -1,6 +1,10 @@
 <template>
   <div class="score-root">
-    <van-nav-bar :title="matchNum" left-text="返回" left-arrow @click-left="$router.back()" />
+    <van-nav-bar :title="matchNum" left-text="返回" left-arrow @click-left="goBack">
+      <template #right>
+        <span v-if="timerActive" class="elapsed">{{ fmtElapsed(elapsed) }}</span>
+      </template>
+    </van-nav-bar>
 
     <van-loading v-if="!match" class="loading" />
     <template v-else>
@@ -51,12 +55,12 @@
           <div class="support-inner">
             <div class="support-fill a" :style="{ flex: supportA }" @click.stop="doSupport('a')">
               <div class="support-avatars">
-                <img v-for="(av, i) in (swapped ? (swapped ? match.support_a_users : match.support_b_users) : match.support_a_users)" :key="'a'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: match.support_a_users.length - i }" />
+                <img v-for="(av, i) in (swapped ? match.support_b_users : match.support_a_users)" :key="'a'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: (swapped ? match.support_b_users.length : match.support_a_users.length) - i }" />
               </div>
             </div>
             <div class="support-fill b" :style="{ flex: supportB }" @click.stop="doSupport('b')">
               <div class="support-avatars">
-                <img v-for="(av, i) in match.support_b_users" :key="'b'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: match.support_b_users.length - i }" />
+                <img v-for="(av, i) in (swapped ? match.support_a_users : match.support_b_users)" :key="'b'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: (swapped ? match.support_a_users.length : match.support_b_users.length) - i }" />
               </div>
             </div>
           </div>
@@ -121,19 +125,69 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useGoBack } from '@/composables/useGoBack'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
+const { goBack } = useGoBack()
 const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
 const swapped = ref(false)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
+
+// --- 比赛持续时长（纯前端，localStorage 持久化） ---
+const elapsed = ref(0)
+const timerActive = ref(false)
+let timer: ReturnType<typeof setInterval> | null = null
+const storageKey = computed(() => `score_start_${route.params.matchId}`)
+const MAX_MATCH_SECONDS = 3 * 60 * 60
+
+function fmtElapsed(sec: number) {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  const hh = h.toString().padStart(2, '0')
+  const mm = m.toString().padStart(2, '0')
+  const ss = s.toString().padStart(2, '0')
+  return h > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
+function updateElapsed() {
+  const start = Number(localStorage.getItem(storageKey.value))
+  if (!start) return
+  const secs = Math.max(0, Math.floor((Date.now() - start) / 1000))
+  // 超过上限视为过期（如忘记结束、隔天补录），清除计时等待下次记分重新开始
+  if (secs > MAX_MATCH_SECONDS) {
+    stopTimer(true)
+    return
+  }
+  elapsed.value = secs
+}
+
+function startTimerIfNeeded() {
+  if (timerActive.value || match.value?.status === 'finished') return
+  const stored = localStorage.getItem(storageKey.value)
+  const start = stored ? Number(stored) : 0
+  if (!start || Date.now() - start > MAX_MATCH_SECONDS * 1000) {
+    localStorage.setItem(storageKey.value, String(Date.now()))
+  }
+  timerActive.value = true
+  updateElapsed()
+  timer = setInterval(updateElapsed, 1000)
+}
+
+function stopTimer(clearStorage: boolean) {
+  if (timer) { clearInterval(timer); timer = null }
+  timerActive.value = false
+  if (clearStorage) localStorage.removeItem(storageKey.value)
+}
+// --- 时长逻辑结束 ---
 
 const isReferee = computed(() => match.value?.referee?.id === auth.user?.id)
 
@@ -213,8 +267,11 @@ let wheelGesture: { id: number; y: number; acc: number; side: string } | null = 
 
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
-  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, pendingScore, { skipLoading: true } as any).catch(() => {})
+  const data = pendingScore
   pendingScore = null
+  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, data, { skipLoading: true } as any).catch(() => {})
+  // await 期间用户又点击了，需要继续冲刷，避免丢分
+  if (pendingScore) scheduleFlush()
 }
 
 function flushScore() {
@@ -228,6 +285,7 @@ function scheduleFlush() {
 
 async function addScore(side: string) {
   if (!match.value) return
+  startTimerIfNeeded()
   if (side === 'a') match.value.score_a = (match.value.score_a ?? 0) + 1
   else match.value.score_b = (match.value.score_b ?? 0) + 1
   pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
@@ -236,6 +294,7 @@ async function addScore(side: string) {
 
 async function subScore(side: string) {
   if (!match.value) return
+  startTimerIfNeeded()
   if (side === 'a' && (match.value.score_a ?? 0) > 0) match.value.score_a -= 1
   else if (side === 'b' && (match.value.score_b ?? 0) > 0) match.value.score_b -= 1
   else return
@@ -282,8 +341,9 @@ async function endMatch() {
   await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
     score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0, force_end: true
   })
+  stopTimer(true)
   showToast('比赛结束')
-  await fetchMatch()
+  goBack()
 }
 
 async function claimReferee() {
@@ -302,6 +362,7 @@ watch(lastMessage, (msg) => {
       if (msg.score_b != null) match.value.score_b = msg.score_b
     }
     if (msg.status) match.value.status = msg.status
+    if (msg.status === 'finished') stopTimer(true)
   }
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
     match.value.support_a = msg.support_a
@@ -310,12 +371,23 @@ watch(lastMessage, (msg) => {
   }
 })
 
-onMounted(async () => { await auth.fetchMe(); await fetchMatch() })
+onMounted(async () => {
+  await auth.fetchMe()
+  await fetchMatch()
+  if (match.value?.status === 'finished') {
+    stopTimer(true)
+  } else if (localStorage.getItem(storageKey.value)) {
+    startTimerIfNeeded()
+  }
+})
+
+onUnmounted(() => stopTimer(false))
 </script>
 
 <style scoped>
 .score-root { min-height: 100vh; background: #f0f2f5; padding-bottom: 40px; }
 .loading { display: flex; justify-content: center; margin-top: 120px; }
+.elapsed { font-size: 12px; color: #666; margin-right: 4px; font-variant-numeric: tabular-nums; }
 
 .scoreboard { display: flex; align-items: center; padding: 16px 8px; background: #fff; margin: 10px 12px; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
 .sb-team { flex: 1; display: flex; justify-content: center; gap: 4px; cursor: pointer; }

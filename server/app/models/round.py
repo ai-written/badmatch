@@ -76,6 +76,8 @@ class Match(Base):
     status: Mapped[MatchStatus] = mapped_column(
         SAEnum(MatchStatus), default=MatchStatus.PENDING
     )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 比赛开始（首次记分）
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 比赛结束
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     tournament: Mapped["Tournament"] = relationship(back_populates="matches")

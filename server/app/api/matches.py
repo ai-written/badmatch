@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -83,10 +84,16 @@ async def update_score(
         raise HTTPException(status_code=403, detail="只有本场裁判可以记分")
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
+    if score.score_a < 0 or score.score_b < 0:
+        raise HTTPException(status_code=400, detail="比分不能为负数")
+
+    # 首次记分视为比赛开始
+    if m.status == MatchStatus.PENDING:
+        m.status = MatchStatus.ONGOING
+        m.started_at = datetime.now()
 
     m.score_a = score.score_a
     m.score_b = score.score_b
-
 
     # Only end via explicit force_end
     if score.force_end:
@@ -98,34 +105,12 @@ async def update_score(
         winner = m.pairing_a_id if sa > sb else m.pairing_b_id
         await _finalize_match(m, winner, db)
         await db.flush()
-        await manager.broadcast(tournament_id, {"type": "match_updated", "match_id": match_id, "score_a": m.score_a, "score_b": m.score_b, "status": m.status.value})
+        await _broadcast_match(m, tournament_id)
+        await _maybe_finish_tournament(tournament_id, db)
         return {"ok": True, "finished": True}
 
-    try:
-        await db.flush()
-    except IntegrityError:
-        # 并发投票时唯一约束冲突，回滚后按已有记录更新
-        await db.rollback()
-        exist = await db.execute(
-            select(MatchSupport).where(
-                MatchSupport.match_id == match_id,
-                MatchSupport.user_id == user.id,
-            ).with_for_update()
-        )
-        support = exist.scalar_one_or_none()
-        if support:
-            support.side = body.side
-        else:
-            db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
-        await db.flush()
-    # broadcast update
-    await manager.broadcast(tournament_id, {
-        "type": "match_updated",
-        "match_id": match_id,
-        "score_a": m.score_a,
-        "score_b": m.score_b,
-        "status": m.status.value,
-    })
+    await db.flush()
+    await _broadcast_match(m, tournament_id)
     return {"ok": True}
 
 
@@ -189,17 +174,31 @@ async def support_match(
     if body.side not in ("a", "b"):
         raise HTTPException(status_code=400, detail="无效的投票方")
 
-    # upsert
-    exist = await db.execute(
-        select(MatchSupport).where(MatchSupport.match_id == match_id, MatchSupport.user_id == user.id)
-    )
-    support = exist.scalar_one_or_none()
-    if support:
-        support.side = body.side
-    else:
-        db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
-
-    await db.flush()
+    # upsert（处理并发首次投票时的唯一约束冲突）
+    try:
+        exist = await db.execute(
+            select(MatchSupport).where(MatchSupport.match_id == match_id, MatchSupport.user_id == user.id)
+        )
+        support = exist.scalar_one_or_none()
+        if support:
+            support.side = body.side
+        else:
+            db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        exist = await db.execute(
+            select(MatchSupport).where(
+                MatchSupport.match_id == match_id,
+                MatchSupport.user_id == user.id,
+            ).with_for_update()
+        )
+        support = exist.scalar_one_or_none()
+        if support:
+            support.side = body.side
+        else:
+            db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
+        await db.flush()
 
     # count
     counts = await _count_supports(match_id, db)
@@ -401,13 +400,29 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
             my_support=my_supports.get(m.id),
             support_a_users=support_a_users,
             support_b_users=support_b_users,
+            duration_seconds=_match_duration(m),
         ))
     return out
+
+
+# 超过该秒数视为异常（如忘记结束、跨天补录），不再显示耗时
+MAX_MATCH_DURATION_SECONDS = 3 * 60 * 60
+
+
+def _match_duration(m: Match) -> int | None:
+    """返回比赛耗时（秒）；时间缺失或异常（跨天/超上限）时为 None。"""
+    if not m.started_at or not m.ended_at:
+        return None
+    secs = int((m.ended_at - m.started_at).total_seconds())
+    if secs < 0 or secs > MAX_MATCH_DURATION_SECONDS:
+        return None
+    return secs
 
 
 async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
     m.status = MatchStatus.FINISHED
     m.winner_pairing_id = winner_pairing_id
+    m.ended_at = datetime.now()
 
     # update PlayerStats for 4 participants
     pa = await db.execute(select(RoundPairing).where(RoundPairing.id == m.pairing_a_id))
@@ -439,6 +454,35 @@ async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
                 stat.matches_lost += 1
             stat.points_for += m.score_a if uid in {pairing_a.player_a_id, pairing_a.player_b_id} else m.score_b
             stat.points_against += m.score_b if uid in {pairing_a.player_a_id, pairing_a.player_b_id} else m.score_a
+
+
+async def _broadcast_match(m: Match, tournament_id: int) -> None:
+    await manager.broadcast(tournament_id, {
+        "type": "match_updated",
+        "match_id": m.id,
+        "score_a": m.score_a,
+        "score_b": m.score_b,
+        "status": m.status.value,
+    })
+
+
+async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession) -> None:
+    """比赛全部结束后自动将赛事置为 finished 并广播。"""
+    remaining = await db.execute(
+        select(func.count(Match.id)).where(
+            Match.tournament_id == tournament_id,
+            Match.status != MatchStatus.FINISHED,
+        )
+    )
+    if (remaining.scalar() or 0) > 0:
+        return
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    if not tournament or tournament.status == TournamentStatus.FINISHED:
+        return
+    tournament.status = TournamentStatus.FINISHED
+    await db.flush()
+    await manager.broadcast(tournament_id, {"type": "tournament_finished"})
 
 
 async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, PlayerInfo | None]:

@@ -10,13 +10,16 @@ export function useWebSocket(tournamentId: number | null) {
   function connect() {
     if (!tournamentId || disposed) return
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${protocol}//${location.host}/ws/tournaments/${tournamentId}`
+    const token = localStorage.getItem('token') || ''
+    const url = `${protocol}//${location.host}/ws/tournaments/${tournamentId}?token=${encodeURIComponent(token)}`
     ws.value = new WebSocket(url)
     ws.value.onmessage = (ev) => {
       lastMessage.value = JSON.parse(ev.data)
     }
-    ws.value.onclose = () => {
+    ws.value.onclose = (ev) => {
       if (disposed) return
+      // 4401 = 未授权，等待重新登录，不自动重连
+      if (ev.code === 4401) return
       // auto-reconnect after 3s
       if (reconnectTimer) clearTimeout(reconnectTimer)
       reconnectTimer = setTimeout(connect, 3000)

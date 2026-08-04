@@ -7,3 +7,5 @@ pgdata/
 .env
 *.log
 server/static/uploads/
+client/components.d.ts
+client/*.tsbuildinfo

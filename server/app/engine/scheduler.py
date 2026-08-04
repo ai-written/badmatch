@@ -1,12 +1,12 @@
 """
-赛程引擎: 贪心构造 + 回溯改善 + 场地时段分配
+赛程引擎: 贪心构造 + 回溯改善
 """
 import random
 from collections import defaultdict
 from itertools import combinations
 
 
-def generate_schedule(players, total_matches, partner_history=None, courts=None):
+def generate_schedule(players, total_matches, partner_history=None):
     N = len(players)
     target = (4 * total_matches) // N
 
@@ -16,9 +16,6 @@ def generate_schedule(players, total_matches, partner_history=None, courts=None)
     schedule, played, partner_count, cool_down = _greedy_build(
         players, total_matches, target, dict(partner_history)
     )
-
-    if courts:
-        schedule = _assign_venues(schedule, courts)
 
     return schedule
 
@@ -70,20 +67,6 @@ def _greedy_build(players, total_matches, target, partner_history):
             cool_down[p] = 0 if p in (pa, pb, pc, pd) else cool_down[p] + 1
 
     return schedule, played, partner_count, cool_down
-
-
-def _assign_venues(matches, courts):
-    flat_slots = []
-    for court_id, slots in courts:
-        for slot in slots:
-            flat_slots.append((court_id, slot))
-
-    assigned = []
-    for i, match in enumerate(matches):
-        idx = i % len(flat_slots) if flat_slots else 0
-        cid, slot = flat_slots[idx] if flat_slots else (None, None)
-        assigned.append((*match, cid, slot))
-    return assigned
 
 
 def compute_match_count(num_players):

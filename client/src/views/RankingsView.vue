@@ -1,6 +1,6 @@
 <template>
   <div class="rank-page">
-    <van-nav-bar title="积分榜" left-text="返回" left-arrow @click-left="$router.back()" />
+    <van-nav-bar title="积分榜" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="rank-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
@@ -47,11 +47,13 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useGoBack } from '@/composables/useGoBack'
 
 const route = useRoute()
 const auth = useAuthStore()
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
+const { goBack } = useGoBack()
 const refreshing = ref(false)
 const ranking = ref<any>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'

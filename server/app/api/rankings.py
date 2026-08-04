@@ -32,10 +32,13 @@ async def get_rankings(
     rows = result.all()
 
     rankings = []
-    for rank_idx, (stat, username, avatar) in enumerate(rows, start=1):
-        # only count active players in rank; dropped players shown at bottom
+    rank = 0
+    for (stat, username, avatar) in rows:
+        # 名次只对活跃选手递增；退赛选手显示在底部且不占名次
+        if stat.is_active:
+            rank += 1
         rankings.append(PlayerRanking(
-            rank=rank_idx,
+            rank=rank if stat.is_active else 0,
             user_id=stat.user_id,
             username=username,
             avatar=avatar,
