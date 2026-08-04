@@ -18,6 +18,7 @@
       <van-form v-else @submit="onRegister" class="auth-form">
         <van-cell-group inset>
           <van-field v-model="registerForm.username" label="用户名" placeholder="请输入用户名" required :rules="[{ required: true, message: '请输入用户名' }]" />
+          <van-field v-model="registerForm.email" label="邮箱" type="email" placeholder="用于接收赛事通知" required :rules="[{ required: true, message: '请输入邮箱' }, { pattern: /^[^@\s]+@[^@\s]+\.[^@\s]+$/, message: '邮箱格式不正确' }]" />
           <van-field name="gender" label="性别">
             <template #input>
               <van-radio-group v-model="registerForm.gender" direction="horizontal">
@@ -27,7 +28,6 @@
             </template>
           </van-field>
           <van-field v-model="registerForm.invite_code" label="邀请码" :placeholder="hasUsers ? '注册邀请码（必填）' : '注册邀请码（首个用户可跳过）'" :required="hasUsers" />
-          <van-field v-model="registerForm.email" label="邮箱（选填）" type="email" placeholder="用于接收赛事通知" />
           <van-field v-model="registerForm.password" label="密码" placeholder="至少6位" type="password" required :rules="[{ required: true, message: '请输入密码' }, { pattern: /^.{6,}$/, message: '密码至少6位' }]" />
         </van-cell-group>
         <div class="form-submit"><van-button round block type="primary" native-type="submit" :loading="submitting">注册</van-button></div>
@@ -50,8 +50,8 @@
 
       <van-cell-group inset>
         <van-cell title="用户名" is-link :value="auth.user.username" @click="newUsername = auth.user?.username || ''; showEditName = true" />
-        <van-cell title="性别" is-link :value="auth.user.gender === 'M' ? '男' : auth.user.gender === 'F' ? '女' : '未设置'" @click="editGender = auth.user?.gender || ''; showEditGender = true" />
         <van-cell title="邮箱" is-link :value="auth.user?.email || '未设置'" @click="editEmail = auth.user?.email || ''; showEditEmail = true" />
+        <van-cell title="性别" is-link :value="auth.user.gender === 'M' ? '男' : auth.user.gender === 'F' ? '女' : '未设置'" @click="editGender = auth.user?.gender || ''; showEditGender = true" />
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px">
@@ -161,7 +161,7 @@ async function onLogin() {
 
 async function onRegister() {
   submitting.value = true
-  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.invite_code, registerForm.email); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
+  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.email, registerForm.invite_code); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
 }
 
 async function generateInvite() {

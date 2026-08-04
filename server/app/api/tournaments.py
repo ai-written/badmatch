@@ -75,9 +75,16 @@ async def create_tournaments_batch(
     db: AsyncSession = Depends(get_db),
 ):
     tournament_ids = []
+    email_tasks = []
     for item in data:
-        t = await _create_tournament(item, user, db, background_tasks)
+        t = await _create_tournament(item, user, db, background_tasks, email_tasks=email_tasks)
         tournament_ids.append(t.id)
+    sent_emails = set()
+    for task in email_tasks:
+        if task[0] in sent_emails:
+            continue
+        sent_emails.add(task[0])
+        background_tasks.add_task(send_tournament_invite, *task)
     return {"ok": True, "tournament_ids": tournament_ids}
 
 
@@ -86,6 +93,7 @@ async def _create_tournament(
     user: User,
     db: AsyncSession,
     background_tasks: BackgroundTasks,
+    email_tasks: list | None = None,
 ) -> Tournament:
     if data.max_participants < 4:
         raise HTTPException(status_code=400, detail="最大人数至少为 4")
@@ -141,17 +149,51 @@ async def _create_tournament(
         target_user = users_map.get(uid)
         if target_user and target_user.email:
             invite_url = f"{settings.FRONTEND_URL}/tournament/{t.id}"
-            background_tasks.add_task(
-                send_tournament_invite,
+            task_args = (
                 target_user.email,
+                user.username,
                 data.title,
                 start_text,
                 data.location,
                 invite_url,
             )
+            if email_tasks is None:
+                background_tasks.add_task(send_tournament_invite, *task_args)
+            else:
+                email_tasks.append(task_args)
 
     await db.flush()
     return t
+
+
+@router.get("/default-title")
+async def default_title(
+    date: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import date as date_cls
+
+    d = date_cls.today()
+    if date:
+        try:
+            d = date_cls.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式不正确")
+
+    month_names = [
+        "一月", "二月", "三月", "四月", "五月", "六月",
+        "七月", "八月", "九月", "十月", "十一月", "十二月",
+    ]
+    first = d.replace(day=1)
+    week = ((d.day - 1 + first.weekday()) // 7) + 1
+    prefix = f"{month_names[d.month - 1]}第{week}周"
+    count_result = await db.execute(
+        select(func.count(Tournament.id)).where(
+            Tournament.title.like(f"{prefix}%友谊赛")
+        )
+    )
+    count = (count_result.scalar() or 0) + 1
+    return {"title": f"{prefix}第{count}次友谊赛"}
 
 
 @router.get("/{tournament_id}", response_model=TournamentDetail)

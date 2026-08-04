@@ -27,6 +27,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://badminton:badminton@db:5432/badminton
       DEBUG: "true"
       SECRET_KEY: docker-dev-secret-key-not-for-production
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     depends_on:
       db:
         condition: service_healthy

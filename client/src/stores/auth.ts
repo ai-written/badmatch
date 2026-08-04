@@ -41,7 +41,7 @@ export const useAuthStore = defineStore('auth', () => {
     setAuth(res.data.access_token, res.data.user)
   }
 
-  async function register(username: string, password: string, gender: string, invite_code?: string, email?: string) {
+  async function register(username: string, password: string, gender: string, email: string, invite_code?: string) {
     const res = await api.post('/auth/register', {
       username,
       password,

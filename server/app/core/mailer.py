@@ -37,11 +37,13 @@ def send_email(to_email: str, subject: str, html: str) -> bool:
 
 def send_tournament_invite(
     to_email: str,
+    host_username: str,
     tournament_title: str,
     start_date: str,
     location: str,
     url: str,
 ) -> bool:
+    date_only = start_date[:10]
     title_esc = escape(tournament_title)
     location_esc = escape(location or "待定")
     url_esc = escape(url)
@@ -55,4 +57,5 @@ def send_tournament_invite(
         f"<p>如果不需要参加，可在赛事详情页取消报名。</p>"
         f"</div>"
     )
-    return send_email(to_email, f"您已被预选加入赛事「{tournament_title}」", html)
+    subject = f"[{host_username}]邀请您加入{date_only}羽毛球赛事"
+    return send_email(to_email, subject, html)

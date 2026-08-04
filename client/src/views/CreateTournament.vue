@@ -165,10 +165,11 @@ const dateDisplay = computed(() => {
   return `${m}月${day}日 ${WEEKDAYS[d.getDay()]}`
 })
 
-function onCalendarConfirm(date: Date) {
+async function onCalendarConfirm(date: Date) {
   selectedDate.value = date
   showCalendar.value = false
   syncDateTime()
+  await fetchDefaultTitle()
 }
 
 // --- 时间段 ---
@@ -215,6 +216,19 @@ function syncDateTime() {
   }
   form.start_date = iso(startHour.value, startMinute.value)
   form.end_date = iso(endHour.value, endMinute.value)
+}
+
+const defaultTitle = ref('')
+
+async function fetchDefaultTitle() {
+  const d = selectedDate.value
+  const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  try {
+    const res = await api.get('/tournaments/default-title', { params: { date: iso } })
+    const title = res.data.title
+    if (!form.title || form.title === defaultTitle.value) form.title = title
+    defaultTitle.value = title
+  } catch {}
 }
 
 // 初始化
@@ -341,6 +355,7 @@ onMounted(async () => {
   await auth.fetchMe()
   fetchOptions()
   await fetchSelectableUsers()
+  await fetchDefaultTitle()
 })
 </script>
 

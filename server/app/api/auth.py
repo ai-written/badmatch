@@ -1,9 +1,12 @@
 import os, re, uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update
+from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
+from app.core.config import get_settings
+from app.core.ratelimit import RateLimiter
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
     AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
@@ -15,6 +18,11 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "static", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+_settings = get_settings()
+login_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
+login_ip_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
+invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
+
 
 @router.post("/register", response_model=TokenResponse)
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
@@ -22,13 +30,14 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
 
-    email = req.email.strip() if req.email else None
-    if email:
-        if not _is_valid_email(email):
-            raise HTTPException(status_code=400, detail="邮箱格式不正确")
-        email_exist = await db.execute(select(User).where(User.email == email))
-        if email_exist.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="邮箱已被使用")
+    email = req.email.strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="邮箱不能为空")
+    if not _is_valid_email(email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    email_exist = await db.execute(select(User).where(User.email == email))
+    if email_exist.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="邮箱已被使用")
 
     first_check = await db.execute(select(func.count(User.id)))
     is_first = first_check.scalar() == 0
@@ -37,9 +46,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if not is_first:
         if not req.invite_code:
             raise HTTPException(status_code=400, detail="需要邀请码")
+        if not invite_limiter.check(req.invite_code):
+            raise HTTPException(status_code=429, detail="邀请码尝试次数过多，请稍后再试")
         inviter = await db.execute(select(User).where(User.invite_code == req.invite_code))
         inviter_user = inviter.scalar_one_or_none()
         if not inviter_user:
+            invite_limiter.record_failure(req.invite_code)
             raise HTTPException(status_code=400, detail="邀请码无效")
         invited_by_id = inviter_user.id
 
@@ -52,18 +64,33 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         role="superadmin" if is_first else "user",
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
 
     token = create_access_token({"sub": str(user.id)})
     return TokenResponse(access_token=token, user=_profile(user))
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    req: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    if not login_limiter.check(req.username):
+        raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
+    ip = _client_ip(request)
+    if not login_ip_limiter.check(ip):
+        raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
     result = await db.execute(select(User).where(User.username == req.username))
     user = result.scalar_one_or_none()
     if not user or not verify_password(req.password, user.password_hash):
+        login_limiter.record_failure(req.username)
+        login_ip_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="用户名或密码错误")
+    login_limiter.reset(req.username)
     token = create_access_token({"sub": str(user.id)})
     return TokenResponse(access_token=token, user=_profile(user))
 
@@ -106,7 +133,10 @@ async def update_profile(
             if email_exist.scalar_one_or_none():
                 raise HTTPException(status_code=400, detail="邮箱已被使用")
         user.email = email
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
     return {"ok": True}
 
 
@@ -124,6 +154,7 @@ async def change_password(
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少6位")
     user.password_hash = hash_password(new_password)
+    login_limiter.reset(user.username)
     await db.flush()
     return {"ok": True}
 
@@ -311,6 +342,7 @@ async def admin_reset_password(
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="密码至少6位")
     user.password_hash = hash_password(body.new_password)
+    login_limiter.reset(user.username)
     await db.flush()
     return {"ok": True}
 
@@ -328,6 +360,13 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def _is_valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.match(email))
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _looks_like_image(content: bytes, ext: str) -> bool:

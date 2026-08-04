@@ -6,7 +6,7 @@ class RegisterRequest(BaseModel):
     password: str
     gender: str | None = None
     invite_code: str | None = None
-    email: str | None = None
+    email: str
 
 
 class LoginRequest(BaseModel):
