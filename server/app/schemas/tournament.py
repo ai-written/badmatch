@@ -43,6 +43,7 @@ class TournamentCreate(BaseModel):
     total_matches: int | None = None
     points_to_win: int = 11
     courts: list[CourtCreate] = []
+    preselect_player_ids: list[int] = []
 
 
 class TournamentBrief(BaseModel):

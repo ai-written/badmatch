@@ -60,7 +60,7 @@
         <van-cell title="参赛次数" :value="String(stats.tournaments_played)" />
       </van-cell-group>
 
-      <van-cell-group inset style="margin-top:12px" v-if="auth.user?.role === 'admin'">
+      <van-cell-group inset style="margin-top:12px" v-if="auth.user && auth.user.role !== 'user'">
         <van-cell title="用户管理" is-link to="/admin" />
       </van-cell-group>
 

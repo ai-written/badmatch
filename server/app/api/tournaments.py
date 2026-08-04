@@ -60,6 +60,39 @@ async def create_tournament(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    t = await _create_tournament(data, user, db)
+    return await _tournament_detail(t, db)
+
+
+@router.post("/batch")
+async def create_tournaments_batch(
+    data: list[TournamentCreate],
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tournament_ids = []
+    for item in data:
+        t = await _create_tournament(item, user, db)
+        tournament_ids.append(t.id)
+    return {"ok": True, "tournament_ids": tournament_ids}
+
+
+async def _create_tournament(data: TournamentCreate, user: User, db: AsyncSession) -> Tournament:
+    if data.max_participants < 4:
+        raise HTTPException(status_code=400, detail="最大人数至少为 4")
+
+    preselected = list(dict.fromkeys(data.preselect_player_ids))
+    if preselected:
+        if user.role not in ("admin", "superadmin"):
+            raise HTTPException(status_code=403, detail="只有管理员可以预选参赛人员")
+        if len(preselected) > data.max_participants:
+            raise HTTPException(status_code=400, detail="预选人数超过最大人数")
+        users_result = await db.execute(select(User).where(User.id.in_(preselected)))
+        found_ids = {u.id for u in users_result.scalars().all()}
+        missing = [uid for uid in preselected if uid not in found_ids]
+        if missing:
+            raise HTTPException(status_code=400, detail="部分预选用户不存在")
+
     t = Tournament(
         creator_id=user.id,
         title=data.title,
@@ -82,8 +115,11 @@ async def create_tournament(
         for ts_data in c_data.time_slots:
             db.add(TimeSlot(court_id=court.id, start_time=ts_data.start_time, end_time=ts_data.end_time))
 
+    for uid in preselected:
+        db.add(Registration(tournament_id=t.id, user_id=uid, is_active=True))
+
     await db.flush()
-    return await _tournament_detail(t, db)
+    return t
 
 
 @router.get("/{tournament_id}", response_model=TournamentDetail)

@@ -11,8 +11,10 @@ services:
       POSTGRES_DB: badminton
       TZ: Asia/Shanghai
       PGTZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./pgdata:/var/lib/postgresql/data
     restart: always
 
   server:
@@ -22,7 +24,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-to-a-random-string}
       TZ: Asia/Shanghai
     volumes:
-      - uploads:/app/static/uploads
+      - ./uploads:/app/static/uploads
     depends_on:
       - db
     restart: always

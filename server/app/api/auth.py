@@ -4,7 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
-from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats, AdminResetPassword
+from app.schemas.auth import (
+    RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
+    AdminResetPassword, AdminSetRole, SelectableUser,
+)
 from app.models.user import User
 from app.models.tournament import PlayerStats
 
@@ -37,6 +40,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         password_hash=hash_password(req.password),
         gender=req.gender,
         invited_by=invited_by_id,
+        role="superadmin" if is_first else "user",
     )
     db.add(user)
     await db.flush()
@@ -182,10 +186,53 @@ async def list_users(
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if admin.role != "admin":
+    if admin.role != "superadmin":
         raise HTTPException(status_code=403)
     result = await db.execute(select(User).order_by(User.id))
     return [_profile(u) for u in result.scalars().all()]
+
+
+@router.get("/admin/selectable-users", response_model=list[SelectableUser])
+async def selectable_users(
+    admin: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if admin.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403)
+    result = await db.execute(select(User).order_by(User.id))
+    return [
+        SelectableUser(
+            id=u.id,
+            username=u.username,
+            avatar=u.avatar or "",
+            gender=u.gender,
+            role=u.role,
+        )
+        for u in result.scalars().all()
+    ]
+
+
+@router.post("/admin/set-role")
+async def set_role(
+    body: AdminSetRole,
+    admin: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if admin.role != "superadmin":
+        raise HTTPException(status_code=403)
+    if body.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="角色只能是 admin 或 user")
+    if body.user_id == admin.id:
+        raise HTTPException(status_code=400, detail="不能修改自己的角色")
+    target = await db.execute(select(User).where(User.id == body.user_id))
+    target_user = target.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if target_user.role == "superadmin":
+        raise HTTPException(status_code=403, detail="超级管理员角色不能通过接口修改")
+    target_user.role = body.role
+    await db.flush()
+    return {"ok": True, "user_id": target_user.id, "role": target_user.role}
 
 
 @router.delete("/admin/users/{user_id}")
@@ -194,7 +241,7 @@ async def delete_user(
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if admin.role != "admin":
+    if admin.role != "superadmin":
         raise HTTPException(status_code=403)
     u = await db.execute(select(User).where(User.id == user_id))
     user = u.scalar_one_or_none()
@@ -234,7 +281,7 @@ async def admin_reset_password(
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if admin.role != "admin":
+    if admin.role != "superadmin":
         raise HTTPException(status_code=403)
     u = await db.execute(select(User).where(User.id == body.user_id))
     user = u.scalar_one_or_none()

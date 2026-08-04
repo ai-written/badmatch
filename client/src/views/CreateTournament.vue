@@ -30,6 +30,14 @@
           readonly clickable label="总场次" placeholder="自动（推荐14场）"
           @click="showMatchPicker = true"
         />
+
+        <van-field
+          v-if="canPreselect"
+          :model-value="preselectedIds.length ? `${preselectedIds.length} 人已选` : '未选择'"
+          readonly clickable label="默认参赛人员"
+          placeholder="可选，创建后自动报名"
+          @click="showUserPicker = true"
+        />
       </van-cell-group>
 
       <div style="margin: 16px;">
@@ -82,16 +90,42 @@
         />
       </van-cell-group>
     </van-popup>
+
+    <!-- 默认参赛人员选择 -->
+    <van-popup v-model:show="showUserPicker" position="bottom" round :style="{ height: '60%' }">
+      <div class="picker-toolbar">
+        <span @click="showUserPicker = false">取消</span>
+        <span class="picker-title">选择默认参赛人员</span>
+        <span @click="showUserPicker = false" style="color:#1989fa">完成</span>
+      </div>
+      <div class="user-picker-body">
+        <van-cell
+          v-for="u in selectableUsers"
+          :key="u.id"
+          clickable
+          :title="u.username"
+          :label="userRoleLabel(u.role)"
+          @click="toggleUser(u.id)"
+        >
+          <template #right-icon>
+            <van-checkbox :model-value="preselectedIds.includes(u.id)" @click.stop="toggleUser(u.id)" />
+          </template>
+        </van-cell>
+        <van-empty v-if="selectableUsers.length === 0" description="暂无用户" />
+      </div>
+    </van-popup>
   </div>
 </template>
 
 <script setup lang="ts">
 import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { showToast } from 'vant'
 
 const router = useRouter()
+const auth = useAuthStore()
 const submitting = ref(false)
 const halfCourt = ref(false)
 
@@ -189,6 +223,31 @@ syncDateTime()
 // --- 场次 ---
 const showMatchPicker = ref(false)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
+const showUserPicker = ref(false)
+const selectableUsers = ref<any[]>([])
+const preselectedIds = ref<number[]>([])
+
+const canPreselect = computed(() =>
+  !!auth.user && (auth.user.role === 'admin' || auth.user.role === 'superadmin')
+)
+
+function userRoleLabel(role: string) {
+  return role === 'superadmin' ? '超级管理员' : role === 'admin' ? '管理员' : '普通用户'
+}
+
+function toggleUser(id: number) {
+  const idx = preselectedIds.value.indexOf(id)
+  if (idx >= 0) preselectedIds.value.splice(idx, 1)
+  else preselectedIds.value.push(id)
+}
+
+async function fetchSelectableUsers() {
+  if (!canPreselect.value) return
+  try {
+    const res = await api.get('/auth/admin/selectable-users', { skipLoading: true } as any)
+    selectableUsers.value = res.data
+  } catch {}
+}
 
 const closestMatch = computed(() => {
   if (matchOptions.value.length === 0) return null
@@ -240,6 +299,7 @@ function buildPayload(title: string, start: string, end: string) {
     entry_fee: (Number(form.entry_fee) || 0) * 100,
     total_matches: form.total_matches,
     points_to_win: Number(form.points_to_win) || 11,
+    preselect_player_ids: preselectedIds.value,
     courts: form.court ? [{
       name: form.court,
       sort_order: 0,
@@ -265,8 +325,9 @@ async function onSubmit() {
       const dp = `${y}-${mo}-${day}T`
       const st = `${String(startHour.value).padStart(2, '0')}:${String(startMinute.value).padStart(2, '0')}:00`
       const et = `${String(endHour.value).padStart(2, '0')}:${String(endMinute.value).padStart(2, '0')}:00`
-      await api.post('/tournaments', buildPayload(form.title + '（上半场）', dp + st, dp + midTime))
-      await api.post('/tournaments', buildPayload(form.title + '（下半场）', dp + midTime, dp + et))
+      const upper = buildPayload(form.title + '（上半场）', dp + st, dp + midTime)
+      const lower = buildPayload(form.title + '（下半场）', dp + midTime, dp + et)
+      await api.post('/tournaments/batch', [upper, lower])
       showToast('上下场赛事已创建')
     } else {
       await api.post('/tournaments', buildPayload(form.title, form.start_date, form.end_date))
@@ -276,7 +337,11 @@ async function onSubmit() {
   } catch {} finally { submitting.value = false }
 }
 
-onMounted(() => { fetchOptions() })
+onMounted(async () => {
+  await auth.fetchMe()
+  fetchOptions()
+  await fetchSelectableUsers()
+})
 </script>
 
 <style scoped>
@@ -291,4 +356,5 @@ onMounted(() => { fetchOptions() })
 .time-pickers { display: flex; align-items: center; justify-content: center; }
 .time-pickers .van-picker { flex: 1; }
 .time-colon { font-size: 20px; font-weight: 700; color: #333; margin: 0 4px; }
+.user-picker-body { max-height: calc(60vh - 44px); overflow-y: auto; }
 </style>

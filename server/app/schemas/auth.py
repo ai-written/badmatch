@@ -36,6 +36,19 @@ class AdminResetPassword(BaseModel):
     new_password: str
 
 
+class AdminSetRole(BaseModel):
+    user_id: int
+    role: str
+
+
+class SelectableUser(BaseModel):
+    id: int
+    username: str
+    avatar: str
+    gender: str | None = None
+    role: str = "user"
+
+
 class UserStats(BaseModel):
     total_matches: int = 0
     total_wins: int = 0

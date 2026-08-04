@@ -1,6 +1,6 @@
 from datetime import datetime, time
 from sqlalchemy import (
-    String, Integer, Boolean, Text, DateTime, Time,
+    String, Integer, Boolean, Text, DateTime, Time, UniqueConstraint,
     ForeignKey, func, Enum as SAEnum,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -45,6 +45,9 @@ class Tournament(Base):
 
 class Registration(Base):
     __tablename__ = "registrations"
+    __table_args__ = (
+        UniqueConstraint("tournament_id", "user_id", name="uq_registrations_tournament_user"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
