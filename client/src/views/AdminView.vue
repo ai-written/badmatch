@@ -50,9 +50,9 @@ function roleLabel(role: string) {
   return role === 'superadmin' ? '超级管理员' : role === 'admin' ? '管理员' : '用户'
 }
 
-async function fetchUsers() {
+async function fetchUsers(skipLoading = false) {
   const url = isSuper.value ? '/auth/admin/users' : '/auth/admin/selectable-users'
-  const res = await api.get(url)
+  const res = await api.get(url, { skipLoading } as any)
   users.value = res.data
 }
 
@@ -83,7 +83,7 @@ async function doResetPwd() {
 }
 
 async function onRefresh() {
-  try { await fetchUsers() } finally { refreshing.value = false }
+  try { await fetchUsers(true) } finally { refreshing.value = false }
 }
 onMounted(async () => {
   await auth.fetchMe()
@@ -93,7 +93,7 @@ onMounted(async () => {
 
 <style scoped>
 .admin-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
-.admin-scroll { flex: 1; overflow-y: auto; }
+.admin-scroll { flex: 1; overflow-y: auto; padding-top: 12px; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
 .user-avatar { margin-right: 10px; flex-shrink: 0; }

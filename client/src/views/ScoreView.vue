@@ -372,8 +372,7 @@ watch(lastMessage, (msg) => {
 })
 
 onMounted(async () => {
-  await auth.fetchMe()
-  await fetchMatch()
+  await Promise.all([auth.fetchMe(), fetchMatch()])
   if (match.value?.status === 'finished') {
     stopTimer(true)
   } else if (localStorage.getItem(storageKey.value)) {

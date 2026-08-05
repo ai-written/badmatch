@@ -197,12 +197,12 @@ async function viewPlayer(r: any) {
   }
 }
 
-async function fetchDetail() {
-  const res = await api.get(`/tournaments/${route.params.id}`)
+async function fetchDetail(skipLoading = false) {
+  const res = await api.get(`/tournaments/${route.params.id}`, { skipLoading } as any)
   tournament.value = res.data
 }
-async function fetchRegistrations() {
-  const res = await api.get(`/tournaments/${route.params.id}/registrations`)
+async function fetchRegistrations(skipLoading = false) {
+  const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
   registrations.value = res.data
 }
 async function doRegister() {
@@ -292,7 +292,7 @@ async function doEndTournament() {
 
 async function onRefresh() {
   try {
-    await Promise.all([fetchDetail(), fetchRegistrations()])
+    await Promise.all([fetchDetail(true), fetchRegistrations(true)])
   } finally {
     refreshing.value = false
   }
@@ -304,9 +304,7 @@ watch(lastMessage, () => {
 })
 
 onMounted(async () => {
-  await auth.fetchMe()
-  await fetchDetail()
-  await fetchRegistrations()
+  await Promise.all([auth.fetchMe(), fetchDetail(), fetchRegistrations()])
 })
 </script>
 

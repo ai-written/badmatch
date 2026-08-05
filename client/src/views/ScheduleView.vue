@@ -111,8 +111,8 @@ function fmtDuration(sec: number) {
   return `${Math.round(sec / 60)}分钟`
 }
 
-async function fetchRounds() {
-  const res = await api.get(`/tournaments/${route.params.id}/rounds`)
+async function fetchRounds(skipLoading = false) {
+  const res = await api.get(`/tournaments/${route.params.id}/rounds`, { skipLoading } as any)
   rounds.value = res.data
 }
 
@@ -135,7 +135,7 @@ const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
 watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRounds() })
 async function onRefresh() {
-  try { await fetchRounds() } finally { refreshing.value = false }
+  try { await fetchRounds(true) } finally { refreshing.value = false }
 }
 const flatRounds = computed(() => {
   let idx = 0
@@ -149,7 +149,7 @@ onMounted(() => fetchRounds())
 
 <style scoped>
 .schedule-page { height: 100vh; display: flex; flex-direction: column; background: #f0f2f5; }
-.schedule-scroll { flex: 1; overflow-y: auto; }
+.schedule-scroll { flex: 1; overflow-y: auto; padding-top: 12px; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
 .empty-block { padding-top: 80px; }

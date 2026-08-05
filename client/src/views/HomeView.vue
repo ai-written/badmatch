@@ -66,14 +66,12 @@ function fmtDateTime(start: string, end: string) {
 
 async function onLoad() {
   finished.value = true
-  await store.fetchList()
+  await store.fetchList(undefined, true)
 }
 
 async function onRefresh() {
-  finished.value = false
-  store.list = []
   try {
-    await store.fetchList()
+    await store.fetchList(undefined, true)
   } finally {
     refreshing.value = false
     finished.value = true

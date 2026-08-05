@@ -28,10 +28,10 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('token')
   }
 
-  async function fetchMe() {
+  async function fetchMe(skipLoading = false) {
     if (!token.value) return
     try {
-      const res = await api.get('/auth/me')
+      const res = await api.get('/auth/me', { skipLoading } as any)
       user.value = res.data
     } catch { logout() }
   }

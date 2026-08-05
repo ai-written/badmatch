@@ -49,13 +49,13 @@ function formatTime(t: string) {
   return t.replace('T', ' ').slice(0, 16)
 }
 
-async function fetchList() {
-  const res = await api.get('/notifications')
+async function fetchList(skipLoading = false) {
+  const res = await api.get('/notifications', { skipLoading } as any)
   notifications.value = res.data
 }
 
 async function onRefresh() {
-  try { await fetchList() } finally { refreshing.value = false }
+  try { await fetchList(true) } finally { refreshing.value = false }
 }
 
 async function openNotification(n: any) {

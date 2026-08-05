@@ -132,13 +132,13 @@ const showEditPwd = ref(false); const oldPwd = ref(''); const newPwd = ref('')
 const showEditName = ref(false); const newUsername = ref('')
 const showEditEmail = ref(false); const editEmail = ref('')
 
-async function fetchStats() {
-  try { const res = await api.get('/auth/stats'); Object.assign(stats, res.data) } catch {}
+async function fetchStats(skipLoading = false) {
+  try { const res = await api.get('/auth/stats', { skipLoading } as any); Object.assign(stats, res.data) } catch {}
 }
 
-async function fetchUnread() {
+async function fetchUnread(skipLoading = false) {
   try {
-    const res = await api.get('/notifications/unread-count')
+    const res = await api.get('/notifications/unread-count', { skipLoading } as any)
     unreadCount.value = res.data.count || 0
   } catch {}
 }
@@ -203,9 +203,7 @@ async function saveEmail() {
 
 async function onRefresh() {
   try {
-    await fetchStats()
-    await fetchUnread()
-    await auth.fetchMe()
+    await Promise.all([fetchStats(true), fetchUnread(true), auth.fetchMe(true)])
     if (auth.user?.invite_code) inviteCode.value = auth.user.invite_code
   } finally {
     refreshing.value = false
@@ -213,12 +211,17 @@ async function onRefresh() {
 }
 
 onMounted(async () => {
-  try { const r = await api.get('/auth/has-users'); hasUsers.value = r.data.exists } catch {}
   const urlParams = new URLSearchParams(window.location.search)
   const ip = urlParams.get('invite')
   if (ip) { loginTab.value = 1; registerForm.invite_code = ip }
-  await auth.fetchMe()
-  if (auth.user) { await fetchStats(); await fetchUnread(); if (auth.user.invite_code) inviteCode.value = auth.user.invite_code }
+  await Promise.all([
+    api.get('/auth/has-users').then(r => { hasUsers.value = r.data.exists }).catch(() => {}),
+    auth.fetchMe(),
+  ])
+  if (auth.user) {
+    await Promise.all([fetchStats(), fetchUnread()])
+    if (auth.user.invite_code) inviteCode.value = auth.user.invite_code
+  }
 })
 </script>
 

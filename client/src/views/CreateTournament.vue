@@ -35,7 +35,7 @@
           :model-value="preselectedIds.length ? `${preselectedIds.length} 人已选` : '未选择'"
           readonly clickable label="默认参赛人员"
           placeholder="可选，创建后自动报名"
-          @click="showUserPicker = true"
+          @click="openUserPicker"
         />
       </van-cell-group>
 
@@ -240,6 +240,7 @@ const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const showUserPicker = ref(false)
 const selectableUsers = ref<any[]>([])
 const preselectedIds = ref<number[]>([])
+let selectableUsersLoaded = false
 
 const canPreselect = computed(() =>
   !!auth.user && (auth.user.role === 'admin' || auth.user.role === 'superadmin')
@@ -256,11 +257,22 @@ function toggleUser(id: number) {
 }
 
 async function fetchSelectableUsers() {
-  if (!canPreselect.value) return
+  if (!canPreselect.value) return false
+  if (selectableUsersLoaded) return true
   try {
     const res = await api.get('/auth/admin/selectable-users', { skipLoading: true } as any)
     selectableUsers.value = res.data
-  } catch {}
+    selectableUsersLoaded = true
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function openUserPicker() {
+  if (await fetchSelectableUsers()) {
+    showUserPicker.value = true
+  }
 }
 
 const closestMatch = computed(() => {
@@ -351,10 +363,7 @@ async function onSubmit() {
 }
 
 onMounted(async () => {
-  await auth.fetchMe()
-  fetchOptions()
-  await fetchSelectableUsers()
-  await fetchDefaultTitle()
+  await Promise.all([auth.fetchMe(), fetchOptions(), fetchDefaultTitle()])
 })
 </script>
 

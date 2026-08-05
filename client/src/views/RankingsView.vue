@@ -70,18 +70,17 @@ function winRate(p: any) {
   return Math.round((p.matches_won / p.matches_played) * 100)
 }
 
-async function fetchRankings() {
-  const res = await api.get(`/tournaments/${route.params.id}/rankings`)
+async function fetchRankings(skipLoading = false) {
+  const res = await api.get(`/tournaments/${route.params.id}/rankings`, { skipLoading } as any)
   ranking.value = res.data
 }
 
 async function onRefresh() {
-  try { await fetchRankings() } finally { refreshing.value = false }
+  try { await fetchRankings(true) } finally { refreshing.value = false }
 }
 watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRankings() })
 onMounted(async () => {
-  await auth.fetchMe()
-  await fetchRankings()
+  await Promise.all([auth.fetchMe(), fetchRankings()])
 })
 </script>
 

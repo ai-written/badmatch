@@ -19,11 +19,11 @@ export const useTournamentStore = defineStore('tournament', () => {
   const list = ref<TournamentBrief[]>([])
   const loading = ref(false)
 
-  async function fetchList(status?: string) {
+  async function fetchList(status?: string, skipLoading = false) {
     loading.value = true
     try {
       const params = status ? { status } : {}
-      const res = await api.get('/tournaments', { params })
+      const res = await api.get('/tournaments', { params, skipLoading } as any)
       list.value = res.data
     } finally {
       loading.value = false
