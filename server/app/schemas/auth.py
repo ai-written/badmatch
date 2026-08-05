@@ -33,6 +33,8 @@ class UserProfile(BaseModel):
     gender: str | None = None
     role: str = "user"
     invite_code: str | None = None
+    invited_by: int | None = None
+    invited_by_username: str | None = None
 
     class Config:
         from_attributes = True
@@ -61,6 +63,7 @@ class SelectableUser(BaseModel):
     avatar: str
     gender: str | None = None
     role: str = "user"
+    invited_by: int | None = None
 
 
 class UserStats(BaseModel):

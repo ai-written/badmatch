@@ -45,16 +45,40 @@ async def _constraint_exists(conn: AsyncConnection, name: str) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+async def _migration_applied(conn: AsyncConnection, name: str) -> bool:
+    await conn.execute(
+        text("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+    )
+    result = await conn.execute(
+        text("SELECT 1 FROM schema_migrations WHERE name = :name"),
+        {"name": name},
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def _mark_migration(conn: AsyncConnection, name: str) -> None:
+    await conn.execute(
+        text(
+            "INSERT INTO schema_migrations (name) VALUES (:name) "
+            "ON CONFLICT (name) DO NOTHING"
+        ),
+        {"name": name},
+    )
+
+
 async def run_startup_migrations(conn: AsyncConnection) -> None:
     if not await _table_exists(conn, "users"):
         # 全新库由 create_all 完整创建，无需补丁
         return
 
-    # 老库 admin 角色升级为 superadmin（幂等，可重复执行）
-    logger.info("migration: upgrade admin -> superadmin")
-    await conn.execute(
-        text("UPDATE users SET role = 'superadmin' WHERE role = 'admin'")
-    )
+    # 老库 admin 角色升级为 superadmin：只执行一次，
+    # 避免每次重启都把后来新设的 admin 再次升级
+    if not await _migration_applied(conn, "upgrade_admin_to_superadmin"):
+        logger.info("migration: upgrade admin -> superadmin (once)")
+        await conn.execute(
+            text("UPDATE users SET role = 'superadmin' WHERE role = 'admin'")
+        )
+        await _mark_migration(conn, "upgrade_admin_to_superadmin")
 
     if not await _column_exists(conn, "users", "email"):
         logger.info("migration: adding users.email column")

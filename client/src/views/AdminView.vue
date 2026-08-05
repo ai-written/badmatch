@@ -6,10 +6,13 @@
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
     <van-cell-group inset v-for="u in users" :key="u.id" style="margin-bottom:4px">
-      <van-cell :title="u.username" :label="`ID:${u.id}  ${roleLabel(u.role)}  ${u.gender === 'M' ? '男' : u.gender === 'F' ? '女' : '-'}`">
+      <van-cell :title="u.username" :label="`ID:${u.id}  ${roleLabel(u.role)}  ${u.gender === 'M' ? '男' : u.gender === 'F' ? '女' : '-'}${u.invited_by_username ? ` 邀请人：${u.invited_by_username}` : ''}`">
+        <template #icon>
+          <van-image round width="36" height="36" :src="u.avatar || defaultAvatar" class="user-avatar" />
+        </template>
         <template #value>
           <van-button v-if="isSuper && u.role !== 'superadmin' && u.id !== auth.user?.id" size="small" type="warning" @click="toggleRole(u)">{{ u.role === 'admin' ? '取消管理员' : '设为管理员' }}</van-button>
-          <van-button v-if="isSuper && u.id !== auth.user?.id" size="small" type="danger" style="margin-left:6px" @click="doDelete(u)">删除</van-button>
+          <van-button v-if="u.id !== auth.user?.id && (isSuper || u.invited_by === auth.user?.id)" size="small" type="danger" style="margin-left:6px" @click="doDelete(u)">删除</van-button>
         </template>
       </van-cell>
       <van-cell v-if="isSuper && u.id !== auth.user?.id" title="重置密码" is-link @click="openResetPwd(u)" />
@@ -39,6 +42,7 @@ const users = ref<any[]>([])
 const showReset = ref(false)
 const resetPwd = ref('')
 const resetUserId = ref(0)
+const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 const isSuper = computed(() => auth.user?.role === 'superadmin')
 
@@ -92,4 +96,5 @@ onMounted(async () => {
 .admin-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
+.user-avatar { margin-right: 10px; flex-shrink: 0; }
 </style>

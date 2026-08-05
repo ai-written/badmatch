@@ -179,9 +179,16 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
     with open(filepath, "wb") as f:
         f.write(content)
-    _remove_avatar_file(user.avatar)
+    old_avatar = user.avatar
     user.avatar = f"/static/uploads/{filename}"
-    await db.flush()
+    try:
+        await db.flush()
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        _remove_avatar_file(f"/static/uploads/{filename}")
+        raise
+    _remove_avatar_file(old_avatar)
     return {"avatar": user.avatar}
 
 
@@ -244,7 +251,16 @@ async def list_users(
     if admin.role != "superadmin":
         raise HTTPException(status_code=403)
     result = await db.execute(select(User).order_by(User.id))
-    return [_profile(u) for u in result.scalars().all()]
+    users = result.scalars().all()
+    inviter_ids = {u.invited_by for u in users if u.invited_by}
+    inviters: dict[int, str] = {}
+    if inviter_ids:
+        rows = await db.execute(select(User.id, User.username).where(User.id.in_(inviter_ids)))
+        inviters = {uid: name for uid, name in rows.all()}
+    return [
+        _profile(u, invited_by_username=inviters.get(u.invited_by))
+        for u in users
+    ]
 
 
 @router.get("/admin/selectable-users", response_model=list[SelectableUser])
@@ -262,6 +278,7 @@ async def selectable_users(
             avatar=u.avatar or "",
             gender=u.gender,
             role=u.role,
+            invited_by=u.invited_by,
         )
         for u in result.scalars().all()
     ]
@@ -304,6 +321,10 @@ async def delete_user(
         raise HTTPException(status_code=404)
     if user.id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己")
+    if admin.role != "superadmin" and user.invited_by != admin.id:
+        raise HTTPException(status_code=403, detail="只能删除通过自己邀请码注册的用户")
+    if admin.role != "superadmin" and user.role != "user":
+        raise HTTPException(status_code=403, detail="只能删除普通用户")
     from app.models.tournament import Registration, Tournament, PlayerStats as PS
     from app.models.round import Match, MatchSupport, Notification, RoundPairing
 
@@ -351,11 +372,12 @@ async def admin_reset_password(
     return {"ok": True}
 
 
-def _profile(u: User) -> UserProfile:
+def _profile(u: User, invited_by_username: str | None = None) -> UserProfile:
     return UserProfile(
         id=u.id, username=u.username, email=u.email,
         avatar=u.avatar, gender=u.gender, role=u.role,
-        invite_code=u.invite_code,
+        invite_code=u.invite_code, invited_by=u.invited_by,
+        invited_by_username=invited_by_username,
     )
 
 
