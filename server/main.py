@@ -16,7 +16,9 @@ from app.core.database import engine, Base, async_session_factory
 from app.core.security import decode_access_token
 from app.core.startup_migration import run_startup_migrations
 from app.core.websocket import manager
-from app.models import user, tournament, round
+from app.core.access_log import AccessLogMiddleware
+from app.core.audit import cleanup_expired_audit_logs
+from app.models import user, tournament, round, audit
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -34,11 +36,15 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await run_startup_migrations(conn)
         await conn.run_sync(Base.metadata.create_all)
+        # 启动时清理过期审计记录
+        await cleanup_expired_audit_logs(conn)
     yield
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
+# 访问日志中间件（最外层，记录所有 HTTP 请求）
+app.add_middleware(AccessLogMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,

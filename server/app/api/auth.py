@@ -1,4 +1,4 @@
-import os, re, secrets, uuid, logging
+import os, re, secrets, uuid, logging, json, asyncio
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update, text
@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
 from app.core.config import get_settings
 from app.core.ratelimit import RateLimiter
+from app.core.audit import audit, get_client_ip
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
     AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
@@ -14,6 +15,7 @@ from app.schemas.auth import (
 )
 from app.models.user import User
 from app.models.tournament import PlayerStats
+from app.models.audit import AuditLog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -70,7 +72,7 @@ async def register(
         invited_by_id = inviter_user.id
     else:
         # 首个用户将成为超级管理员，必须提供初始化注册码，防止被抢先注册
-        ip = _client_ip(request)
+        ip = get_client_ip(request)
         if not init_limiter.check(ip):
             raise HTTPException(status_code=429, detail="初始注册码尝试次数过多，请稍后再试")
         code = req.init_code.strip() if req.init_code else ""
@@ -93,7 +95,15 @@ async def register(
     except IntegrityError:
         raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
 
-    token = create_access_token({"sub": str(user.id)}, token_version=user.token_version)
+    token = create_access_token(
+        {"sub": str(user.id), "username": user.username},
+        token_version=user.token_version,
+    )
+    await audit(
+        user=user, action="register",
+        detail={"is_first": is_first, "role": user.role, "username": user.username},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return TokenResponse(access_token=token, user=_profile(user))
 
 
@@ -105,7 +115,7 @@ async def login(
 ):
     if not login_limiter.check(req.username):
         raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
-    ip = _client_ip(request)
+    ip = get_client_ip(request)
     if not login_ip_limiter.check(ip):
         raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
     result = await db.execute(select(User).where(User.username == req.username))
@@ -113,14 +123,28 @@ async def login(
     if not user or not verify_password(req.password, user.password_hash):
         login_limiter.record_failure(req.username)
         login_ip_limiter.record_failure(ip)
+        await audit(
+            user=None, action="login_failed",
+            detail={"username": req.username, "reason": "bad_credentials"},
+            ip=ip, user_agent=request.headers.get("user-agent"),
+        )
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     login_limiter.reset(req.username)
-    token = create_access_token({"sub": str(user.id)}, token_version=user.token_version)
+    await audit(
+        user=user, action="login_success",
+        detail={"username": user.username},
+        ip=ip, user_agent=request.headers.get("user-agent"),
+    )
+    token = create_access_token(
+        {"sub": str(user.id), "username": user.username},
+        token_version=user.token_version,
+    )
     return TokenResponse(access_token=token, user=_profile(user))
 
 
 @router.post("/logout")
 async def logout(
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -129,6 +153,11 @@ async def logout(
     await db.flush()
     from app.core.websocket import manager
     await manager.kick_user(user.id)
+    await audit(
+        user=user, action="logout",
+        detail={"username": user.username},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True}
 
 
@@ -168,11 +197,13 @@ async def me(user: User = Depends(get_current_user)):
 @router.put("/me/profile")
 async def update_profile(
     body: UpdateProfile,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user is None:
         raise HTTPException(status_code=401)
+    changes: dict = {}
     if body.username is not None:
         username = body.username.strip()
         if not username:
@@ -180,10 +211,13 @@ async def update_profile(
         exist = await db.execute(select(User).where(User.username == username, User.id != user.id))
         if exist.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="用户名已存在")
+        changes["username"] = {"old": user.username, "new": username}
         user.username = username
     if body.avatar:
+        changes["avatar"] = {"old": user.avatar, "new": body.avatar}
         user.avatar = body.avatar
     if body.gender is not None:
+        changes["gender"] = {"old": user.gender, "new": body.gender or None}
         user.gender = body.gender or None
     if body.email is not None:
         email = body.email.strip() or None
@@ -195,11 +229,18 @@ async def update_profile(
             )
             if email_exist.scalar_one_or_none():
                 raise HTTPException(status_code=400, detail="邮箱已被使用")
+        changes["email"] = {"old": user.email, "new": email}
         user.email = email
     try:
         await db.flush()
     except IntegrityError:
         raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
+    await audit(
+        user=user, action="update_profile",
+        target_type="user", target_id=user.id,
+        detail={"changes": changes},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True}
 
 
@@ -222,11 +263,13 @@ async def change_password(
     await db.flush()
     from app.core.websocket import manager
     await manager.kick_user(user.id)
+    await audit(user=user, action="change_password", detail={"username": user.username})
     return {"ok": True}
 
 
 @router.post("/upload-avatar")
 async def upload_avatar(
+    request: Request,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -255,11 +298,18 @@ async def upload_avatar(
         _remove_avatar_file(f"/static/uploads/{filename}")
         raise
     _remove_avatar_file(old_avatar)
+    await audit(
+        user=user, action="upload_avatar",
+        target_type="user", target_id=user.id,
+        detail={"avatar": user.avatar},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"avatar": user.avatar}
 
 
 @router.post("/generate-invite")
 async def generate_invite(
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -270,6 +320,12 @@ async def generate_invite(
     code = uuid.uuid4().hex[:8]
     user.invite_code = code
     await db.flush()
+    await audit(
+        user=user, action="generate_invite",
+        target_type="user", target_id=user.id,
+        detail={"invite_code": code},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"invite_code": code}
 
 
@@ -308,6 +364,150 @@ async def user_stats_by_id(user_id: int, db: AsyncSession = Depends(get_db)):
 
 
 # ---- Admin endpoints ----
+
+@router.get("/admin/audit-logs")
+async def list_audit_logs(
+    action: str | None = None,
+    username: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    admin: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """操作日志查询（仅超级管理员），按时间倒序分页。"""
+    if admin.role != "superadmin":
+        raise HTTPException(status_code=403)
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="分页参数不合法")
+
+    query = select(AuditLog).order_by(AuditLog.created_at.desc())
+    if action:
+        query = query.where(AuditLog.action == action)
+    if username:
+        query = query.where(AuditLog.username.ilike(f"%{username}%"))
+    if created_from:
+        query = query.where(AuditLog.created_at >= _parse_audit_dt(created_from, "开始日期"))
+    if created_to:
+        query = query.where(AuditLog.created_at <= _parse_audit_dt(created_to, "结束日期"))
+
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    items = (await db.execute(
+        query.offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+    return {
+        "items": [
+            {
+                "id": a.id,
+                "user_id": a.user_id,
+                "username": a.username,
+                "action": a.action,
+                "target_type": a.target_type,
+                "target_id": a.target_id,
+                "detail": a.detail,
+                "ip": a.ip,
+                "created_at": a.created_at.isoformat() if a.created_at else "",
+            }
+            for a in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+def _parse_audit_dt(value: str, field: str):
+    """解析时间边界（兼容 'YYYY-MM-DD HH:MM:SS' 与 ISO 格式），
+    无时区时按 Asia/Shanghai（与部署时区一致）解释。"""
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    try:
+        d = dt.fromisoformat(value.replace(" ", "T"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field}格式不正确")
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return d
+
+
+@router.get("/admin/access-logs")
+async def list_access_logs(
+    keyword: str | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    status: int | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    admin: User = Depends(require_user),
+):
+    """访问日志查询（仅超级管理员）：读取 access.log 文件，按时间倒序分页。
+
+    不落库；文件过大时建议挂载卷查看或配置轮转。
+    """
+    if admin.role != "superadmin":
+        raise HTTPException(status_code=403)
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="分页参数不合法")
+
+    settings = get_settings()
+    lines = await asyncio.to_thread(_read_access_log_lines, settings.AUDIT_LOG_PATH)
+    items = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue  # 容忍写入中的半行/异常行
+        if not isinstance(rec, dict):
+            continue  # 容忍合法 JSON 但非对象的行
+        if keyword:
+            kw = keyword.lower()
+            if not (
+                kw in rec.get("ip", "").lower()
+                or kw in rec.get("path", "").lower()
+                or kw in (rec.get("username") or "").lower()
+                or kw in rec.get("method", "").lower()
+                or kw in str(rec.get("status", ""))
+            ):
+                continue
+        if method and rec.get("method", "").upper() != method.upper():
+            continue
+        if path and path not in rec.get("path", ""):
+            continue
+        if status is not None and rec.get("status") != status:
+            continue
+        items.append(rec)
+
+    # 文件是追加写入，按行顺序即时间序；倒序返回（最新在前）
+    items.reverse()
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+def _read_access_log_lines(path: str, max_bytes: int = 1024 * 1024) -> list[str]:
+    """读取访问日志文件（最多读取末尾 max_bytes 字节，默认 1MB ≈ 数千条记录，
+    控制内存/耗时；更早记录在轮转文件 access.log.1~N 中）。文件不存在返回空。"""
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()  # 丢弃可能不完整的首行
+            return f.readlines()
+    except OSError:
+        return []
+
 
 @router.get("/admin/users", response_model=list[UserProfile])
 async def list_users(
@@ -368,8 +568,14 @@ async def set_role(
         raise HTTPException(status_code=404, detail="用户不存在")
     if target_user.role == "superadmin":
         raise HTTPException(status_code=403, detail="超级管理员角色不能通过接口修改")
+    old_role = target_user.role
     target_user.role = body.role
     await db.flush()
+    await audit(
+        user=admin, action="admin_set_role",
+        target_type="user", target_id=target_user.id,
+        detail={"username": target_user.username, "old_role": old_role, "new_role": body.role},
+    )
     return {"ok": True, "user_id": target_user.id, "role": target_user.role}
 
 
@@ -406,6 +612,9 @@ async def delete_user(
     )
     if has_pairings.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该用户有比赛记录，不能删除")
+    # 用户有比赛记录则不能删除，先清理其审计记录（置空 user_id，保留追溯）
+    from app.models.audit import AuditLog
+    await db.execute(update(AuditLog).where(AuditLog.user_id == user.id).values(user_id=None))
     await db.execute(delete(Registration).where(Registration.user_id == user.id))
     await db.execute(delete(PS).where(PS.user_id == user.id))
     await db.execute(delete(MatchSupport).where(MatchSupport.user_id == user.id))
@@ -415,6 +624,11 @@ async def delete_user(
     _remove_avatar_file(user.avatar)
     await db.delete(user)
     await db.flush()
+    await audit(
+        user=admin, action="admin_delete_user",
+        target_type="user", target_id=user.id,
+        detail={"username": user.username},
+    )
     return {"ok": True}
 
 
@@ -439,6 +653,11 @@ async def admin_reset_password(
     await db.flush()
     from app.core.websocket import manager
     await manager.kick_user(user.id)
+    await audit(
+        user=admin, action="admin_reset_password",
+        target_type="user", target_id=user.id,
+        detail={"username": user.username},
+    )
     return {"ok": True}
 
 
@@ -457,12 +676,6 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 def _is_valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.match(email))
 
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def _looks_like_image(content: bytes, ext: str) -> bool:

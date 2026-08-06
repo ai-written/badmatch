@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.security import require_user, get_current_user
+from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, PlayerStats, Court, TimeSlot
@@ -71,6 +72,7 @@ async def update_score(
     tournament_id: int,
     match_id: int,
     score: ScoreUpdate,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -107,10 +109,24 @@ async def update_score(
         await db.flush()
         await _broadcast_match(m, tournament_id)
         await _maybe_finish_tournament(tournament_id, db)
+        await audit(
+            user=user, action="match_force_end",
+            target_type="match", target_id=m.id,
+            detail={"score_a": sa, "score_b": sb, "winner_pairing_id": winner},
+            ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+        )
         return {"ok": True, "finished": True}
 
     await db.flush()
     await _broadcast_match(m, tournament_id)
+    # 高频操作：默认不记录，由 AUDIT_HIGH_FREQ_ENABLED 控制
+    await audit(
+        user=user, action="match_score_update",
+        target_type="match", target_id=m.id,
+        detail={"score_a": score.score_a, "score_b": score.score_b},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+        high_freq=True,
+    )
     return {"ok": True}
 
 
@@ -118,6 +134,7 @@ async def update_score(
 async def start_round(
     tournament_id: int,
     round_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -139,6 +156,8 @@ async def start_round(
     round_obj.status = RoundStatus.ONGOING
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "round_started", "round_id": round_id})
+    await audit(user=user, action="round_start", target_type="round", target_id=round_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
@@ -149,6 +168,7 @@ async def support_match(
     tournament_id: int,
     match_id: int,
     body: SupportUpdate,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -208,6 +228,10 @@ async def support_match(
         "support_a": counts[0],
         "support_b": counts[1],
     })
+    # 高频操作：默认不记录
+    await audit(user=user, action="support_vote", target_type="match", target_id=match_id,
+                detail={"side": body.side}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+                high_freq=True)
     return {"support_a": counts[0], "support_b": counts[1], "my_side": body.side}
 
 

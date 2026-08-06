@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # 为空时每次启动随机生成并打印到日志（重启后失效，建议配置固定值）。
     SUPERADMIN_INIT_CODE: str = ""
 
+    # ---- 审计/访问日志 ----
+    # HTTP 访问日志文件路径（JSONL 格式，RotatingFileHandler 轮转）
+    AUDIT_LOG_PATH: str = "logs/access.log"
+    AUDIT_LOG_MAX_MB: int = 50
+    AUDIT_LOG_BACKUPS: int = 5
+    # 业务操作审计（audit_logs 表）总开关
+    AUDIT_DB_ENABLED: bool = True
+    # 是否记录高频操作（记分/投票等），默认关闭
+    AUDIT_HIGH_FREQ_ENABLED: bool = False
+    # 审计记录保留天数，过期记录启动时清理
+    AUDIT_RETENTION_DAYS: int = 90
+
     # Email notifications
     SMTP_HOST: str = ""
     SMTP_PORT: int = 465

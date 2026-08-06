@@ -1,8 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
 from app.core.security import require_user, get_current_user
+from app.core.audit import audit, get_client_ip
 from app.models.user import User
 from app.models.tournament import (
     Tournament, TournamentStatus, Registration, PlayerStats, Court, TimeSlot,
@@ -59,10 +60,17 @@ async def list_tournaments(
 async def create_tournament(
     data: TournamentCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
     t = await _create_tournament(data, user, db, background_tasks)
+    await audit(
+        user=user, action="tournament_create",
+        target_type="tournament", target_id=t.id,
+        detail={"title": t.title, "max_participants": t.max_participants, "total_matches": t.total_matches},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return await _tournament_detail(t, db)
 
 
@@ -70,6 +78,7 @@ async def create_tournament(
 async def create_tournaments_batch(
     data: list[TournamentCreate],
     background_tasks: BackgroundTasks,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -84,6 +93,12 @@ async def create_tournaments_batch(
             continue
         sent_emails.add(task[0])
         background_tasks.add_task(send_tournament_invite, *task)
+    await audit(
+        user=user, action="tournament_create_batch",
+        target_type="tournament", target_id=tournament_ids[0] if tournament_ids else None,
+        detail={"count": len(tournament_ids), "ids": tournament_ids},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True, "tournament_ids": tournament_ids}
 
 
@@ -213,6 +228,7 @@ async def get_tournament(
 @router.delete("/{tournament_id}")
 async def delete_tournament(
     tournament_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -251,12 +267,19 @@ async def delete_tournament(
 
     await db.delete(t)
     await db.flush()
+    await audit(
+        user=user, action="tournament_delete",
+        target_type="tournament", target_id=t.id,
+        detail={"title": t.title, "status": t.status.value},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True}
 
 
 @router.post("/{tournament_id}/register")
 async def register(
     tournament_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -283,6 +306,7 @@ async def register(
             reg.is_active = True
             await db.flush()
             await manager.broadcast(tournament_id, {"type": "registration_updated"})
+            await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
             return {"ok": True}
 
     cnt_result = await db.execute(
@@ -297,12 +321,14 @@ async def register(
     db.add(Registration(tournament_id=tournament_id, user_id=user.id))
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
     return {"ok": True}
 
 
 @router.post("/{tournament_id}/cancel-register")
 async def cancel_register(
     tournament_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -324,6 +350,7 @@ async def cancel_register(
     reg.is_active = False
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
     return {"ok": True}
 
 

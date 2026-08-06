@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import require_user
+from app.core.audit import audit, get_client_ip
 from app.models.user import User
 from app.models.round import Match, MatchStatus, RoundPairing
 from app.schemas.match import ClaimRefereeRequest
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["referee"])
 async def claim_referee(
     tournament_id: int,
     match_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -48,6 +50,8 @@ async def claim_referee(
         "match_id": match_id,
         "referee_id": user.id,
     })
+    await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
@@ -55,6 +59,7 @@ async def claim_referee(
 async def release_referee(
     tournament_id: int,
     match_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -76,4 +81,6 @@ async def release_referee(
         "type": "referee_released",
         "match_id": match_id,
     })
+    await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}

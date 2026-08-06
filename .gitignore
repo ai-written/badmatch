@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 pgdata/
+logs/
 .env
 *.log
 server/static/uploads/

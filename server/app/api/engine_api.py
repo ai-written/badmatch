@@ -1,12 +1,13 @@
 """
 引擎触发 API: 开始赛事、退赛重排
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.core.database import get_db
 from app.core.security import require_user
+from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats
@@ -25,6 +26,7 @@ router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["engine"])
 @router.post("/start")
 async def start_tournament(
     tournament_id: int,
+    request: Request,
     body: StartRequest | None = None,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
@@ -98,6 +100,12 @@ async def start_tournament(
     tournament.status = TournamentStatus.ONGOING
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "tournament_started"})
+    await audit(
+        user=user, action="tournament_start",
+        target_type="tournament", target_id=tournament.id,
+        detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data)},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True, "rounds": len(rounds_data), "matches": M}
 
 
@@ -108,6 +116,7 @@ class WithdrawBody(BaseModel):
 async def withdraw_player(
     tournament_id: int,
     player_id: int,
+    request: Request,
     body: WithdrawBody = WithdrawBody(),
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
@@ -137,6 +146,9 @@ async def withdraw_player(
         r.is_active = False
         await db.flush()
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
+        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                    detail={"player_id": player_id, "self": True, "phase": "open"},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "已取消报名"}
 
     if tournament.status != TournamentStatus.ONGOING:
@@ -258,6 +270,9 @@ async def withdraw_player(
         tournament.status = TournamentStatus.FINISHED
         await db.flush()
         await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                    detail={"player_id": player_id, "remaining": remaining_count, "auto_finished": True},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
     if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
@@ -310,12 +325,16 @@ async def withdraw_player(
 
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                detail={"player_id": player_id, "remaining": remaining_count, "new_creator_id": tournament.creator_id},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
 @router.post("/end-tournament")
 async def end_tournament(
     tournament_id: int,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -330,4 +349,6 @@ async def end_tournament(
     tournament.status = TournamentStatus.FINISHED
     await db.flush()
     await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+    await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
+                detail={"title": tournament.title}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
