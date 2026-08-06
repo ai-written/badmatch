@@ -11,11 +11,11 @@
       <div class="scoreboard">
         <div class="sb-team" :class="{ win: leftWin }" @click="swapTeams">
           <div class="sb-player">
-            <van-image round width="40" height="40" :src="leftTeam.a.avatar || defaultAvatar" />
+            <van-image lazy-load round width="40" height="40" :src="leftTeam.a.avatar || defaultAvatar" />
             <span>{{ leftTeam.a.username }}</span>
           </div>
           <div class="sb-player">
-            <van-image round width="40" height="40" :src="leftTeam.b.avatar || defaultAvatar" />
+            <van-image lazy-load round width="40" height="40" :src="leftTeam.b.avatar || defaultAvatar" />
             <span>{{ leftTeam.b.username }}</span>
           </div>
         </div>
@@ -40,11 +40,11 @@
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
           <div class="sb-player">
-            <van-image round width="40" height="40" :src="rightTeam.a.avatar || defaultAvatar" />
+            <van-image lazy-load round width="40" height="40" :src="rightTeam.a.avatar || defaultAvatar" />
             <span>{{ rightTeam.a.username }}</span>
           </div>
           <div class="sb-player">
-            <van-image round width="40" height="40" :src="rightTeam.b.avatar || defaultAvatar" />
+            <van-image lazy-load round width="40" height="40" :src="rightTeam.b.avatar || defaultAvatar" />
             <span>{{ rightTeam.b.username }}</span>
           </div>
         </div>

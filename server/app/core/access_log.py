@@ -60,6 +60,10 @@ def _headers(scope: dict) -> dict:
 
 def _client_ip(scope: dict, headers: dict | None = None) -> str:
     headers = headers if headers is not None else _headers(scope)
+    # Cloudflare 回源专有头：真实客户端 IP
+    cf = headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
     forwarded = headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()

@@ -279,13 +279,18 @@ async def upload_avatar(
     ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "jpg"
     if ext.lower() not in ("jpg", "jpeg", "png", "gif", "webp"):
         raise HTTPException(status_code=400, detail="不支持的文件格式")
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
     content = await file.read()
     if not content or len(content) > 2 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="文件大小不能超过 2MB")
     if not _looks_like_image(content, ext.lower()):
         raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
+    # 压缩处理：缩放至 200px、白底合成、统一 JPEG 输出（低带宽友好）
+    try:
+        content = _process_avatar(content)
+    except Exception:
+        raise HTTPException(status_code=400, detail="图片无法处理，请更换图片")
+    filename = f"{uuid.uuid4().hex}.jpg"
+    filepath = os.path.join(UPLOAD_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(content)
     old_avatar = user.avatar
@@ -305,6 +310,29 @@ async def upload_avatar(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"avatar": user.avatar}
+
+
+def _process_avatar(content: bytes, max_size: int = 200, quality: int = 85) -> bytes:
+    """压缩头像：修正 EXIF 方向、等比缩放至 max_size、透明背景白底合成、JPEG 输出。"""
+    from io import BytesIO
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    try:
+        img = Image.open(BytesIO(content))
+        img = ImageOps.exif_transpose(img)  # 修正手机拍照方向
+        img.thumbnail((max_size, max_size))  # 保持宽高比缩放
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGBA")
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        else:
+            img = img.convert("RGB")
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise
 
 
 @router.post("/generate-invite")
@@ -440,6 +468,7 @@ async def list_access_logs(
     page: int = 1,
     page_size: int = 20,
     admin: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """访问日志查询（仅超级管理员）：读取 access.log 文件，按时间倒序分页。
 
@@ -485,8 +514,24 @@ async def list_access_logs(
     items.reverse()
     total = len(items)
     start = (page - 1) * page_size
+    page_items = items[start:start + page_size]
+
+    # 旧 token 记录的访问日志缺少 username（仅 user_id），批量补齐当前页
+    uid_needed = {
+        it["user_id"] for it in page_items
+        if it.get("user_id") and not it.get("username")
+    }
+    if uid_needed:
+        rows = await db.execute(
+            select(User.id, User.username).where(User.id.in_(uid_needed))
+        )
+        uname_map = dict(rows.all())
+        for it in page_items:
+            if not it.get("username") and it.get("user_id") in uname_map:
+                it["username"] = uname_map[it["user_id"]]
+
     return {
-        "items": items[start:start + page_size],
+        "items": page_items,
         "total": total,
         "page": page,
         "page_size": page_size,

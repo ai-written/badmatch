@@ -42,7 +42,7 @@
       <div class="pull-inner">
       <div class="profile-header">
         <div class="avatar-wrapper" @click="triggerUpload">
-          <van-image round width="72" height="72" :src="auth.user.avatar || defaultAvatar" />
+          <van-image lazy-load round width="72" height="72" :src="auth.user.avatar || defaultAvatar" />
           <div class="avatar-overlay"><van-icon name="photograph" size="20" color="#fff" /></div>
         </div>
         <h3>{{ auth.user.username }}</h3>

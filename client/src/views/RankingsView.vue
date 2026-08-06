@@ -26,7 +26,7 @@
             <template v-else>{{ p.is_active ? p.rank : '-' }}</template>
           </span>
           <div class="col-player">
-            <van-image round width="28" height="28" :src="p.avatar || defaultAvatar" />
+            <van-image lazy-load round width="28" height="28" :src="p.avatar || defaultAvatar" />
             <span class="p-name">{{ p.username }}</span>
           </div>
           <span class="col-wl"><em class="wl-win">{{ p.matches_won }}</em>-{{ p.matches_lost }}</span>

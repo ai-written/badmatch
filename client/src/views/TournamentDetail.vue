@@ -48,7 +48,7 @@
         <div class="player-grid" v-if="registrations.length > 0">
           <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
             <div class="avatar-badge-sm">
-              <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+              <van-image lazy-load round width="40" height="40" :src="r.avatar || defaultAvatar" />
               <span v-if="r.user_id === tournament.creator_id" class="host-badge">房主</span>
             </div>
             <span class="player-name">{{ r.username }}</span>
@@ -78,7 +78,7 @@
     <van-popup v-model:show="showPlayerStats" round position="bottom" :style="{ height: '65%' }" class="stats-popup" lock-scroll>
        <div class="popup-content" @touchmove.stop>
           <div class="popup-player-head">
-            <van-image round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
+            <van-image lazy-load round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
             <h3>{{ playerDetail.username }}</h3>
           </div>
           <van-cell-group inset v-if="playerStats.total_matches > 0">
@@ -125,7 +125,7 @@
             :class="{ selected: selectedNewCreator === r.user_id }"
             @click="selectedNewCreator = r.user_id"
           >
-            <van-image round width="40" height="40" :src="r.avatar || defaultAvatar" />
+            <van-image lazy-load round width="40" height="40" :src="r.avatar || defaultAvatar" />
             <span>{{ r.username }}</span>
           </div>
         </div>

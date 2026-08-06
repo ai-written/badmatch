@@ -19,7 +19,15 @@ logger = logging.getLogger(__name__)
 
 
 def get_client_ip(request: Request) -> str:
-    """获取客户端 IP，优先取 X-Forwarded-For（nginx 反代场景）。"""
+    """获取客户端真实 IP。
+
+    优先取 CF-Connecting-IP（Cloudflare 回源专有头，真实不可伪造；
+    前提：服务器仅允许 Cloudflare IP 回源访问，否则该头可被直接请求伪造）。
+    其次取 X-Forwarded-For 首个值（nginx 反代场景）。
+    """
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()

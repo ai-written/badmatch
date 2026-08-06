@@ -10,7 +10,7 @@
               <van-cell-group inset v-for="u in users" :key="u.id" style="margin-bottom:4px">
                 <van-cell :title="u.username" :label="`ID:${u.id}  ${roleLabel(u.role)}  ${u.gender === 'M' ? '男' : u.gender === 'F' ? '女' : '-'}${u.invited_by_username ? ` 邀请人：${u.invited_by_username}` : ''}`">
                   <template #icon>
-                    <van-image round width="36" height="36" :src="u.avatar || defaultAvatar" class="user-avatar" />
+                    <van-image lazy-load round width="36" height="36" :src="u.avatar || defaultAvatar" class="user-avatar" />
                   </template>
                   <template #value>
                     <van-button v-if="isSuper && u.role !== 'superadmin' && u.id !== auth.user?.id" size="small" type="warning" @click="toggleRole(u)">{{ u.role === 'admin' ? '取消管理员' : '设为管理员' }}</van-button>
@@ -63,7 +63,7 @@
 
           <van-list v-model:loading="accessLoading" :finished="accessFinished" finished-text="没有更多了" @load="loadAccessLogs">
             <van-cell-group inset v-for="(a, i) in accessLogs" :key="i" style="margin-bottom:4px">
-              <van-cell :title="`${a.method} ${a.path}${a.query ? '?' + a.query : ''}`" :label="`${a.time}  ${a.ip || '无IP'}  ${a.status}  ${a.duration_ms}ms${a.username ? '  ' + a.username : ''}`" is-link @click="openAccessDetail(a)" />
+              <van-cell :title="`${a.method} ${a.path}${a.query ? '?' + a.query : ''}`" :label="`${formatTime(a.time)}  ${a.ip || '无IP'}  ${a.status}  ${a.duration_ms}ms${a.username ? '  ' + a.username : (a.user_id ? '  用户#' + a.user_id : '')}`" is-link @click="openAccessDetail(a)" />
             </van-cell-group>
           </van-list>
         </div>
@@ -94,7 +94,7 @@
     <van-action-sheet v-model:show="showMethodSheet" :actions="methodOptions" cancel-text="取消" @select="onMethodSelect" />
     <van-dialog v-model:show="showAccessDetail" title="访问详情" :show-confirm-button="false">
       <div class="audit-detail">
-        <p v-for="(v, k) in accessDetail" :key="k"><b>{{ k }}：</b>{{ typeof v === 'object' ? JSON.stringify(v) : v }}</p>
+        <p v-for="[k, v] in Object.entries(accessDetail || {})" :key="k"><b>{{ k }}：</b><template v-if="k === 'time'">{{ formatTime(String(v)) }}</template><template v-else>{{ typeof v === 'object' ? JSON.stringify(v) : v }}</template></p>
         <van-button size="small" type="primary" block style="margin-top:12px" @click="showAccessDetail = false">关闭</van-button>
       </div>
     </van-dialog>

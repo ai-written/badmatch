@@ -28,17 +28,34 @@ async def list_tournaments(
         query = query.where(Tournament.status == status)
     result = await db.execute(query)
     tournaments = result.scalars().all()
+    if not tournaments:
+        return []
+
+    tournament_ids = [t.id for t in tournaments]
+    # 批量报名数（1 次查询替代 N 次）
+    cnt_result = await db.execute(
+        select(Registration.tournament_id, func.count(Registration.id))
+        .where(
+            Registration.tournament_id.in_(tournament_ids),
+            Registration.is_active == True,
+        )
+        .group_by(Registration.tournament_id)
+    )
+    count_map = dict(cnt_result.all())
+
+    # 批量首场地：一次查所有场地，Python 侧取每赛事 sort_order 最小者（1 次查询替代 N 次）
+    court_result = await db.execute(
+        select(Court)
+        .where(Court.tournament_id.in_(tournament_ids))
+        .order_by(Court.tournament_id, Court.sort_order)
+    )
+    first_court_map: dict[int, Court] = {}
+    for c in court_result.scalars().all():
+        first_court_map.setdefault(c.tournament_id, c)
 
     out = []
     for t in tournaments:
-        cnt_result = await db.execute(
-            select(func.count(Registration.id)).where(
-                Registration.tournament_id == t.id, Registration.is_active == True
-            )
-        )
-        registered_count = cnt_result.scalar() or 0
-        court_result = await db.execute(select(Court).where(Court.tournament_id == t.id).order_by(Court.sort_order).limit(1))
-        first_court = court_result.scalar_one_or_none()
+        first_court = first_court_map.get(t.id)
         out.append(TournamentBrief(
             id=t.id,
             title=t.title,
@@ -49,7 +66,7 @@ async def list_tournaments(
             status=t.status.value,
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
-            registered_count=registered_count,
+            registered_count=count_map.get(t.id, 0),
             court_name=first_court.name if first_court else None,
             created_at=t.created_at.isoformat() if t.created_at else "",
         ))
@@ -391,15 +408,23 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
     )
     courts = courts_result.scalars().all()
     court_outs = []
-    for c in courts:
+    if courts:
+        court_ids = [c.id for c in courts]
+        # 批量查所有场地的时间段（1 次查询替代 N 次）
         ts_result = await db.execute(
-            select(TimeSlot).where(TimeSlot.court_id == c.id).order_by(TimeSlot.start_time)
+            select(TimeSlot)
+            .where(TimeSlot.court_id.in_(court_ids))
+            .order_by(TimeSlot.court_id, TimeSlot.start_time)
         )
-        slots = ts_result.scalars().all()
-        court_outs.append(CourtOut(
-            id=c.id, name=c.name, sort_order=c.sort_order,
-            time_slots=[TimeSlotOut(id=s.id, start_time=s.start_time, end_time=s.end_time) for s in slots],
-        ))
+        slots_by_court: dict[int, list[TimeSlot]] = {}
+        for s in ts_result.scalars().all():
+            slots_by_court.setdefault(s.court_id, []).append(s)
+        for c in courts:
+            slots = slots_by_court.get(c.id, [])
+            court_outs.append(CourtOut(
+                id=c.id, name=c.name, sort_order=c.sort_order,
+                time_slots=[TimeSlotOut(id=s.id, start_time=s.start_time, end_time=s.end_time) for s in slots],
+            ))
 
     is_registered = False
     if user:

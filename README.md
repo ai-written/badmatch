@@ -47,6 +47,20 @@ docker compose -f docker-compose.prod.yml up -d
 - 生产模式（`DEBUG=false`）下若使用默认/示例 `SECRET_KEY`，服务将**拒绝启动**
 - **token 版本号机制**：登出、修改密码、管理员重置密码都会使该用户所有 token 立即失效，并主动断开其全部 WebSocket 连接；升级/重启后旧 token 按版本 0 兼容处理，**已登录用户无需重新登录**
 
+### Cloudflare 部署（推荐）
+
+**场景 A：Cloudflare Tunnel（Zero Trust）——内网/无公网 IP 服务器**
+
+- 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源走 HTTP（80 端口）
+- 浏览器侧 HTTPS 和 HTTP/2 由 Cloudflare 提供，服务器**无需配置证书/443**
+- 真实客户端 IP 通过 `CF-Connecting-IP` 头获取（登录限流、审计、访问日志均准确且不可伪造）
+- ⚠️ 安全：确保本地 80 端口**不对外暴露**（只允许本机 cloudflared 访问），否则可伪造 `CF-Connecting-IP` 绕过限流
+
+**场景 B：Cloudflare 代理（橙色云，服务器有公网 IP）**
+
+- Cloudflare 面板 **SSL/TLS 模式保持 Flexible**（回源 HTTP）；若设为 Full/Full(strict) 会回源 TLS 失败（521/525）
+- ⚠️ 防火墙/安全组**只放行 Cloudflare IP 段**（https://www.cloudflare.com/ips/ ），否则直连可伪造 `CF-Connecting-IP`
+
 ## 核心功能
 
 - **用户名注册登录**：修改密码、上传头像、性别设置
