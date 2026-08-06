@@ -6,6 +6,8 @@ class RegisterRequest(BaseModel):
     password: str
     gender: str | None = None
     invite_code: str | None = None
+    # 首个用户（成为超级管理员）所需的初始化注册码
+    init_code: str | None = None
     email: str
 
 

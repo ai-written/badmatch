@@ -28,6 +28,7 @@
             </template>
           </van-field>
           <van-field v-model="registerForm.invite_code" label="邀请码" :placeholder="hasUsers ? '注册邀请码（必填）' : '注册邀请码（首个用户可跳过）'" :required="hasUsers" />
+          <van-field v-if="!hasUsers" v-model="registerForm.init_code" label="初始注册码" placeholder="部署时生成的超级管理员注册码" required :rules="[{ required: true, message: '请输入初始注册码' }]" />
           <van-field v-model="registerForm.password" label="密码" placeholder="至少6位" type="password" required :rules="[{ required: true, message: '请输入密码' }, { pattern: /^.{6,}$/, message: '密码至少6位' }]" />
         </van-cell-group>
         <div class="form-submit"><van-button round block type="primary" native-type="submit" :loading="submitting">注册</van-button></div>
@@ -119,7 +120,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 const loginForm = reactive({ username: '', password: '' })
-const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '', email: '' })
+const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '', init_code: '', email: '' })
 const stats = reactive({ total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 })
 
 const inviteCode = ref('')
@@ -162,7 +163,7 @@ async function onLogin() {
 
 async function onRegister() {
   submitting.value = true
-  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.email, registerForm.invite_code); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
+  try { await auth.register(registerForm.username, registerForm.password, registerForm.gender, registerForm.email, registerForm.invite_code, registerForm.init_code); showToast('注册成功'); await fetchStats(); doRedirect() } catch {} finally { submitting.value = false }
 }
 
 async function generateInvite() {
@@ -180,7 +181,15 @@ function saveGender() {
 
 async function savePassword() {
   if (!oldPwd.value || !newPwd.value) return
-  try { await api.put('/auth/me/password', { old_password: oldPwd.value, new_password: newPwd.value }); showToast('密码已修改'); oldPwd.value = ''; newPwd.value = '' } catch {}
+  try {
+    await api.put('/auth/me/password', { old_password: oldPwd.value, new_password: newPwd.value })
+    showToast('密码已修改，请重新登录')
+    oldPwd.value = ''
+    newPwd.value = ''
+    showEditPwd.value = false
+    // 改密码后旧 token 已失效，登出并回到登录页
+    await auth.logout()
+  } catch {}
 }
 
 async function saveUsername() {

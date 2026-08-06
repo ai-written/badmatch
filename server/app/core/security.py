@@ -20,8 +20,9 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def create_access_token(data: dict) -> str:
+def create_access_token(data: dict, token_version: int = 0) -> str:
     to_encode = data.copy()
+    to_encode.update({"tv": token_version})
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
@@ -55,7 +56,14 @@ async def get_current_user(
     from app.models.user import User
     from sqlalchemy import select
     result = await db.execute(select(User).where(User.id == user_id))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+    if user is None:
+        return None
+    # token 版本号校验：登出/改密码后旧 token 失效；
+    # 旧格式 token（无 tv 字段）按版本 0 处理，保证升级/重启后登录状态平滑保留。
+    if payload.get("tv", 0) != user.token_version:
+        return None
+    return user
 
 
 async def require_user(

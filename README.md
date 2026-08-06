@@ -22,12 +22,30 @@ docker compose -f docker-compose.dev.yml up --build
 ### 生产环境
 
 ```bash
-docker compose up -d
+# 1. 复制 .env.example 为 .env 并填写：
+#    SECRET_KEY（必填！openssl rand -hex 32 生成）
+#    DB_PASSWORD、SUPERADMIN_INIT_CODE（可选，见下）
+cp .env.example .env
+
+# 2. 启动
+docker compose -f docker-compose.prod.yml up -d
 ```
 
-访问 `http://localhost:3020`
+访问 `http://localhost`（端口由 `.env` 中 `PORT` 控制，默认 80）
 
-> 服务启动时会自动执行幂等迁移（补齐 `users.email`、唯一约束、`matches.started_at/ended_at` 等缺失列），老库升级无需手动执行 SQL。
+> 服务启动时会自动执行幂等迁移（补齐 `users.email`、唯一约束、`matches.started_at/ended_at`、`users.token_version` 等缺失列），老库升级无需手动执行 SQL。
+
+### 首次初始化（超级管理员）
+
+首个注册用户自动成为超级管理员，但必须提供**初始注册码**（防止被抢先注册）：
+
+- 在 `.env` 中配置 `SUPERADMIN_INIT_CODE=你的注册码`，或
+- 不配置时服务每次启动随机生成 8 位注册码并打印到日志（重启后失效）
+
+### 安全注意
+
+- 生产模式（`DEBUG=false`）下若使用默认/示例 `SECRET_KEY`，服务将**拒绝启动**
+- **token 版本号机制**：登出、修改密码、管理员重置密码都会使该用户所有 token 立即失效，并主动断开其全部 WebSocket 连接；升级/重启后旧 token 按版本 0 兼容处理，**已登录用户无需重新登录**
 
 ## 核心功能
 

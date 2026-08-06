@@ -1,7 +1,7 @@
-import os, re, uuid
+import os, re, secrets, uuid, logging
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, update
+from sqlalchemy import select, func, delete, update, text
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
@@ -15,6 +15,7 @@ from app.schemas.auth import (
 from app.models.user import User
 from app.models.tournament import PlayerStats
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "static", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -23,10 +24,16 @@ _settings = get_settings()
 login_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
 login_ip_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
 invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
+# 初始管理员注册码防爆破（按 IP 限流）
+init_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    req: RegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     exist = await db.execute(select(User).where(User.username == req.username))
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -42,6 +49,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     first_check = await db.execute(select(func.count(User.id)))
     is_first = first_check.scalar() == 0
+    if is_first:
+        # 并发保护：首个用户创建串行化，避免两个并发请求同时检测到
+        # “无用户”而创建出两个 superadmin（事务级锁，随事务提交/回滚释放）
+        await db.execute(text("SELECT pg_advisory_xact_lock(1)"))
+        first_check = await db.execute(select(func.count(User.id)))
+        is_first = first_check.scalar() == 0
 
     invited_by_id = None
     if not is_first:
@@ -55,6 +68,16 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
             invite_limiter.record_failure(req.invite_code)
             raise HTTPException(status_code=400, detail="邀请码无效")
         invited_by_id = inviter_user.id
+    else:
+        # 首个用户将成为超级管理员，必须提供初始化注册码，防止被抢先注册
+        ip = _client_ip(request)
+        if not init_limiter.check(ip):
+            raise HTTPException(status_code=429, detail="初始注册码尝试次数过多，请稍后再试")
+        code = req.init_code.strip() if req.init_code else ""
+        if not code or not secrets.compare_digest(code, _get_init_code()):
+            init_limiter.record_failure(ip)
+            raise HTTPException(status_code=400, detail="初始管理员注册码不正确")
+        init_limiter.reset(ip)
 
     user = User(
         username=req.username,
@@ -70,7 +93,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     except IntegrityError:
         raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
 
-    token = create_access_token({"sub": str(user.id)})
+    token = create_access_token({"sub": str(user.id)}, token_version=user.token_version)
     return TokenResponse(access_token=token, user=_profile(user))
 
 
@@ -92,8 +115,47 @@ async def login(
         login_ip_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     login_limiter.reset(req.username)
-    token = create_access_token({"sub": str(user.id)})
+    token = create_access_token({"sub": str(user.id)}, token_version=user.token_version)
     return TokenResponse(access_token=token, user=_profile(user))
+
+
+@router.post("/logout")
+async def logout(
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """登出：递增 token 版本号使所有 token 失效，并断开该用户全部 WebSocket。"""
+    user.token_version += 1
+    await db.flush()
+    from app.core.websocket import manager
+    await manager.kick_user(user.id)
+    return {"ok": True}
+
+
+# ---- 初始管理员注册码 ----
+
+_init_code_cache: str | None = None
+
+
+def _get_init_code() -> str:
+    """返回首个用户注册所需的初始化注册码。
+
+    优先使用环境变量 SUPERADMIN_INIT_CODE；未配置时启动后首次调用生成
+    随机 8 位码并打印到日志（重启后失效）。
+    """
+    global _init_code_cache
+    if _init_code_cache is None:
+        s = get_settings()
+        if s.SUPERADMIN_INIT_CODE:
+            _init_code_cache = s.SUPERADMIN_INIT_CODE
+        else:
+            _init_code_cache = secrets.token_hex(4)
+            logger.warning(
+                "未配置 SUPERADMIN_INIT_CODE，本次启动的初始管理员注册码为：%s "
+                "（首个用户注册时使用；重启后失效，建议通过环境变量配置固定值）",
+                _init_code_cache,
+            )
+    return _init_code_cache
 
 
 @router.get("/me", response_model=UserProfile)
@@ -154,8 +216,12 @@ async def change_password(
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少6位")
     user.password_hash = hash_password(body.new_password)
+    # 改密码后旧 token 全部失效，需重新登录
+    user.token_version += 1
     login_limiter.reset(user.username)
     await db.flush()
+    from app.core.websocket import manager
+    await manager.kick_user(user.id)
     return {"ok": True}
 
 
@@ -367,8 +433,12 @@ async def admin_reset_password(
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="密码至少6位")
     user.password_hash = hash_password(body.new_password)
+    # 重置密码后旧 token 失效，需重新登录
+    user.token_version += 1
     login_limiter.reset(user.username)
     await db.flush()
+    from app.core.websocket import manager
+    await manager.kick_user(user.id)
     return {"ok": True}
 
 

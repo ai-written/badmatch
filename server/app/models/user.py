@@ -14,6 +14,8 @@ class User(Base):
     avatar: Mapped[str] = mapped_column(String(512), default="")
     gender: Mapped[str | None] = mapped_column(String(1), nullable=True)  # M or F
     role: Mapped[str] = mapped_column(String(16), default="user")  # user or admin
+    # 登出/作废机制：每次登出自增，旧 token 立即失效
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     invite_code: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     invited_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

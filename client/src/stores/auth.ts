@@ -22,7 +22,11 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.setItem('token', t)
   }
 
-  function logout() {
+  async function logout() {
+    // 先通知后端递增 token 版本号，使当前 token 立即失效
+    try {
+      await api.post('/auth/logout', null, { skipGlobalError: true } as any)
+    } catch { /* token 可能已失效，忽略 */ }
     token.value = null
     user.value = null
     localStorage.removeItem('token')
@@ -41,12 +45,13 @@ export const useAuthStore = defineStore('auth', () => {
     setAuth(res.data.access_token, res.data.user)
   }
 
-  async function register(username: string, password: string, gender: string, email: string, invite_code?: string) {
+  async function register(username: string, password: string, gender: string, email: string, invite_code?: string, init_code?: string) {
     const res = await api.post('/auth/register', {
       username,
       password,
       gender,
       invite_code: invite_code || null,
+      init_code: init_code || null,
       email: email || null,
     })
     setAuth(res.data.access_token, res.data.user)

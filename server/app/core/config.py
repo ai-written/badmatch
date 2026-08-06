@@ -2,6 +2,16 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
+# 已知的不安全/示例密钥，生产环境禁止使用
+INSECURE_SECRET_KEYS = {
+    "change-me-in-production-use-randon-64-char-string",
+    "change-me-to-a-random-string",
+    "change-me-to-a-random-64-char-string",
+    "docker-dev-secret-key-not-for-production",
+    "",
+}
+
+
 class Settings(BaseSettings):
     APP_NAME: str = "BadMatch"
     DEBUG: bool = True
@@ -13,8 +23,13 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = "http://localhost:5173"
 
-    # CORS 允许来源；"*" 表示全部，多个用逗号分隔
-    CORS_ORIGINS: str = "*"
+    # CORS 允许来源；多个用逗号分隔。
+    # 为空时默认使用 FRONTEND_URL（生产同源部署天然不需要 CORS）。
+    CORS_ORIGINS: str = ""
+
+    # 首个用户注册为超级管理员所需的一次性注册码。
+    # 为空时每次启动随机生成并打印到日志（重启后失效，建议配置固定值）。
+    SUPERADMIN_INIT_CODE: str = ""
 
     # Email notifications
     SMTP_HOST: str = ""
@@ -32,6 +47,18 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """CORS 允许来源列表；未配置时回退到 FRONTEND_URL。"""
+        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        if not origins:
+            origins = [self.FRONTEND_URL]
+        return [o for o in origins if o]
+
+    def secret_key_is_default(self) -> bool:
+        """当前 SECRET_KEY 是否为已知默认值/示例值（不安全）。"""
+        return self.SECRET_KEY in INSECURE_SECRET_KEYS
 
 
 @lru_cache

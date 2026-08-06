@@ -89,6 +89,12 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             text("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email)")
         )
 
+    if not await _column_exists(conn, "users", "token_version"):
+        logger.info("migration: adding users.token_version column")
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+        )
+
     if await _table_exists(conn, "registrations"):
         if not await _constraint_exists(conn, "uq_registrations_tournament_user"):
             logger.info("migration: dedupe registrations + add unique constraint")
