@@ -95,6 +95,35 @@ docker compose -f docker-compose.prod.yml up -d
 - **WebSocket 实时同步**：计分、排名、加油条、对阵表实时更新（连接需登录 token 校验）
 - **智能返回**：直接通过链接进入页面时返回首页，站内跳转则逐级返回
 
+## 移动端性能优化
+
+- **vendor 分包**：构建按 vue/vant/axios 拆分稳定 chunk，配合 `/assets/` 30 天 immutable 缓存，发版只重下业务代码
+- **Service Worker**：生产环境注册，静态资源缓存优先、页面网络优先并离线兜底，二次访问几乎零网络
+- **API ETag**：GET 响应带弱 ETag + `Cache-Control: private, no-cache`，内容未变时返回 304，重复访问只传协商头
+- **压缩**：nginx gzip 已开启；走 Cloudflare 代理时边缘自动提供 Brotli
+- **生产单进程**：镜像默认不带 `--reload`（开发环境由 dev compose 覆盖为 `--reload` 热重载）；WebSocket 广播为进程内单例，故不使用 `--workers` 多进程，避免丢广播
+
+### 存量头像压缩
+
+压缩只在上传时执行，历史头像需手动 backfill（压缩到 100px / JPEG 75，原地覆盖，数据库引用不变）：
+
+```bash
+docker compose -f docker-compose.prod.yml exec server python scripts/backfill_avatars.py --dry-run
+docker compose -f docker-compose.prod.yml exec server python scripts/backfill_avatars.py
+```
+
+严格模式（旧 png/gif/webp 重命名为 `.jpg` 并同步 `users.avatar` 引用）：
+
+```bash
+docker compose -f docker-compose.prod.yml exec server python scripts/backfill_avatars.py --rename-jpg --dry-run
+docker compose -f docker-compose.prod.yml exec server python scripts/backfill_avatars.py --rename-jpg --apply-db
+```
+
+> 头像路径只存在 `users.avatar` 一列；`audit_logs.detail` 中的历史路径快照不会更新（审计留痕）。
+
+> 注意：原地覆盖模式因为 `/static` 有 7 天浏览器缓存，用户可能最长 7 天看到旧头像；
+> 严格模式重命名后 URL 变化，头像立即刷新。
+
 ## 项目结构
 
 ```

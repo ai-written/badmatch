@@ -23,6 +23,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    # 本地运行同样覆盖为热重载模式（镜像默认已是生产配置）
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     environment:
       DATABASE_URL: postgresql+asyncpg://badminton:badminton@db:5432/badminton
       DEBUG: "true"

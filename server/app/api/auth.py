@@ -284,7 +284,7 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="文件大小不能超过 2MB")
     if not _looks_like_image(content, ext.lower()):
         raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
-    # 压缩处理：缩放至 200px、白底合成、统一 JPEG 输出（低带宽友好）
+    # 压缩处理：缩放至 100px、白底合成、统一 JPEG 输出（低带宽友好）
     try:
         content = _process_avatar(content)
     except Exception:
@@ -312,7 +312,7 @@ async def upload_avatar(
     return {"avatar": user.avatar}
 
 
-def _process_avatar(content: bytes, max_size: int = 200, quality: int = 85) -> bytes:
+def _process_avatar(content: bytes, max_size: int = 100, quality: int = 75) -> bytes:
     """压缩头像：修正 EXIF 方向、等比缩放至 max_size、透明背景白底合成、JPEG 输出。"""
     from io import BytesIO
     from PIL import Image, ImageOps, UnidentifiedImageError

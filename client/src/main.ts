@@ -18,3 +18,12 @@ app.use(createPinia())
 app.use(router)
 app.use(Lazyload)
 app.mount('#app')
+
+// 生产环境注册 Service Worker：静态资源缓存优先 + 离线兜底（需 HTTPS 或 localhost）
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => {
+      console.warn('Service Worker 注册失败:', err)
+    })
+  })
+}

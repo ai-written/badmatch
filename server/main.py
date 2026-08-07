@@ -17,6 +17,7 @@ from app.core.security import decode_access_token
 from app.core.startup_migration import run_startup_migrations
 from app.core.websocket import manager
 from app.core.access_log import AccessLogMiddleware
+from app.core.etag import ETagMiddleware
 from app.core.audit import cleanup_expired_audit_logs
 from app.models import user, tournament, round, audit
 from app.models.user import User
@@ -43,7 +44,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
-# 访问日志中间件（最外层，记录所有 HTTP 请求）
+# API 响应 ETag 中间件（最内层：GET 响应生成 ETag，命中 If-None-Match 时返回 304）
+app.add_middleware(ETagMiddleware)
+# 访问日志中间件（记录所有 HTTP 请求）
 app.add_middleware(AccessLogMiddleware)
 app.add_middleware(
     CORSMiddleware,
