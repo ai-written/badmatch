@@ -19,8 +19,14 @@
    自动输出 users 表更新 SQL；容器内可用 --apply-db 自动执行并删除旧文件：
    docker compose -f docker-compose.prod.yml exec server python scripts/backfill_avatars.py --rename-jpg --apply-db
 
+   严格模式会把"所有"非 jpg 头像（无论大小）转换为 JPEG 并改名为 .jpg——
+   包括之前原地压缩过、后缀仍是 png/gif/webp 的文件，彻底解决
+   后缀与 Content-Type 不一致，以及 CDN/浏览器按旧 URL 缓存的问题
+   （改后缀后 URL 变化，缓存立即失效）。
+
 说明：
-- 已 <= 100px 的文件自动跳过，重复运行安全
+- 已 <= 100px 的 jpg 自动跳过；严格模式下非 jpg 文件无论大小都会转 jpg
+- 重复运行安全
 - 严格模式下目标 .jpg 已存在视为已处理（跳过并重复提示 SQL，SQL 幂等可反复执行）
 - 数据库引用只存在于 users.avatar（其余展示均为 JOIN 查询）；
   audit_logs.detail 中的历史路径快照不会更新，属正常审计留痕
@@ -142,7 +148,10 @@ def main() -> None:
             print(f"  [跳过] 无法读取图片: {path.name} ({exc})")
             continue
 
-        if max(width, height) <= args.threshold:
+        # 严格模式下非 jpg 文件无论大小都要转 JPEG/改名（修复已原地压缩的旧文件）；
+        # 大小过滤只用于"压缩瘦身"（jpg 或默认原地模式）
+        is_non_jpg = args.rename_jpg and path.suffix.lower() not in JPEG_EXTS
+        if not is_non_jpg and max(width, height) <= args.threshold:
             skipped_small += 1
             continue
 
@@ -157,7 +166,7 @@ def main() -> None:
             unchanged += 1
             continue
 
-        if args.rename_jpg and path.suffix.lower() not in JPEG_EXTS:
+        if is_non_jpg:
             # 严格模式：非 jpg -> 新文件 <stem>.jpg，旧文件暂不删除
             new_name = path.stem + ".jpg"
             target = upload_dir / new_name

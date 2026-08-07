@@ -124,6 +124,9 @@ docker compose -f docker-compose.prod.yml exec server python scripts/backfill_av
 > 注意：原地覆盖模式因为 `/static` 有 7 天浏览器缓存，用户可能最长 7 天看到旧头像；
 > 严格模式重命名后 URL 变化，头像立即刷新。
 
+> 严格模式会把**所有**非 jpg 头像（无论大小）转成 JPEG 并改后缀，包括之前原地压缩过的文件；
+> 若之前已确认 Cloudflare 缓存，执行后可顺手在 CF 后台按 `/static/uploads/` 前缀 Purge 一次。
+
 ## 项目结构
 
 ```
