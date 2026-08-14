@@ -12,6 +12,7 @@ export interface TournamentBrief {
   status: string
   registered_count: number
   court_name: string | null
+  registration_open_at?: string | null
   created_at: string
 }
 

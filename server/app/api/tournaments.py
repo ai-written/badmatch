@@ -1,4 +1,5 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
@@ -66,6 +67,7 @@ async def list_tournaments(
             status=t.status.value,
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
+            registration_open_at=t.registration_open_at,
             registered_count=count_map.get(t.id, 0),
             court_name=first_court.name if first_court else None,
             created_at=t.created_at.isoformat() if t.created_at else "",
@@ -129,6 +131,19 @@ async def _create_tournament(
     if data.max_participants < 4:
         raise HTTPException(status_code=400, detail="最大人数至少为 4")
 
+    # 定时开放报名：启用时必须选择未来时间；未启用则一律立即开放
+    registration_open_at = data.registration_open_at
+    if registration_open_at is not None and registration_open_at.tzinfo is not None:
+        # 统一转为本地 naive 时间，避免与 datetime.now()/TIMESTAMP 列比较或写入报错
+        registration_open_at = registration_open_at.astimezone().replace(tzinfo=None)
+    if data.enable_scheduled_registration:
+        if registration_open_at is None:
+            raise HTTPException(status_code=400, detail="启用定时报名必须选择开放时间")
+        if registration_open_at <= datetime.now():
+            raise HTTPException(status_code=400, detail="报名开放时间必须晚于当前时间")
+    else:
+        registration_open_at = None
+
     preselected = list(dict.fromkeys(data.preselect_player_ids))
     if preselected:
         if user.role not in ("admin", "superadmin"):
@@ -153,6 +168,7 @@ async def _create_tournament(
         max_participants=data.max_participants,
         total_matches=data.total_matches,
         points_to_win=data.points_to_win,
+        registration_open_at=registration_open_at,
     )
     db.add(t)
     await db.flush()
@@ -308,6 +324,8 @@ async def register(
         raise HTTPException(status_code=404, detail="赛事不存在")
     if t.status != TournamentStatus.OPEN:
         raise HTTPException(status_code=400, detail="报名已截止")
+    if t.registration_open_at and datetime.now() < t.registration_open_at:
+        raise HTTPException(status_code=400, detail="报名尚未开始")
 
     exist = await db.execute(
         select(Registration).where(
@@ -449,6 +467,8 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         status=t.status.value,
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
+        registration_open_at=t.registration_open_at,
+        server_now=datetime.now(),
         courts=court_outs,
         registered_count=registered_count,
         is_registered=is_registered,

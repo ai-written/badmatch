@@ -31,6 +31,8 @@ class Tournament(Base):
     status: Mapped[TournamentStatus] = mapped_column(
         SAEnum(TournamentStatus), default=TournamentStatus.OPEN
     )
+    # 定时报名开放时间：None = 创建后立即开放报名
+    registration_open_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # Relations

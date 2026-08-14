@@ -36,6 +36,8 @@ async def register(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_password_length(req.password)
+
     exist = await db.execute(select(User).where(User.username == req.username))
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -254,8 +256,7 @@ async def change_password(
         raise HTTPException(status_code=401)
     if not verify_password(body.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="新密码至少6位")
+    _validate_password_length(body.new_password)
     user.password_hash = hash_password(body.new_password)
     # 改密码后旧 token 全部失效，需重新登录
     user.token_version += 1
@@ -689,8 +690,7 @@ async def admin_reset_password(
     user = u.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404)
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少6位")
+    _validate_password_length(body.new_password)
     user.password_hash = hash_password(body.new_password)
     # 重置密码后旧 token 失效，需重新登录
     user.token_version += 1
@@ -721,6 +721,11 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 def _is_valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.match(email))
 
+
+def _validate_password_length(password: str) -> None:
+    """密码长度校验：至少 6 个字符；bcrypt 上限 72 字节（UTF-8），超长会被静默截断。"""
+    if len(password) < 6 or len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="密码至少 6 位，且不超过 72 字节")
 
 
 def _looks_like_image(content: bytes, ext: str) -> bool:

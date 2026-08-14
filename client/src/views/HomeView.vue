@@ -32,7 +32,7 @@
             <div class="t-card-date">{{ fmtDateTime(t.start_date, t.end_date) }}</div>
           </div>
           <div class="t-card-right">
-            <van-tag :type="statusType(t.status)" size="medium" round>{{ statusLabel(t.status) }}</van-tag>
+            <van-tag :type="statusType(t.status)" size="medium" round>{{ statusLabel(t) }}</van-tag>
             <div class="t-card-count">{{ t.registered_count }}/{{ t.max_participants }}</div>
           </div>
         </div>
@@ -52,7 +52,8 @@ const refreshing = ref(false)
 const finished = ref(false)
 
 function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
-function statusLabel(s: string) { return s === 'open' ? '报名中' : s === 'ongoing' ? '进行中' : '已结束' }
+function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.registration_open_at).getTime() > Date.now() }
+function statusLabel(t: any) { return t.status === 'open' ? (isRegLocked(t) ? '未开始' : '报名中') : t.status === 'ongoing' ? '进行中' : '已结束' }
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 function fmtDateTime(start: string, end: string) {
   if (!start || !end) return ''

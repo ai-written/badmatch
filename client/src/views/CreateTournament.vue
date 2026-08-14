@@ -14,6 +14,23 @@
         <!-- 时间段 -->
         <van-field :model-value="timeDisplay" readonly clickable label="时间段" placeholder="请选择时间段" required :rules="[{ required: true, message: '请选择时间段' }]" @click="showTimePicker = true" />
 
+        <!-- 定时开放报名 -->
+        <van-field name="scheduledReg" label="定时开放报名">
+          <template #input>
+            <van-switch v-model="form.enable_scheduled_registration" size="20" />
+          </template>
+        </van-field>
+
+        <!-- 报名开放时间 -->
+        <van-field
+          v-if="form.enable_scheduled_registration"
+          :model-value="openTimeDisplay"
+          readonly clickable
+          label="报名开放时间"
+          placeholder="请选择开放报名时间"
+          @click="showOpenCalendar = true"
+        />
+
         <van-field name="halfCourt" label="上下场">
           <template #input>
             <van-switch v-model="halfCourt" size="20" />
@@ -47,6 +64,9 @@
     <!-- 日历选择 -->
     <van-calendar v-model:show="showCalendar" :min-date="minDate" :default-date="selectedDate" @confirm="onCalendarConfirm" />
 
+    <!-- 报名开放时间：日期 -->
+    <van-calendar v-model:show="showOpenCalendar" :min-date="minDate" :default-date="openDate" @confirm="onOpenDateConfirm" />
+
     <!-- 时间段选择 -->
     <van-popup v-model:show="showTimePicker" position="bottom" round :style="{ height: '55%' }">
       <div class="picker-toolbar">
@@ -69,6 +89,24 @@
             <van-picker :columns="hourColumns" v-model="endHourIdx" :show-toolbar="false" />
             <span class="time-colon">:</span>
             <van-picker :columns="minuteColumns" v-model="endMinuteIdx" :show-toolbar="false" />
+          </div>
+        </div>
+      </div>
+    </van-popup>
+
+    <!-- 报名开放时间：时间 -->
+    <van-popup v-model:show="showOpenTimePicker" position="bottom" round :style="{ height: '45%' }">
+      <div class="picker-toolbar">
+        <span @click="showOpenTimePicker = false">取消</span>
+        <span class="picker-title">选择开放时间</span>
+        <span @click="onOpenTimeConfirm" style="color:#1989fa">确定</span>
+      </div>
+      <div class="time-picker-body">
+        <div class="time-block">
+          <div class="time-pickers">
+            <van-picker :columns="hourColumns" v-model="openHourIdx" :show-toolbar="false" />
+            <span class="time-colon">:</span>
+            <van-picker :columns="minuteColumns" v-model="openMinuteIdx" :show-toolbar="false" />
           </div>
         </div>
       </div>
@@ -139,6 +177,8 @@ const form = reactive({
   max_participants: 8,
   points_to_win: 11,
   total_matches: null as number | null,
+  enable_scheduled_registration: false,
+  registration_open_at: '',
 })
 
 // --- 日期 ---
@@ -177,17 +217,17 @@ const showTimePicker = ref(false)
 const hourColumns = Array.from({ length: 24 }, (_, i) => ({ text: String(i).padStart(2, '0'), value: i }))
 const minuteColumns = Array.from({ length: 12 }, (_, i) => ({ text: String(i * 5).padStart(2, '0'), value: i * 5 }))
 
-function idxOf(arr: { value: number }[], val: number) { return arr.findIndex(c => c.value === val) }
+// Vant Picker 的 v-model 绑定的是选中项的值（不是索引），
+// 这里直接以值为准；分钟列值为 0/5/10...，绝不能当数组下标用
+const startHourIdx = ref([19])
+const startMinuteIdx = ref([0])
+const endHourIdx = ref([21])
+const endMinuteIdx = ref([0])
 
-const startHourIdx = ref([idxOf(hourColumns, 19)])
-const startMinuteIdx = ref([idxOf(minuteColumns, 0)])
-const endHourIdx = ref([idxOf(hourColumns, 21)])
-const endMinuteIdx = ref([idxOf(minuteColumns, 0)])
-
-const startHour = computed(() => hourColumns[startHourIdx.value[0]]!.value)
-const startMinute = computed(() => minuteColumns[startMinuteIdx.value[0]]!.value)
-const endHour = computed(() => hourColumns[endHourIdx.value[0]]!.value)
-const endMinute = computed(() => minuteColumns[endMinuteIdx.value[0]]!.value)
+const startHour = computed(() => Number(startHourIdx.value[0]) || 0)
+const startMinute = computed(() => Number(startMinuteIdx.value[0]) || 0)
+const endHour = computed(() => Number(endHourIdx.value[0]) || 0)
+const endMinute = computed(() => Number(endMinuteIdx.value[0]) || 0)
 
 const timeDisplay = computed(() => {
   const s = `${String(startHour.value).padStart(2, '0')}:${String(startMinute.value).padStart(2, '0')}`
@@ -218,6 +258,44 @@ function syncDateTime() {
   form.end_date = iso(endHour.value, endMinute.value)
 }
 
+// --- 定时开放报名 ---
+const showOpenCalendar = ref(false)
+const showOpenTimePicker = ref(false)
+function nextFullHour(): [number, number] {
+  const d = new Date()
+  d.setMinutes(0, 0, 0)
+  d.setHours(d.getHours() + 1)
+  return [d.getHours(), d.getMinutes()]
+}
+const [openDefaultH, openDefaultM] = nextFullHour()
+const openDate = ref<Date>(new Date())
+const openHourIdx = ref([openDefaultH])
+const openMinuteIdx = ref([openDefaultM])
+const openHour = computed(() => Number(openHourIdx.value[0]) || 0)
+const openMinute = computed(() => Number(openMinuteIdx.value[0]) || 0)
+const openTimeDisplay = computed(() => {
+  const d = openDate.value
+  const m = d.getMonth() + 1
+  const day = d.getDate()
+  return `${m}月${day}日 ${WEEKDAYS[d.getDay()]} ${String(openHour.value).padStart(2, '0')}:${String(openMinute.value).padStart(2, '0')}`
+})
+function syncOpenTime() {
+  const d = openDate.value
+  const y = d.getFullYear()
+  const mo = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  form.registration_open_at = `${y}-${mo}-${day}T${String(openHour.value).padStart(2, '0')}:${String(openMinute.value).padStart(2, '0')}:00`
+}
+function onOpenDateConfirm(date: Date) {
+  openDate.value = date
+  showOpenCalendar.value = false
+  showOpenTimePicker.value = true
+}
+function onOpenTimeConfirm() {
+  showOpenTimePicker.value = false
+  syncOpenTime()
+}
+
 const defaultTitle = ref('')
 
 async function fetchDefaultTitle() {
@@ -233,6 +311,7 @@ async function fetchDefaultTitle() {
 
 // 初始化
 syncDateTime()
+syncOpenTime()
 
 // --- 场次 ---
 const showMatchPicker = ref(false)
@@ -324,6 +403,8 @@ function buildPayload(title: string, start: string, end: string) {
     max_participants: Number(form.max_participants) || 0,
     total_matches: form.total_matches,
     points_to_win: Number(form.points_to_win) || 11,
+    enable_scheduled_registration: form.enable_scheduled_registration,
+    registration_open_at: form.enable_scheduled_registration ? form.registration_open_at : null,
     preselect_player_ids: preselectedIds.value,
     courts: form.court ? [{
       name: form.court,

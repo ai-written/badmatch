@@ -41,6 +41,9 @@ class TournamentCreate(BaseModel):
     max_participants: int
     total_matches: int | None = None
     points_to_win: int = 11
+    # 定时开放报名：启用时 registration_open_at 必填且必须晚于当前时间
+    enable_scheduled_registration: bool = False
+    registration_open_at: datetime | None = None
     courts: list[CourtCreate] = []
     preselect_player_ids: list[int] = []
 
@@ -57,6 +60,7 @@ class TournamentBrief(BaseModel):
     court_name: str | None = None
     total_matches: int | None = None
     points_to_win: int = 11
+    registration_open_at: datetime | None = None
     created_at: str
 
     class Config:
@@ -77,6 +81,8 @@ class TournamentDetail(BaseModel):
     registered_count: int = 0
     total_matches: int | None = None
     points_to_win: int = 11
+    registration_open_at: datetime | None = None
+    server_now: datetime
     is_registered: bool = False
     created_at: str
 

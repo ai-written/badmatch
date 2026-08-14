@@ -14,7 +14,7 @@
       <div class="info-card">
         <div class="info-head">
           <h2>{{ tournament.title }}</h2>
-          <van-tag :type="statusType" size="medium" round>{{ tournament.status === 'open' ? '报名中' : tournament.status === 'ongoing' ? '进行中' : '已结束' }}</van-tag>
+          <van-tag :type="statusType" size="medium" round>{{ tournament.status === 'open' ? (openLocked ? '即将开放' : '报名中') : tournament.status === 'ongoing' ? '进行中' : '已结束' }}</van-tag>
         </div>
         <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
         <div class="info-grid">
@@ -27,7 +27,8 @@
       </div>
 
       <div class="action-block" v-if="tournament.status === 'open'">
-        <van-button type="primary" block round :disabled="tournament.is_registered" @click="doRegister">
+        <div v-if="openLocked" class="reg-countdown">距报名开放还有 {{ countdownText }}</div>
+        <van-button type="primary" block round :disabled="tournament.is_registered || openLocked" @click="doRegister">
           {{ tournament.is_registered ? '已报名' : '立即报名' }}
         </van-button>
         <van-button v-if="tournament.is_registered && tournament.status === 'open'" plain block round style="margin-top:8px" @click="doCancelRegister">
@@ -138,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
@@ -165,6 +166,41 @@ const matchTotal = ref(0)
 const playerDetail = ref<any>({})
 const playerStats = ref<any>({})
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
+
+// --- 定时开放报名倒计时（以服务端时间校准客户端时钟偏差）---
+let clockOffset = 0
+let countdownTimer: ReturnType<typeof setInterval> | null = null
+const nowTick = ref(Date.now())
+const remainingMs = computed(() => {
+  const openAt = tournament.value?.registration_open_at
+  if (!openAt) return 0
+  return Math.max(0, new Date(openAt).getTime() - clockOffset - nowTick.value)
+})
+const openLocked = computed(() => remainingMs.value > 0)
+const countdownText = computed(() => {
+  if (!openLocked.value) return ''
+  const s = Math.floor(remainingMs.value / 1000)
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return d > 0 ? `${d}天 ${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(h)}:${pad(m)}:${pad(sec)}`
+})
+function syncServerClock(serverNow?: string) {
+  if (serverNow) clockOffset = new Date(serverNow).getTime() - Date.now()
+}
+function startCountdown() {
+  stopCountdown()
+  countdownTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+}
+function stopCountdown() {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
+}
+function onVisibilityChange() {
+  // 从后台切回时立即刷新，避免浏览器节流定时器导致按钮延迟放开
+  if (!document.hidden) nowTick.value = Date.now()
+}
 
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
 const canDelete = computed(() => {
@@ -200,6 +236,7 @@ async function viewPlayer(r: any) {
 async function fetchDetail(skipLoading = false) {
   const res = await api.get(`/tournaments/${route.params.id}`, { skipLoading } as any)
   tournament.value = res.data
+  syncServerClock(res.data.server_now)
 }
 async function fetchRegistrations(skipLoading = false) {
   const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
@@ -305,6 +342,12 @@ watch(lastMessage, () => {
 
 onMounted(async () => {
   await Promise.all([auth.fetchMe(), fetchDetail(), fetchRegistrations()])
+  startCountdown()
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
+onUnmounted(() => {
+  stopCountdown()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -316,6 +359,7 @@ onMounted(async () => {
 .stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
+.reg-countdown { text-align: center; color: #ff976a; font-size: 14px; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
 .info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .info-head h2 { font-size: 18px; font-weight: 700; }
 .info-desc { color: #666; font-size: 13px; margin-bottom: 12px; }
