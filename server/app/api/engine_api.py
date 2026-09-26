@@ -70,7 +70,32 @@ async def start_tournament(
     else:
         # 未设置，或存量值与当前人数不匹配：按当前人数取最小可行场次
         M = compute_match_count(len(player_ids))
-    schedule = generate_schedule(player_ids, M)
+
+    # 排程本身还有一个「整除」保证不了的边界：贪婪选人在个别组合下会走到死路
+    # （实测 5 人 + 15 场必失败，而 5 人的 5/10/20/25 场都正常），
+    # 抛出的 ValueError 原先没有兜底 → 500、事务回滚、赛事卡在 open，
+    # 每次重试都 500，与之前修过的那个场景同一类。这里退到可行的最小场次，
+    # 保证赛事总能开起来，并把实际场次返回给前端提示。
+    schedule = None
+    adjusted_M = M
+    candidate = compute_match_count(len(player_ids))
+    limit = max(M, 30)
+    while candidate <= limit:
+        try:
+            schedule = generate_schedule(player_ids, candidate)
+            adjusted_M = candidate
+            break
+        except ValueError:
+            candidate += len(player_ids)   # 只试整除的组合，避免无谓重试
+    if schedule is None:
+        raise HTTPException(
+            status_code=400,
+            detail="当前人数无法排出赛程，请调整报名人数后重试",
+        )
+    if adjusted_M != M:
+        # 写回实际使用的场次，避免详情与后续重排继续用那个排不出来的值
+        tournament.total_matches = adjusted_M
+        M = adjusted_M
 
     matches_per_round = 2
     rounds_data = compute_rounds(schedule, matches_per_round)
@@ -114,7 +139,7 @@ async def start_tournament(
     # 未提交的话可能读到还没生成的轮次（表现为「已开始但赛程是空的」）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "tournament_started"})
-    return {"ok": True, "rounds": len(rounds_data), "matches": M}
+    return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
 
 
 class WithdrawBody(BaseModel):
