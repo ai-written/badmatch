@@ -64,15 +64,15 @@
         </div>
       </div>
 
-      <div class="support-bar" v-if="match">
+      <div class="support-bar" v-if="match" :class="{ 'support-disabled': supportBlocked }">
         <div class="support-track">
           <div class="support-inner">
-            <div class="support-fill a" :style="{ flex: supportA }" @click.stop="doSupport('a')">
+            <div class="support-fill a" :style="{ flex: supportA }" @click.stop="onSupportClick('a')">
               <div class="support-avatars">
                 <img v-for="(av, i) in (swapped ? match.support_b_users : match.support_a_users)" :key="'a'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: (swapped ? match.support_b_users.length : match.support_a_users.length) - i }" />
               </div>
             </div>
-            <div class="support-fill b" :style="{ flex: supportB }" @click.stop="doSupport('b')">
+            <div class="support-fill b" :style="{ flex: supportB }" @click.stop="onSupportClick('b')">
               <div class="support-avatars">
                 <img v-for="(av, i) in (swapped ? match.support_a_users : match.support_b_users)" :key="'b'+i" :src="av || defaultAvatar" class="support-av" :style="{ zIndex: (swapped ? match.support_a_users.length : match.support_b_users.length) - i }" />
               </div>
@@ -80,8 +80,8 @@
           </div>
         </div>
         <div class="support-labels">
-          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'b' : 'a') }" @click="doSupport('a')">🔥 {{ swapped ? (match.support_b || 0) : (match.support_a || 0) }} 票</span>
-          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'a' : 'b') }" @click="doSupport('b')">🔥 {{ swapped ? (match.support_a || 0) : (match.support_b || 0) }} 票</span>
+          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'b' : 'a') }" @click="onSupportClick('a')">🔥 {{ swapped ? (match.support_b || 0) : (match.support_a || 0) }} 票</span>
+          <span class="support-label" :class="{ active: match.my_support === (swapped ? 'a' : 'b') }" @click="onSupportClick('b')">🔥 {{ swapped ? (match.support_a || 0) : (match.support_b || 0) }} 票</span>
         </div>
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
@@ -241,6 +241,22 @@ const canSupport = computed(() => {
   if (match.value.active_referee?.id === auth.user.id) return false
   return true
 })
+// 应援是否被禁止（赛事已结束 / 比赛已结束 / 自己不可投票）。
+// 用于把应援条置灰并在点击时给出原因，而不是静默无反应。
+const supportBlocked = computed(() =>
+  !canSupport.value || readOnly.value || match.value?.status === 'finished'
+)
+function onSupportClick(side: string) {
+  if (!supportBlocked.value) {
+    doSupport(side)
+    return
+  }
+  // 给出明确反馈：原先这些情况下点击完全没反应，用户会以为手势没生效
+  if (readOnly.value) showToast('赛事已结束，不能再应援')
+  else if (match.value?.status === 'finished') showToast('比赛已结束，不能再应援')
+  else if (!auth.user) showToast('请先登录')
+  else showToast('参赛选手与在任裁判不能应援')
+}
 const supportA = computed(() => {
   const a = match.value?.support_a || 0
   const b = match.value?.support_b || 0
@@ -556,6 +572,9 @@ onUnmounted(() => {
 .wheel-colon { font-size: 44px; font-weight: 600; color: #969799; }
 
 .support-bar { margin: 0 12px 8px; background: #fff; border-radius: 14px; padding: 12px 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+/* 不可应援时（赛事/比赛已结束，或自己不能投票）整体置灰：
+   与点击时弹出的原因保持一致，避免用户以为手势没生效 */
+.support-bar.support-disabled { opacity: .55; }
 .support-track { height: 32px; border-radius: 16px; overflow: hidden; background: #f0f0f0; }
 .support-fill.a { background: #1989fa; transition: flex .3s; cursor: pointer; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; min-width: 0; overflow: hidden; }
 .support-fill.b { background: #e74c3c; transition: flex .3s; cursor: pointer; display: flex; align-items: center; padding-left: 8px; min-width: 0; overflow: hidden; }

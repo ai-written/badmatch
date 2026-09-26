@@ -302,18 +302,31 @@ async function withSubmitting(fn: () => Promise<void>) {
   }
 }
 
+// 刚刚主动刷新过的时间戳：写操作成功后会自己拉一次，紧接着服务端广播又会触发
+// 「静默刷新」，白跑两个请求。用这个时间窗把紧随其后的广播刷新合并掉。
+let lastRefreshAt = 0
+const BROADCAST_REFRESH_SKIP_MS = 1200
+async function refreshBoth(skipLoading = false) {
+  lastRefreshAt = Date.now()
+  await Promise.all([fetchDetail(skipLoading), fetchRegistrations(skipLoading)])
+}
+function refreshBothIfNotJustRefreshed() {
+  if (Date.now() - lastRefreshAt < BROADCAST_REFRESH_SKIP_MS) return
+  Promise.all([fetchDetail(true), fetchRegistrations(true)]).catch(() => {})
+}
+
 async function doRegister() {
   await withSubmitting(async () => {
     await api.post(`/tournaments/${route.params.id}/register`)
     showToast('报名成功')
-    await Promise.all([fetchDetail(), fetchRegistrations()])
+    await refreshBoth()
   })
 }
 async function doCancelRegister() {
   await withSubmitting(async () => {
     await api.post(`/tournaments/${route.params.id}/cancel-register`)
     showToast('已取消报名')
-    await Promise.all([fetchDetail(), fetchRegistrations()])
+    await refreshBoth()
   })
 }
 
@@ -339,7 +352,7 @@ async function doWithdraw() {
     }
     await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
     showToast('已退出比赛')
-    await Promise.all([fetchDetail(), fetchRegistrations()])
+    await refreshBoth()
   })
 }
 
@@ -356,7 +369,7 @@ async function doTransferAndWithdraw() {
     await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
     showToast('已退出比赛')
     showTransferPicker.value = false
-    await Promise.all([fetchDetail(), fetchRegistrations()])
+    await refreshBoth()
   })
 }
 async function fetchMatchOptionsForStart() {
@@ -433,7 +446,7 @@ async function doEndTournament() {
 
 async function onRefresh() {
   try {
-    await Promise.all([fetchDetail(true), fetchRegistrations(true)])
+    await refreshBoth(true)
   } catch {
     // 失败时保持现有内容，交给拦截器提示
   } finally {
@@ -445,11 +458,12 @@ async function onRefresh() {
 
 // 后台静默刷新：只在「影响本页」的广播上触发。
 // 不能无条件刷新——每记一分都会广播 match_updated，那会让每场记分都空拉两个接口。
+// 另外用时间窗合并「写操作成功后自己拉的那一次」紧随其后的广播刷新：
+// 例如创建者点开始比赛，POST 成功后自己拉一次，广播到达又拉一次，白跑两个请求。
 watch(lastMessage, (msg) => {
   const t = msg?.type
   if (t === 'registration_updated' || t === 'tournament_started' || t === 'tournament_finished') {
-    fetchDetail(true)
-    fetchRegistrations(true)
+    refreshBothIfNotJustRefreshed()
   }
 })
 
