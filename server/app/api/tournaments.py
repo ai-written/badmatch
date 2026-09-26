@@ -392,6 +392,11 @@ async def cancel_register(
     t = t_result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
+    # 只有报名中的赛事能取消报名。开赛后应走 withdraw（它会同时失效 PlayerStats），
+    # 否则会出现「Registration 已失效但 PlayerStats 仍有效」的矛盾状态：
+    # 该选手还在打，报名人数与报名列表却少了他。
+    if t.status != TournamentStatus.OPEN:
+        raise HTTPException(status_code=400, detail="报名已截止，无法取消报名")
     result = await db.execute(
         select(Registration).where(
             Registration.tournament_id == tournament_id,
@@ -402,9 +407,10 @@ async def cancel_register(
     if not reg or not reg.is_active:
         raise HTTPException(status_code=400, detail="未报名")
     reg.is_active = False
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
+    # 先提交再广播，避免订阅者回查时报名人数还是旧值
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 

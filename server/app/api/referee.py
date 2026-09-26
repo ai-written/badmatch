@@ -59,15 +59,17 @@ async def claim_referee(
     m.referee_id = user.id
     # 自己收回曾卸任的场次时清空卸任时间，恢复在任状态
     m.referee_released_at = None
-    await db.flush()
+    await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # 先提交再广播：订阅者收到 referee_claimed 后回查比赛详情时，
+    # 未提交的话看到的仍是无裁判状态，这一次实时更新就被吞掉
+    await db.commit()
     from app.core.websocket import manager
     await manager.broadcast(tournament_id, {
         "type": "referee_claimed",
         "match_id": match_id,
         "referee_id": user.id,
     })
-    await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
-                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
@@ -96,12 +98,13 @@ async def release_referee(
 
     # 只标记卸任时间，保留 referee_id 作为执裁历史；此后不再拥有记分等权限
     m.referee_released_at = datetime.now()
-    await db.flush()
+    await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # 先提交再广播（同上）
+    await db.commit()
     from app.core.websocket import manager
     await manager.broadcast(tournament_id, {
         "type": "referee_released",
         "match_id": match_id,
     })
-    await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
-                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}

@@ -104,14 +104,16 @@ async def start_tournament(
         db.add(stat)
 
     tournament.status = TournamentStatus.ONGOING
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "tournament_started"})
     await audit(
         user=user, action="tournament_start",
         target_type="tournament", target_id=tournament.id,
         detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data)},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
+    # 先提交再广播：订阅者收到 tournament_started 后会立刻拉赛程，
+    # 未提交的话可能读到还没生成的轮次（表现为「已开始但赛程是空的」）
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "tournament_started"})
     return {"ok": True, "rounds": len(rounds_data), "matches": M}
 
 
@@ -150,11 +152,12 @@ async def withdraw_player(
         if not r:
             raise HTTPException(status_code=400, detail="未报名")
         r.is_active = False
-        await db.flush()
-        await manager.broadcast(tournament_id, {"type": "registration_updated"})
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                     detail={"player_id": player_id, "self": True, "phase": "open"},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+        # 先提交再广播，避免订阅者回查时报名人数还是旧值
+        await db.commit()
+        await manager.broadcast(tournament_id, {"type": "registration_updated"})
         return {"ok": True, "message": "已取消报名"}
 
     if tournament.status != TournamentStatus.ONGOING:
@@ -198,7 +201,8 @@ async def withdraw_player(
             first = remaining_players.scalar_one_or_none()
             if first:
                 tournament.creator_id = first
-        await db.flush()
+        # 先提交再广播（同上：订阅者会立刻回查报名列表与赛事详情）
+        await db.commit()
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
         return {"ok": True, "message": "选手已退赛"}
 
@@ -276,11 +280,13 @@ async def withdraw_player(
     if remaining_count < 4:
         # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事
         tournament.status = TournamentStatus.FINISHED
-        await db.flush()
-        await manager.broadcast(tournament_id, {"type": "tournament_finished"})
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                     detail={"player_id": player_id, "remaining": remaining_count, "auto_finished": True},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+        # 先提交再广播：订阅者收到 tournament_finished 后会回查赛事状态，
+        # 未提交的话读到的还是「进行中」
+        await db.commit()
+        await manager.broadcast(tournament_id, {"type": "tournament_finished"})
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
     if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
@@ -331,11 +337,13 @@ async def withdraw_player(
             message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
         ))
 
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                 detail={"player_id": player_id, "remaining": remaining_count, "new_creator_id": tournament.creator_id},
                 ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # 先提交再广播：这里重排了赛程、通知了原裁判，订阅者收到后若立刻拉赛程，
+    # 未提交的话会读到重排前的旧轮次
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 
@@ -355,8 +363,9 @@ async def end_tournament(
     if tournament.status != TournamentStatus.ONGOING:
         raise HTTPException(status_code=400, detail="只能结束进行中的赛事")
     tournament.status = TournamentStatus.FINISHED
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "tournament_finished"})
     await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
                 detail={"title": tournament.title}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # 先提交再广播，避免订阅者回查时赛事状态还是「进行中」
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "tournament_finished"})
     return {"ok": True}

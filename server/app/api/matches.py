@@ -234,10 +234,11 @@ async def start_round(
     if round_obj.status != RoundStatus.PENDING:
         raise HTTPException(status_code=400, detail="该轮次已开始或已结束")
     round_obj.status = RoundStatus.ONGOING
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "round_started", "round_id": round_id})
     await audit(user=user, action="round_start", target_type="round", target_id=round_id,
                 detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # 先提交再广播，避免订阅者回查时读到旧状态
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "round_started", "round_id": round_id})
     return {"ok": True}
 
 
@@ -278,6 +279,7 @@ async def support_match(
         raise HTTPException(status_code=400, detail="无效的投票方")
 
     # upsert（处理并发首次投票时的唯一约束冲突）
+    upserted_via_retry = False
     try:
         exist = await db.execute(
             select(MatchSupport).where(MatchSupport.match_id == match_id, MatchSupport.user_id == user.id)
@@ -289,6 +291,9 @@ async def support_match(
             db.add(MatchSupport(match_id=match_id, user_id=user.id, side=body.side))
         await db.flush()
     except IntegrityError:
+        # 并发首次投票：另一个请求已插入同一行。整个事务必须回滚后重做，
+        # 因为回滚会连带丢弃本事务里先前写入的一切。
+        upserted_via_retry = True
         await db.rollback()
         exist = await db.execute(
             select(MatchSupport).where(
@@ -305,16 +310,19 @@ async def support_match(
 
     # count
     counts = await _count_supports(match_id, db)
+    # 高频操作：默认不记录
+    await audit(user=user, action="support_vote", target_type="match", target_id=match_id,
+                detail={"side": body.side, "via_retry": upserted_via_retry},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+                high_freq=True)
+    # 先提交再广播，避免订阅者回查时票数还是旧的
+    await db.commit()
     await manager.broadcast(tournament_id, {
         "type": "support_updated",
         "match_id": match_id,
         "support_a": counts[0],
         "support_b": counts[1],
     })
-    # 高频操作：默认不记录
-    await audit(user=user, action="support_vote", target_type="match", target_id=match_id,
-                detail={"side": body.side}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
-                high_freq=True)
     return {"support_a": counts[0], "support_b": counts[1], "my_side": body.side}
 
 
@@ -629,6 +637,9 @@ async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession) -> None
         return
     tournament.status = TournamentStatus.FINISHED
     await db.flush()
+    # 先提交再广播：订阅者收到 tournament_finished 后可能立刻回查赛事详情，
+    # 若此时事务未提交，读到的是仍是 ongoing 的旧状态，这次实时更新就被吞掉了
+    await db.commit()
     await manager.broadcast(tournament_id, {"type": "tournament_finished"})
 
 
