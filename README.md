@@ -44,7 +44,15 @@ docker compose -f docker-compose.prod.yml up -d
 
 ### 安全注意
 
-- 生产模式（`DEBUG=false`）下若使用默认/示例 `SECRET_KEY`，服务将**拒绝启动**
+- **`SECRET_KEY` 校验是 fail-closed 的**：留空、使用默认/示例值、或长度不足 32 字节时，服务**拒绝启动**（不再看 `DEBUG`）。
+  这是刻意的——默认密钥是公开的，一旦被用上，任何人都能离线伪造出任意用户（含超级管理员）的登录凭证。
+  本地开发如确需使用默认密钥，显式设置 `ALLOW_INSECURE_SECRET_KEY=true`（dev compose 已这样配置）。
+- **来源 IP 默认不信任转发头**：`CF-Connecting-IP` / `X-Forwarded-For` / `X-Real-IP` 任何客户端都能自己伪造，
+  一旦采信，所有按 IP 的限流（登录、初始注册码、邀请码、头像上传）只要每次换一个伪造值就能无限尝试，
+  审计日志里的来源 IP 也会变成攻击者随手填的内容。
+  - 默认 `TRUST_PROXY_HEADERS=false`：直接用对端 IP（安全，但经反向代理时记录的是代理 IP）
+  - 服务只允许反向代理回源时设为 `true`：此时优先取 `X-Real-IP`（nginx 用 `$remote_addr` 覆盖式写入，伪造值会被冲掉）
+  - 走 Cloudflare 时需**同时**设置 `TRUST_CF_CONNECTING_IP=true`，否则限流会按 Cloudflare/nginx 的 IP 计数
 - **token 版本号机制**：登出、修改密码、管理员重置密码都会使该用户所有 token 立即失效，并主动断开其全部 WebSocket 连接；升级/重启后旧 token 按版本 0 兼容处理，**已登录用户无需重新登录**
 
 ### Cloudflare 部署（推荐）
@@ -53,13 +61,19 @@ docker compose -f docker-compose.prod.yml up -d
 
 - 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源走 HTTP（80 端口）
 - 浏览器侧 HTTPS 和 HTTP/2 由 Cloudflare 提供，服务器**无需配置证书/443**
-- 真实客户端 IP 通过 `CF-Connecting-IP` 头获取（登录限流、审计、访问日志均准确且不可伪造）
+- 真实客户端 IP 通过 `CF-Connecting-IP` 头获取 —— 需显式设置 **`TRUST_CF_CONNECTING_IP=true`** 才会使用该头
 - ⚠️ 安全：确保本地 80 端口**不对外暴露**（只允许本机 cloudflared 访问），否则可伪造 `CF-Connecting-IP` 绕过限流
 
 **场景 B：Cloudflare 代理（橙色云，服务器有公网 IP）**
 
 - Cloudflare 面板 **SSL/TLS 模式保持 Flexible**（回源 HTTP）；若设为 Full/Full(strict) 会回源 TLS 失败（521/525）
 - ⚠️ 防火墙/安全组**只放行 Cloudflare IP 段**（https://www.cloudflare.com/ips/ ），否则直连可伪造 `CF-Connecting-IP`
+- 同样需要 `TRUST_CF_CONNECTING_IP=true`
+
+**场景 C：直接经 nginx 暴露（无 Cloudflare）**
+
+- nginx 已用 `$remote_addr` 覆盖式写入 `X-Real-IP`，因此设置 `TRUST_PROXY_HEADERS=true` 即可拿到真实客户端 IP
+- `docker-compose.prod.yml` 默认即为 `true`；**若服务会被绕过 nginx 直接访问，必须改回 `false`**
 
 ## 核心功能
 
@@ -138,6 +152,7 @@ docker compose -f docker-compose.prod.yml exec server python scripts/backfill_av
 │   │   ├── models/       # 数据模型
 │   │   └── schemas/      # Pydantic 模型
 │   ├── tests/            # pytest 单元测试
+│   ├── alembic/          # 未启用的 Alembic 配置（无 versions/，见下方说明）
 │   └── static/uploads/   # 用户头像
 ├── client/               # Vue 3 前端
 │   ├── src/views/        # 页面组件
@@ -151,6 +166,19 @@ docker compose -f docker-compose.prod.yml exec server python scripts/backfill_av
 ├── publish.sh                # 镜像发布脚本
 └── .env.example              # 环境变量模板
 ```
+
+### 数据库结构调整（重要）
+
+本项目**不使用 Alembic 管理 schema**，而是：
+
+1. `Base.metadata.create_all` —— 只负责创建新表，不会给已存在的表补列
+2. `app/core/startup_migration.py` —— 启动时**幂等**检查并补齐老库缺失的列/约束（新库老库都能直接跑起来）
+
+因此**新增字段时**：改 `models/` 里的模型，并在 `startup_migration.py` 里加一段「列不存在才 ALTER TABLE」的逻辑，
+部署后重启服务即自动生效，**无需手工执行 SQL**。
+
+`server/alembic/` 只保留了当初为 Alembic 准备的异步 `env.py` 与 `alembic.ini`，**没有 `versions/` 目录、代码也未引用它**。
+如果将来要改用 Alembic，需要自己生成初始迁移并停止使用 `startup_migration.py`，避免两套机制并行。
 
 ## 计分规则
 

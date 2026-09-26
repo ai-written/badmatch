@@ -7,6 +7,10 @@ services:
       POSTGRES_USER: badminton
       POSTGRES_PASSWORD: badminton
       POSTGRES_DB: badminton
+      # 与生产保持一致：naive TIMESTAMP 列的写入值取决于数据库会话时区，
+      # dev 不配的话会按 UTC 写入，而前端按本地时间展示 → 通知时间差 8 小时
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
     ports:
       - "5432:5432"
     volumes:
