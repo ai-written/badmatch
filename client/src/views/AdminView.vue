@@ -109,6 +109,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useGoBack } from '@/composables/useGoBack'
+import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
 
@@ -371,6 +372,10 @@ onMounted(async () => {
   await auth.fetchMe()
   await fetchUsers()
 })
+
+// 锁屏/切后台回到前台时补一次刷新：本页没有 WebSocket，
+// 用户列表（角色、新增用户）在后台期间的变化不会自己出现
+useResumeRefresh(() => fetchUsers(true))
 </script>
 
 <style scoped>
