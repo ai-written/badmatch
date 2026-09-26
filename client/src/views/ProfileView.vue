@@ -162,18 +162,28 @@ async function onFileChange(e: Event) {
 
   avatarUploading.value = true
   try {
-    // 先在浏览器端压缩（2MB 原图 -> 约 20KB），避免低带宽下上传超时
-    const blob = await compressAvatar(f)
+    // 先在浏览器端压缩（2MB 原图 -> 约 20KB），避免低带宽下上传超时。
+    // 压缩/校验阶段自己弹提示（这些错误没有 HTTP 响应，拦截器不会处理）
+    let blob: Blob
+    try {
+      blob = await compressAvatar(f)
+    } catch (err: any) {
+      showFailToast(err?.message || '图片处理失败')
+      return
+    }
+
+    // 请求阶段的错误交给全局 axios 拦截器提示（它会显示后端返回的中文 detail）。
+    // 这里若再弹一次 err.message，会出现两条 toast，其中一条是英文的
+    // 「Request failed with status code 429」。
     const fd = new FormData()
     fd.append('file', blob, 'avatar.jpg')
     const res = await api.post('/auth/upload-avatar', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
-    auth.user!.avatar = res.data.avatar
+    if (auth.user) auth.user.avatar = res.data.avatar
     showToast('头像更新成功')
-  } catch (err: any) {
-    // 压缩/校验阶段的错误直接提示；接口错误已由全局拦截器提示，避免弹两次
-    showFailToast(err?.message || '头像上传失败')
+  } catch {
+    // 已由拦截器提示，这里静默
   } finally {
     avatarUploading.value = false
   }

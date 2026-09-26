@@ -43,15 +43,18 @@ export function compressAvatar(file: File): Promise<Blob> {
         const h = img.naturalHeight
         if (!w || !h) throw new Error('图片尺寸异常')
 
-        // 等比缩放；只取一侧，另一侧由浏览器按原比例算出，避免两次取整导致变形
+        // 等比缩放。
+        // 用 Math.max(1, …)：极端长宽比（如 1000×1 的长条截图）取整会得到 0，
+        // canvas 高度为 0 时 toBlob 按规范回调 null，用户会看到「压缩失败」——
+        // 而服务端本来能正常处理这类图片，属于前端反而多出的失败分支。
         let dw = w
         let dh = h
         if (w >= h && w > AVATAR_MAX_SIZE) {
           dw = AVATAR_MAX_SIZE
-          dh = Math.round((h * AVATAR_MAX_SIZE) / w)
+          dh = Math.max(1, Math.round((h * AVATAR_MAX_SIZE) / w))
         } else if (h > w && h > AVATAR_MAX_SIZE) {
           dh = AVATAR_MAX_SIZE
-          dw = Math.round((w * AVATAR_MAX_SIZE) / h)
+          dw = Math.max(1, Math.round((w * AVATAR_MAX_SIZE) / h))
         }
 
         // 先画白底：服务端也会做白底合成，这里提前处理可避免 PNG 透明区域发黑

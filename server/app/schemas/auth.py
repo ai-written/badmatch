@@ -54,7 +54,9 @@ class AdminSetRole(BaseModel):
 
 class UpdateProfile(BaseModel):
     username: str | None = None
-    avatar: str | None = None
+    # 刻意不接受 avatar：头像只能通过 POST /auth/upload-avatar 修改。
+    # 否则任意用户可把 avatar 设成「他人头像的路径」，再上传一次头像，
+    # 就会经由 _remove_avatar_file 删掉对方的头像文件（对方 DB 仍指向它 → 裂图）。
     gender: str | None = None
     email: str | None = None
 
