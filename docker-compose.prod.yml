@@ -30,7 +30,9 @@ services:
       # 否则按 IP 的限流与审计 IP 都能被伪造绕过
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
       TZ: Asia/Shanghai
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      # 必填：用于拼接密码重置邮件里的链接，必须是用户实际访问的站点地址。
+      # 未设置（或仍指向 localhost）时服务会拒绝启动，避免上线后才发现链接是死的
+      FRONTEND_URL: ${FRONTEND_URL:?请在 .env 中设置 FRONTEND_URL，例如 https://badminton.example.com}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       SUPERADMIN_INIT_CODE: ${SUPERADMIN_INIT_CODE:-}
       AUDIT_LOG_PATH: ${AUDIT_LOG_PATH:-logs/access.log}

@@ -41,6 +41,25 @@ async def lifespan(app: FastAPI):
             "请设置强随机密钥：openssl rand -hex 32\n"
             "本地开发若坚持使用默认密钥，请显式设置 ALLOW_INSECURE_SECRET_KEY=true。"
         )
+
+    # FRONTEND_URL 指向本机时拒绝启动：它被用来拼「密码重置」邮件里的链接，
+    # 而这个链接里带的是能改密码的凭证。若部署后仍是默认的 localhost:5173，
+    # 邮件里的链接必然打不开（用户会以为链接失效），而且一份可改密的凭证
+    # 被指向了非站点主机。宁可启动失败，也不要上线后才发现。
+    # 与 SECRET_KEY 同一思路：不看 DEBUG（DEBUG 默认就是 True，拿它当开关属于
+    # fail-open），而是用「生产部署的显式标志」判定，本地开发不受影响。
+    prod_like = not settings.ALLOW_INSECURE_SECRET_KEY and not settings.DEBUG
+    frontend = (settings.FRONTEND_URL or "").strip()
+    if prod_like and (
+        not frontend or "localhost" in frontend or "127.0.0.1" in frontend
+    ):
+        raise RuntimeError(
+            f"FRONTEND_URL 未正确配置（当前为 {frontend!r}），拒绝启动！\n"
+            "它用于拼接密码重置邮件里的链接，必须是用户实际访问的站点地址，"
+            "例如 https://badminton.example.com。\n"
+            "请在 .env 中设置 FRONTEND_URL；本地开发请设置 DEBUG=true。"
+        )
+
     async with engine.begin() as conn:
         await run_startup_migrations(conn)
         await conn.run_sync(Base.metadata.create_all)
