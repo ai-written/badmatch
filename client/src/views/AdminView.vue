@@ -39,7 +39,9 @@
 
           <div class="audit-count" v-if="auditTotal > 0">共 {{ auditTotal }} 条</div>
 
-          <van-list v-model:loading="auditLoading" :finished="auditFinished" finished-text="没有更多了" @load="loadAuditLogs">
+          <van-list v-model:loading="auditLoading" :finished="auditFinished" :error="auditError"
+                    error-text="加载失败，点击重试" finished-text="没有更多了"
+                    @update:error="auditError = false" @load="loadAuditLogs">
             <van-cell-group inset v-for="a in auditLogs" :key="a.id" style="margin-bottom:4px">
               <van-cell :title="`${a.username || '匿名'} · ${ACTION_LABELS[a.action] || a.action}`" :label="`${formatTime(a.created_at)}${a.ip ? '  IP:' + a.ip : ''}`" is-link @click="openAuditDetail(a)" />
             </van-cell-group>
@@ -61,7 +63,9 @@
 
           <div class="audit-count" v-if="accessTotal > 0">共 {{ accessTotal }} 条（实时浏览日志）</div>
 
-          <van-list v-model:loading="accessLoading" :finished="accessFinished" finished-text="没有更多了" @load="loadAccessLogs">
+          <van-list v-model:loading="accessLoading" :finished="accessFinished" :error="accessError"
+                    error-text="加载失败，点击重试" finished-text="没有更多了"
+                    @update:error="accessError = false" @load="loadAccessLogs">
             <van-cell-group inset v-for="(a, i) in accessLogs" :key="i" style="margin-bottom:4px">
               <van-cell :title="`${a.method} ${a.path}${a.query ? '?' + a.query : ''}`" :label="`${formatTime(a.time)}  ${a.ip || '无IP'}  ${a.status}  ${a.duration_ms}ms${a.username ? '  ' + a.username : (a.user_id ? '  用户#' + a.user_id : '')}`" is-link @click="openAccessDetail(a)" />
             </van-cell-group>
@@ -182,9 +186,13 @@ const auditPage = ref(1)
 const auditLoading = ref(false)
 const auditFinished = ref(false)
 const auditTotal = ref(0)
+// 加载失败交给 van-list 的错误态（可点击重试），而不是把 finished 置为 true
+const auditError = ref(false)
 // 防重入标志：van-list 触发 @load 时已把 auditLoading 置为 true，
 // 不能再用它做防重入判断（否则接口永不调用）
 let auditRequesting = false
+// 世代号：切换筛选条件时自增，用来丢弃「旧筛选的迟到响应」
+let auditGen = 0
 const auditFilter = reactive({ username: '', action: '', dateRange: '' })
 const showActionSheet = ref(false)
 const showCalendar = ref(false)
@@ -202,8 +210,12 @@ function formatTime(iso: string) {
 async function loadAuditLogs() {
   if (auditRequesting) return
   auditRequesting = true
+  // 记下本次请求真正使用的页码与世代：响应回来时页码可能已被重置、
+  // 筛选也可能已经变了，用「响应时的」状态去写列表会串数据
+  const gen = auditGen
+  const reqPage = auditPage.value
   try {
-    const params: any = { page: auditPage.value, page_size: 20 }
+    const params: any = { page: reqPage, page_size: 20 }
     if (auditFilter.action) params.action = auditFilter.action
     const uname = auditFilter.username.trim()
     if (uname) params.username = uname
@@ -213,25 +225,34 @@ async function loadAuditLogs() {
       if (parts[1]) params.created_to = `${parts[1]} 23:59:59`
     }
     const res = await api.get('/auth/admin/audit-logs', { params, skipLoading: true } as any)
+    if (gen !== auditGen) return   // 筛选已变化：丢弃这次的过期响应
     const data = res.data
-    auditLogs.value = auditPage.value === 1 ? data.items : [...auditLogs.value, ...data.items]
+    auditLogs.value = reqPage === 1 ? data.items : [...auditLogs.value, ...data.items]
     auditTotal.value = data.total
-    auditFinished.value = auditLogs.value.length >= data.total
-    auditPage.value += 1
+    // 空页也算到底：否则 van-list 会因为内容不满屏而反复发同一页
+    auditFinished.value = auditLogs.value.length >= data.total || data.items.length === 0
+    auditPage.value = reqPage + 1
+    auditError.value = false
   } catch {
-    auditFinished.value = true
+    if (gen === auditGen) auditError.value = true
   } finally {
-    auditRequesting = false
-    // 通知 van-list 本次加载完成（由它自行判断是否继续加载）
-    auditLoading.value = false
+    if (gen === auditGen) {
+      auditRequesting = false
+      auditLoading.value = false
+    }
   }
 }
 
 function resetAuditList() {
+  // 作废在途请求，并解除重入锁：否则正在飞行的那次响应会把
+  // 旧筛选的数据写回列表，而新筛选的第 1 页因为锁没释放、请求根本没发出去
+  auditGen++
+  auditRequesting = false
   auditLogs.value = []
   auditPage.value = 1
   auditTotal.value = 0
   auditFinished.value = false
+  auditError.value = false
   loadAuditLogs()
 }
 
@@ -284,34 +305,48 @@ const showAccessDetail = ref(false)
 const accessDetail = ref<any>(null)
 // 防重入标志（van-list 触发 @load 时已把 loading 置 true）
 let accessRequesting = false
+// 世代号：切换筛选条件时自增，用来丢弃「旧筛选的迟到响应」
+let accessGen = 0
+// 加载失败交给 van-list 的错误态（可点击重试），而不是把 finished 置为 true
+const accessError = ref(false)
 
 async function loadAccessLogs() {
   if (accessRequesting) return
   accessRequesting = true
+  const gen = accessGen
+  const reqPage = accessPage.value
   try {
-    const params: any = { page: accessPage.value, page_size: 20 }
+    const params: any = { page: reqPage, page_size: 20 }
     if (accessFilter.method) params.method = accessFilter.method
     const kw = accessFilter.keyword.trim()
     if (kw) params.keyword = kw
     const res = await api.get('/auth/admin/access-logs', { params, skipLoading: true } as any)
+    if (gen !== accessGen) return   // 筛选已变化：丢弃过期响应
     const data = res.data
-    accessLogs.value = accessPage.value === 1 ? data.items : [...accessLogs.value, ...data.items]
+    accessLogs.value = reqPage === 1 ? data.items : [...accessLogs.value, ...data.items]
     accessTotal.value = data.total
-    accessFinished.value = accessLogs.value.length >= data.total
-    accessPage.value += 1
+    accessFinished.value = accessLogs.value.length >= data.total || data.items.length === 0
+    accessPage.value = reqPage + 1
+    accessError.value = false
   } catch {
-    accessFinished.value = true
+    if (gen === accessGen) accessError.value = true
   } finally {
-    accessRequesting = false
-    accessLoading.value = false
+    if (gen === accessGen) {
+      accessRequesting = false
+      accessLoading.value = false
+    }
   }
 }
 
 function resetAccessList() {
+  // 作废在途请求并释放重入锁（同 resetAuditList）
+  accessGen++
+  accessRequesting = false
   accessLogs.value = []
   accessPage.value = 1
   accessTotal.value = 0
   accessFinished.value = false
+  accessError.value = false
   loadAccessLogs()
 }
 
