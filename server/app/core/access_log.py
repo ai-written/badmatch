@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+from app.core.audit import resolve_client_ip
 from app.core.config import get_settings
 from app.core.security import decode_access_token
 
@@ -59,16 +60,11 @@ def _headers(scope: dict) -> dict:
 
 
 def _client_ip(scope: dict, headers: dict | None = None) -> str:
+    """与各接口共用同一套 IP 判定（见 audit.resolve_client_ip），避免两处实现漂移。"""
     headers = headers if headers is not None else _headers(scope)
-    # Cloudflare 回源专有头：真实客户端 IP
-    cf = headers.get("cf-connecting-ip")
-    if cf:
-        return cf.strip()
-    forwarded = headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
     client = scope.get("client")
-    return client[0] if client else ""
+    peer = client[0] if client else "unknown"
+    return resolve_client_ip(get_settings(), headers, peer)
 
 
 def _identity(scope: dict, headers: dict | None = None) -> tuple[str | None, str | None]:

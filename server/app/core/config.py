@@ -56,6 +56,17 @@ class Settings(BaseSettings):
     INVITE_MAX_ATTEMPTS: int = 3
     INVITE_WINDOW_SECONDS: int = 300
 
+    # ---- 反向代理 ----
+    # 是否信任 X-Real-IP / X-Forwarded-For 等转发头。
+    # 默认 False（安全）：这些头任何客户端都能自己带上，直接暴露服务时信任它们
+    # 等于所有按 IP 的限流和审计 IP 都可被伪造绕过。
+    # 仅当服务只允许反向代理回源（如 nginx 覆盖式写入 X-Real-IP）时才设为 true。
+    TRUST_PROXY_HEADERS: bool = False
+    # 该头只在 Cloudflare 回源时才是可信的，因此单独开关，不随 TRUST_PROXY_HEADERS 放开
+    TRUST_CF_CONNECTING_IP: bool = False
+    # 明确允许在 DEBUG 下用不安全的 SECRET_KEY（仅供本地开发）
+    ALLOW_INSECURE_SECRET_KEY: bool = False
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

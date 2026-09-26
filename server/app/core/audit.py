@@ -18,20 +18,65 @@ from app.models.audit import AuditLog
 logger = logging.getLogger(__name__)
 
 
-def get_client_ip(request: Request) -> str:
-    """获取客户端真实 IP。
+def forwarded_client_ip(headers, peer_ip: str) -> str:
+    """在「已确认前面是可信反向代理」的前提下，从转发头里取真实客户端 IP。
 
-    优先取 CF-Connecting-IP（Cloudflare 回源专有头，真实不可伪造；
-    前提：服务器仅允许 Cloudflare IP 回源访问，否则该头可被直接请求伪造）。
-    其次取 X-Forwarded-For 首个值（nginx 反代场景）。
+    取 X-Real-IP 优先（nginx 里用覆盖式写入，客户端伪造会被冲掉），
+    其次取 X-Forwarded-For 的**最后一个**值——若代理是追加式写入，
+    客户端伪造的值会排在前面，取第一个等于让攻击者自己指定 IP。
+
+    值里若含逗号或空格，说明是被追加进去的伪造链而不是干净的单值，
+    此时保守地回退到对端 IP。
     """
-    cf = request.headers.get("cf-connecting-ip")
-    if cf:
-        return cf.strip()
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    def clean(v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.strip()
+        if not v or any(ch in v for ch in ", \t"):
+            return None
+        return v
+
+    real = clean(headers.get("x-real-ip"))
+    if real:
+        return real
+    xff = headers.get("x-forwarded-for")
+    if xff:
+        last = clean(xff.split(",")[-1])
+        if last:
+            return last
+    return peer_ip
+
+
+def resolve_client_ip(settings, headers: dict, peer_ip: str) -> str:
+    """由「配置 + 请求头（小写键）+ 对端 IP」解出客户端 IP。
+
+    抽出来是为了让访问日志（ASGI 中间件，拿不到 Request 对象）
+    与各接口共用同一套判定，避免两处实现不一致而漏改一处。
+    """
+    if settings.TRUST_CF_CONNECTING_IP:
+        cf = (headers.get("cf-connecting-ip") or "").strip()
+        if cf and not any(ch in cf for ch in ", \t"):
+            return cf
+
+    if settings.TRUST_PROXY_HEADERS:
+        return forwarded_client_ip(headers, peer_ip)
+
+    return peer_ip
+
+
+def get_client_ip(request: Request) -> str:
+    """获取客户端 IP，用于限流计数与审计记录。
+
+    默认**不使用**转发头，因为它们是客户端可自由伪造的：一旦采信，
+    攻击者每次换一个值就能让所有按 IP 的限流各自重新计数（等于无限流），
+    同时审计里的来源 IP 也变成攻击者随手填的内容，事后无法追溯。
+
+    只有确认服务只允许反向代理回源时，才把 TRUST_PROXY_HEADERS 设为 true；
+    那样来源 IP 才由代理覆盖式写入。CF-Connecting-IP 需要单独开关，
+    因为它只在 Cloudflare 回源时可信（详见 docker-compose.prod.yml 注释）。
+    """
+    peer = request.client.host if request.client else "unknown"
+    return resolve_client_ip(get_settings(), request.headers, peer)
 
 
 async def audit(

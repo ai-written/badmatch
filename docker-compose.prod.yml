@@ -21,9 +21,14 @@ services:
     image: hsiangleev/badmatch:server-latest
     environment:
       DATABASE_URL: postgresql+asyncpg://badminton:${DB_PASSWORD:-badminton}@db:5432/badminton
-      # 生产环境强制要求设置随机 SECRET_KEY，未设置将无法启动
+      # 生产环境强制要求设置随机 SECRET_KEY，未设置将无法启动；
+      # 若沿用 .env.example 里的示例值，服务会因密钥不安全而拒绝启动
       SECRET_KEY: ${SECRET_KEY:?请在 .env 中设置 SECRET_KEY（openssl rand -hex 32 生成）}
       DEBUG: "false"
+      # 本 compose 部署下请求都经 nginx（覆盖式写入 X-Real-IP），
+      # 因此可以信任转发头；若服务会被直接访问（绕过 nginx），必须改回 false，
+      # 否则按 IP 的限流与审计 IP 都能被伪造绕过
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
       TZ: Asia/Shanghai
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       CORS_ORIGINS: ${CORS_ORIGINS:-}

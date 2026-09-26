@@ -29,6 +29,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://badminton:badminton@db:5432/badminton
       DEBUG: "true"
       SECRET_KEY: docker-dev-secret-key-not-for-production
+      # 该密钥是公开的示例值，明确声明后才允许启动（生产环境不要设置这一项）
+      ALLOW_INSECURE_SECRET_KEY: "true"
       TZ: Asia/Shanghai
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       SMTP_HOST: ${SMTP_HOST:-}
