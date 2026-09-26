@@ -51,6 +51,10 @@ async def list_rounds(
     # 读取赛事状态：已结束时前端据此把整页置为只读（这里不抛错，只用于展示）
     t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
     tournament = t.scalar_one_or_none()
+    # 赛事不存在时返回 404，而不是「200 + 空数组」：
+    # 后者会让前端把「赛事已被删除/链接失效」显示成「该赛事还没有赛程」
+    if tournament is None:
+        raise HTTPException(status_code=404, detail="赛事不存在")
     t_status = tournament.status.value if tournament else None
 
     bye_map = await _get_bye_players(rounds, db)

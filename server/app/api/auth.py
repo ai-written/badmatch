@@ -447,7 +447,10 @@ async def list_audit_logs(
     if action:
         query = query.where(AuditLog.action == action)
     if username:
-        query = query.where(AuditLog.username.ilike(f"%{username}%"))
+        # 转义 LIKE 通配符：用户名里输入 % 或 _ 会被当成通配符，
+        # 搜「%」会匹配全部记录，用户会以为搜索失效
+        safe = username.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(AuditLog.username.ilike(f"%{safe}%", escape="\\"))
     if created_from:
         query = query.where(AuditLog.created_at >= _parse_audit_dt(created_from, "开始日期"))
     if created_to:
