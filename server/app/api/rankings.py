@@ -24,9 +24,12 @@ async def get_rankings(
         select(PlayerStats, User.username, User.avatar)
         .join(User, PlayerStats.user_id == User.id)
         .where(PlayerStats.tournament_id == tournament_id)
+        # user_id 兜底：战绩与净胜分都相同时，PostgreSQL 不保证稳定顺序，
+        # 同一条 SQL 两次执行可能给出不同排列，前端名次会在刷新间跳变
         .order_by(
             PlayerStats.matches_won.desc(),
             (PlayerStats.points_for - PlayerStats.points_against).desc(),
+            PlayerStats.user_id.asc(),
         )
     )
     rows = result.all()
