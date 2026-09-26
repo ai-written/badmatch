@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from datetime import time
+from datetime import datetime, time
 
 
 class PlayerInfo(BaseModel):
@@ -38,6 +38,7 @@ class MatchOut(BaseModel):
     my_support: str | None = None
     support_a_users: list[str] = []
     support_b_users: list[str] = []
+    is_swapped: bool = False
     duration_seconds: int | None = None
 
     class Config:
@@ -64,6 +65,11 @@ class ScoreUpdate(BaseModel):
 
 class ClaimRefereeRequest(BaseModel):
     match_id: int
+
+
+class SwapUpdate(BaseModel):
+    """交换左右场地。不传 swapped 则按当前状态取反（幂等：连点不会卡死）。"""
+    swapped: bool | None = None
 
 
 class SupportUpdate(BaseModel):

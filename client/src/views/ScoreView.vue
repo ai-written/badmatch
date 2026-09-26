@@ -2,7 +2,7 @@
   <div class="score-root">
     <van-nav-bar :title="matchNum" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
-        <span v-if="timerActive" class="elapsed">{{ fmtElapsed(elapsed) }}</span>
+        <span v-if="timerText" class="elapsed">{{ timerText }}</span>
       </template>
     </van-nav-bar>
 
@@ -35,7 +35,7 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}</span>
           </div>
-          <div class="swap-hint">点击交换场地</div>
+          <div class="swap-hint">{{ isReferee ? '点击交换场地' : (match.status === 'finished' ? '' : '仅裁判可交换场地') }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -129,6 +129,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useResumeRefresh } from '@/composables/useResumeRefresh'
+import { serverElapsedSeconds, displayElapsedSeconds, formatElapsed } from '@/utils/timer'
 import { useGoBack } from '@/composables/useGoBack'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
@@ -138,55 +140,52 @@ const { goBack } = useGoBack()
 const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
-const swapped = ref(false)
+// 左右场地交换改为服务端状态（仅裁判可操作），所有人实时同步。
+// 这里不再保留本地 ref，避免出现「双数据源」导致各端不一致。
+const swapped = computed(() => !!match.value?.is_swapped)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
-// --- 比赛持续时长（纯前端，localStorage 持久化） ---
-const elapsed = ref(0)
-const timerActive = ref(false)
+// --- 比赛持续时长（服务端为准，所有人一致） ---
+// 时间基准来自服务端的 matches.started_at，配合响应里的 now 换算成「已进行秒数」，
+// 因此不依赖任何一台设备的本机时钟：裁判和观众看到的耗时相同。
+// 本地只在两次刷新之间每秒递增，保持走字平滑。
+const tick = ref(0)
+const serverElapsed = ref(0)     // 最近一次拉取时，服务端认可的已进行秒数
+const anchorNow = ref(0)         // 最近一次拉取的本地时刻，用于本地外推
 let timer: ReturnType<typeof setInterval> | null = null
-const storageKey = computed(() => `score_start_${route.params.matchId}`)
-const MAX_MATCH_SECONDS = 3 * 60 * 60
+const durationSecs = computed<number | null>(() => match.value?.duration_seconds ?? null)
 
-function fmtElapsed(sec: number) {
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const hh = h.toString().padStart(2, '0')
-  const mm = m.toString().padStart(2, '0')
-  const ss = s.toString().padStart(2, '0')
-  return h > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`
-}
-
-function updateElapsed() {
-  const start = Number(localStorage.getItem(storageKey.value))
-  if (!start) return
-  const secs = Math.max(0, Math.floor((Date.now() - start) / 1000))
-  // 超过上限视为过期（如忘记结束、隔天补录），清除计时等待下次记分重新开始
-  if (secs > MAX_MATCH_SECONDS) {
-    stopTimer(true)
-    return
+const elapsed = computed(() => {
+  // 显式读取 tick：Date.now() 本身不是响应式的，靠每秒递增 tick 触发重算
+  tick.value
+  return displayElapsedSeconds(match.value?.status, durationSecs.value, serverElapsed.value, anchorNow.value, Date.now())
+})
+const timerText = computed(() => {
+  if (match.value?.status === 'ongoing' || (match.value?.status === 'finished' && durationSecs.value != null)) {
+    return formatElapsed(elapsed.value)
   }
-  elapsed.value = secs
+  return ''
+})
+
+/** 用服务端返回的 started_at 与 now 校准基准（差值与时区无关，两端都是服务端本地时间） */
+function syncTimerAnchor() {
+  serverElapsed.value = serverElapsedSeconds(match.value?.started_at, match.value?.now)
+  anchorNow.value = Date.now()
 }
 
-function startTimerIfNeeded() {
-  if (timerActive.value || match.value?.status === 'finished') return
-  const stored = localStorage.getItem(storageKey.value)
-  const start = stored ? Number(stored) : 0
-  if (!start || Date.now() - start > MAX_MATCH_SECONDS * 1000) {
-    localStorage.setItem(storageKey.value, String(Date.now()))
-  }
-  timerActive.value = true
-  updateElapsed()
-  timer = setInterval(updateElapsed, 1000)
-}
-
-function stopTimer(clearStorage: boolean) {
-  if (timer) { clearInterval(timer); timer = null }
-  timerActive.value = false
-  if (clearStorage) localStorage.removeItem(storageKey.value)
-}
+// 走字：仅在「进行中」时每秒递增；结束后停止，避免无意义的重算
+watch(
+  () => match.value?.status === 'ongoing',
+  (ongoing) => {
+    if (timer) { clearInterval(timer); timer = null }
+    if (ongoing) timer = setInterval(() => { tick.value++ }, 1000)
+  },
+  { immediate: true },
+)
+// 每 30s 拉一次校准（服务端有 ETag，内容未变时只回 304，开销很小）
+const calibrateTimer = setInterval(() => {
+  if (match.value?.status === 'ongoing') fetchMatch()
+}, 30000)
 // --- 时长逻辑结束 ---
 
 const isReferee = computed(() => match.value?.referee?.id === auth.user?.id)
@@ -241,12 +240,18 @@ const rightWin = computed(() => {
   return swapped.value ? w === match.value?.pairing_a?.id : w === match.value?.pairing_b?.id
 })
 
-function swapTeams() { swapped.value = !swapped.value }
+function swapTeams() {
+  // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
+  if (!isReferee.value || match.value?.status === 'finished') return
+  api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`, {}, { skipLoading: true } as any)
+    .catch(() => {})
+}
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
   const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
   match.value = res.data
+  syncTimerAnchor()
 }
 
 async function doSupport(side: string) {
@@ -285,7 +290,6 @@ function scheduleFlush() {
 
 async function addScore(side: string) {
   if (!match.value) return
-  startTimerIfNeeded()
   if (side === 'a') match.value.score_a = (match.value.score_a ?? 0) + 1
   else match.value.score_b = (match.value.score_b ?? 0) + 1
   pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
@@ -294,7 +298,6 @@ async function addScore(side: string) {
 
 async function subScore(side: string) {
   if (!match.value) return
-  startTimerIfNeeded()
   if (side === 'a' && (match.value.score_a ?? 0) > 0) match.value.score_a -= 1
   else if (side === 'b' && (match.value.score_b ?? 0) > 0) match.value.score_b -= 1
   else return
@@ -341,7 +344,6 @@ async function endMatch() {
   await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
     score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0, force_end: true
   })
-  stopTimer(true)
   showToast('比赛结束')
   goBack()
 }
@@ -362,7 +364,15 @@ watch(lastMessage, (msg) => {
       if (msg.score_b != null) match.value.score_b = msg.score_b
     }
     if (msg.status) match.value.status = msg.status
-    if (msg.status === 'finished') stopTimer(true)
+    // 裁判交换场地后，所有正在看这场的人一起切换
+    if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
+    // 「比赛开始」这一刻服务端会带 now 过来，用它校准计时基准，
+    // 不必等下一次拉取，计时器即可立刻从 00:00 开始走字
+    if (msg.status === 'ongoing' && msg.now) {
+      match.value.started_at = msg.now
+      match.value.now = msg.now
+      syncTimerAnchor()
+    }
   }
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
     match.value.support_a = msg.support_a
@@ -371,16 +381,18 @@ watch(lastMessage, (msg) => {
   }
 })
 
+// 锁屏/后台返回时补一次刷新：冻结期间定时器与 WebSocket 都可能失效，
+// 回来时主动拉取，保证比分、状态与耗时都是最新的
+useResumeRefresh(() => fetchMatch())
+
 onMounted(async () => {
   await Promise.all([auth.fetchMe(), fetchMatch()])
-  if (match.value?.status === 'finished') {
-    stopTimer(true)
-  } else if (localStorage.getItem(storageKey.value)) {
-    startTimerIfNeeded()
-  }
 })
 
-onUnmounted(() => stopTimer(false))
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  clearInterval(calibrateTimer)
+})
 </script>
 
 <style scoped>
