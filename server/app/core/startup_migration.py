@@ -121,6 +121,21 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
                 await conn.execute(
                     text(f"ALTER TABLE matches ADD COLUMN {column} TIMESTAMP")
                 )
+        # 左右场地交换（裁判操作、所有人共享）
+        if not await _column_exists(conn, "matches", "is_swapped"):
+            logger.info("migration: adding matches.is_swapped column")
+            await conn.execute(
+                text(
+                    "ALTER TABLE matches "
+                    "ADD COLUMN is_swapped BOOLEAN NOT NULL DEFAULT false"
+                )
+            )
+        # 裁判卸任时间：referee_id 保留为执裁历史，是否在任由本列判断
+        if not await _column_exists(conn, "matches", "referee_released_at"):
+            logger.info("migration: adding matches.referee_released_at column")
+            await conn.execute(
+                text("ALTER TABLE matches ADD COLUMN referee_released_at TIMESTAMP")
+            )
 
     # 移除已废弃的报名费列
     if await _column_exists(conn, "tournaments", "entry_fee"):

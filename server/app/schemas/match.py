@@ -30,7 +30,11 @@ class MatchOut(BaseModel):
     score_a: int | None = None
     score_b: int | None = None
     winner_pairing_id: int | None = None
+    # referee 是「谁执裁过」的历史记录，卸任后仍保留；
+    # active_referee 才是当前在任裁判（为空表示该场暂无裁判可记分）
     referee: PlayerInfo | None = None
+    active_referee: PlayerInfo | None = None
+    referee_released_at: datetime | None = None
     status: str
     can_referee: bool = False
     support_a: int = 0
@@ -46,6 +50,8 @@ class MatchOut(BaseModel):
     # 服务端当前时间：前端用 (now - started_at) 作为「已进行秒数」的基准，
     # 从而不依赖任何一台设备的本机时钟与所在时区
     now: datetime | None = None
+    # 所属赛事状态：已结束（finished）时前端把整页置为只读
+    tournament_status: str | None = None
 
     class Config:
         from_attributes = True

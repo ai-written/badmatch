@@ -10,6 +10,11 @@
     </div>
 
     <template v-else>
+      <!-- 赛事已提前结束：所有比赛只读 -->
+      <div v-if="tournamentEnded" class="readonly-banner">
+        <van-icon name="lock" />
+        <span>赛事已结束，赛程与比分已锁定</span>
+      </div>
       <!-- 默认折叠较早的已完成比赛，只留最近 1 场；点击展开查看全部 -->
       <div v-if="hasHiddenFinished" class="hidden-toggle" @click="showAllFinished = !showAllFinished">
         <van-icon :name="showAllFinished ? 'arrow-up' : 'arrow-down'" />
@@ -85,7 +90,7 @@
             <div class="match-info">
               <span class="match-num">第{{ m.globalIdx }}场</span>
               <span v-if="m.status === 'finished' && m.duration_seconds != null" class="match-dur">{{ fmtDuration(m.duration_seconds) }}</span>
-              <span v-if="m.referee" class="foot-ref has">裁 {{ m.referee.username }}</span>
+              <span v-if="m.referee" class="foot-ref has">裁 {{ m.referee.username }}<template v-if="!m.active_referee">（已卸任）</template></span>
               <van-button v-if="m.can_referee" size="mini" type="primary" round @click.stop="claimReferee(m)">裁判</van-button>
             </div>
           </div>
@@ -168,6 +173,10 @@ const hiddenIds = computed(() => hiddenFinishedIds(rounds.value, showAllFinished
 const hiddenFinishedCount = computed(() => hiddenIds.value.size)
 const hasHiddenFinished = computed(() => hiddenFinishedCount.value > 0 || showAllFinished.value)
 const visibleRounds = computed(() => buildVisibleRounds(rounds.value, hiddenIds.value))
+// 赛事已提前结束时，未打完的比赛也不允许再认领裁判 / 记分
+const tournamentEnded = computed(() =>
+  rounds.value.some((r: any) => (r.matches || []).some((m: any) => m.tournament_status === 'finished'))
+)
 
 // --- 进入页面时自动定位到当前该关注的比赛 ---
 // 优先「进行中」的第一场；没有进行中的则取「待打」的第一场；
@@ -231,6 +240,14 @@ onMounted(() => fetchRounds())
 .pull-inner { padding-bottom: 60px; }
 .empty-block { padding-top: 80px; }
 .round-section { margin: 0 12px; }
+
+/* 赛事已结束的只读提示 */
+.readonly-banner {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  margin: 0 12px 12px; padding: 10px 12px;
+  font-size: 13px; color: #8a6d3b;
+  background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
+}
 
 /* 折叠提示条：不明显抢戏，但可点击区域要够大（移动端） */
 .hidden-toggle {

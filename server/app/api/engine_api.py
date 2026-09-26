@@ -235,7 +235,9 @@ async def withdraw_player(
     for r in unstarted_rounds.scalars().all():
         ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id != None))
         for m in ms.scalars().all():
-            affected_referees.add(m.referee_id)
+            # 只通知在任裁判：已卸任者（referee_id 保留作历史）不需要重新认领
+            if m.has_active_referee:
+                affected_referees.add(m.referee_id)
         # delete match supports first
         match_ids = await db.execute(select(Match.id).where(Match.round_id == r.id))
         for (mid,) in match_ids.all():

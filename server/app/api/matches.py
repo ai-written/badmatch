@@ -13,9 +13,28 @@ from app.models.round import (
     MatchSupport,
     Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification,
 )
-from app.schemas.match import MatchOut, RoundOut, PlayerInfo, RoundPairingOut, ScoreUpdate, SupportUpdate, SupportResponse
+from app.schemas.match import (
+    MatchOut, RoundOut, PlayerInfo, RoundPairingOut, ScoreUpdate, SupportUpdate,
+    SupportResponse, SwapUpdate,
+)
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["matches"])
+
+
+async def load_writable_tournament(db: AsyncSession, tournament_id: int) -> Tournament:
+    """载入赛事并确保它处于进行中。
+
+    赛事被提前结束（end-tournament）时，往往还会有没打完的比赛。
+    这些比赛必须变成只读：否则仍能认领裁判、记分、交换场地，
+    在已结束的赛事上继续改动数据。所有会改数据的比赛级接口都应先过这里。
+    """
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    if not tournament:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    if tournament.status != TournamentStatus.ONGOING:
+        raise HTTPException(status_code=400, detail="赛事已结束，无法再修改比赛")
+    return tournament
 
 
 @router.get("/rounds", response_model=list[RoundOut])
@@ -29,6 +48,11 @@ async def list_rounds(
     )
     rounds = result.scalars().all()
 
+    # 读取赛事状态：已结束时前端据此把整页置为只读（这里不抛错，只用于展示）
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    t_status = tournament.status.value if tournament else None
+
     bye_map = await _get_bye_players(rounds, db)
     out = []
     for r in rounds:
@@ -39,7 +63,7 @@ async def list_rounds(
             select(Match).where(Match.round_id == r.id).order_by(Match.id)
         )
         matches = matches_result.scalars().all()
-        match_outs = await _build_matches_out(matches, db, user)
+        match_outs = await _build_matches_out(matches, db, user, t_status)
         for mo in match_outs:
             mo.round_number = r.round_number
         bye_player = bye_map.get(r.id)
@@ -67,7 +91,10 @@ async def get_match(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    return await _build_match_out(m, db, user)
+    # 带上赛事状态，前端据此决定是否只读
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    return await _build_match_out(m, db, user, tournament.status.value if tournament else None)
 
 
 @router.put("/matches/{match_id}/score")
@@ -85,7 +112,10 @@ async def update_score(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    if m.referee_id != user.id:
+    # 赛事已结束则该场只读，不允许再记分
+    await load_writable_tournament(db, tournament_id)
+    # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
+    if m.referee_id != user.id or not m.has_active_referee:
         raise HTTPException(status_code=403, detail="只有本场裁判可以记分")
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
@@ -133,6 +163,52 @@ async def update_score(
     return {"ok": True}
 
 
+@router.post("/matches/{match_id}/swap-sides")
+async def swap_sides(
+    tournament_id: int,
+    match_id: int,
+    request: Request,
+    body: SwapUpdate = SwapUpdate(),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """交换左右场地：仅本场裁判可操作，落库后广播给所有人，保证各端显示一致。
+
+    此前这是纯前端行为，每个观众各自的视角只在自己浏览器里生效；
+    改为服务端状态后，裁判交换一次，所有正在看这场的人一起切换。
+    """
+    result = await db.execute(
+        select(Match)
+        .where(Match.id == match_id, Match.tournament_id == tournament_id)
+        .with_for_update()
+    )
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="比赛不存在")
+    # 赛事已结束则该场只读，不允许再交换场地
+    await load_writable_tournament(db, tournament_id)
+    # 同上：已卸任的裁判不能再交换场地
+    if m.referee_id != user.id or not m.has_active_referee:
+        raise HTTPException(status_code=403, detail="只有本场裁判可以交换场地")
+    if m.status == MatchStatus.FINISHED:
+        raise HTTPException(status_code=400, detail="比赛已结束")
+
+    m.is_swapped = (not m.is_swapped) if body.swapped is None else body.swapped
+    await db.flush()
+    await manager.broadcast(tournament_id, {
+        "type": "match_updated",
+        "match_id": match_id,
+        "is_swapped": m.is_swapped,
+    })
+    await audit(
+        user=user, action="match_swap_sides",
+        target_type="match", target_id=m.id,
+        detail={"is_swapped": m.is_swapped},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, "is_swapped": m.is_swapped}
+
+
 @router.post("/rounds/{round_id}/start-round")
 async def start_round(
     tournament_id: int,
@@ -142,14 +218,9 @@ async def start_round(
     db: AsyncSession = Depends(get_db),
 ):
     """Start a round. Call after all matches are scheduled."""
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
-    tournament = t.scalar_one_or_none()
-    if not tournament:
-        raise HTTPException(status_code=404, detail="赛事不存在")
+    tournament = await load_writable_tournament(db, tournament_id)
     if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="只有赛事创建者可以开始轮次")
-    if tournament.status != TournamentStatus.ONGOING:
-        raise HTTPException(status_code=400, detail="赛事未在进行中")
     r = await db.execute(select(Round).where(Round.id == round_id, Round.tournament_id == tournament_id))
     round_obj = r.scalar_one_or_none()
     if not round_obj:
@@ -180,6 +251,8 @@ async def support_match(
     match = m.scalar_one_or_none()
     if not match:
         raise HTTPException(status_code=404, detail="比赛不存在")
+    # 赛事已结束则整场只读，连应援投票也一并停止
+    await load_writable_tournament(db, tournament_id)
     if match.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
 
@@ -191,7 +264,8 @@ async def support_match(
     player_ids = {pairing_a.player_a_id, pairing_a.player_b_id, pairing_b.player_a_id, pairing_b.player_b_id}
     if user.id in player_ids:
         raise HTTPException(status_code=400, detail="参赛选手不能投票")
-    if match.referee_id == user.id:
+    # 只有「在任」裁判不能投票；已卸任者可以正常应援
+    if match.referee_id == user.id and match.has_active_referee:
         raise HTTPException(status_code=400, detail="裁判不能投票")
 
     if body.side not in ("a", "b"):
@@ -267,12 +341,22 @@ async def _count_supports(match_id: int, db: AsyncSession):
     return (a.scalar() or 0, b.scalar() or 0)
 
 
-async def _build_match_out(m: Match, db: AsyncSession, user: User | None = None) -> MatchOut:
-    return (await _build_matches_out([m], db, user))[0]
+async def _build_match_out(m: Match, db: AsyncSession, user: User | None = None,
+                           tournament_status: str | None = None) -> MatchOut:
+    return (await _build_matches_out([m], db, user, tournament_status))[0]
 
 
-async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User | None = None) -> list[MatchOut]:
-    """批量组装比赛信息，避免 rounds 接口逐场 N+1 查询。"""
+async def _build_matches_out(
+    matches: list[Match],
+    db: AsyncSession,
+    user: User | None = None,
+    tournament_status: str | None = None,
+) -> list[MatchOut]:
+    """批量组装比赛信息，避免 rounds 接口逐场 N+1 查询。
+
+    tournament_status 会随每场比赛一起返回，前端据此把已结束赛事的对阵表
+    和计分页整体置为只读。
+    """
     if not matches:
         return []
 
@@ -384,6 +468,7 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
                     start_time = slot.start_time
                     end_time = slot.end_time
 
+        # 执裁历史：referee_id 一旦写入即保留，卸任后仍展示「谁执裁过」
         referee = None
         if m.referee_id:
             ref_user = users_map.get(m.referee_id)
@@ -394,6 +479,9 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
                     avatar=ref_user.avatar or "",
                     gender=ref_user.gender,
                 )
+        # 当前在任裁判：卸任后为空，此时该场暂无裁判可记分
+        active_referee = referee if m.has_active_referee else None
+
         can_referee = False
         if user and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING) and m.referee_id is None:
             match_player_ids = {
@@ -421,6 +509,8 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
             score_b=m.score_b,
             winner_pairing_id=m.winner_pairing_id,
             referee=referee,
+            active_referee=active_referee,
+            referee_released_at=m.referee_released_at,
             status=m.status.value,
             can_referee=can_referee,
             support_a=support_a,
@@ -428,10 +518,12 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
             my_support=my_supports.get(m.id),
             support_a_users=support_a_users,
             support_b_users=support_b_users,
+            is_swapped=m.is_swapped,
             duration_seconds=_match_duration(m),
             started_at=m.started_at,
             ended_at=m.ended_at,
             now=now,
+            tournament_status=tournament_status,
         ))
     return out
 

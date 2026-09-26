@@ -8,6 +8,10 @@
 
     <van-loading v-if="!match" class="loading" />
     <template v-else>
+      <div v-if="readOnly" class="readonly-banner">
+        <van-icon name="lock" />
+        <span>赛事已结束，本场为只读状态，不能再记分或改动数据</span>
+      </div>
       <div class="scoreboard">
         <div class="sb-team" :class="{ win: leftWin }" @click="swapTeams">
           <div class="sb-player">
@@ -33,8 +37,9 @@
           </div>
           <div class="sb-info">
             <span v-if="match.court_name">{{ match.court_name }}</span>
-            <span v-if="match.referee">裁判 {{ match.referee.username }}</span>
+            <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
+          <div class="swap-hint">{{ readOnly || match.status === 'finished' ? '比赛已结束' : (isReferee ? '点击交换场地' : '仅裁判可交换场地') }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -68,10 +73,10 @@
           <span class="support-label" :class="{ active: match.my_support === (swapped ? 'b' : 'a') }" @click="doSupport('a')">🔥 {{ swapped ? (match.support_b || 0) : (match.support_a || 0) }} 票</span>
           <span class="support-label" :class="{ active: match.my_support === (swapped ? 'a' : 'b') }" @click="doSupport('b')">🔥 {{ swapped ? (match.support_a || 0) : (match.support_b || 0) }} 票</span>
         </div>
-        <div class="support-hint" v-if="canSupport && match.status !== 'finished'">点击支持你喜欢的队伍</div>
+        <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
-      <div v-if="isReferee" class="controls">
+      <div v-if="isReferee && !readOnly" class="controls">
         <div class="wheel-board">
           <div class="wheel-side">
             <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('a'))">+</button>
@@ -112,6 +117,10 @@
         <van-button type="danger" block round size="large" style="margin-top:20px" @click="endMatch" :disabled="match.status === 'finished'">结束比赛</van-button>
       </div>
 
+      <div v-else-if="readOnly" class="no-role">
+        <p>赛事已结束，本场已锁定</p>
+      </div>
+
       <div v-else-if="match.can_referee" class="no-role">
         <van-button type="primary" block round size="large" @click="claimReferee">申请成为裁判</van-button>
       </div>
@@ -139,7 +148,9 @@ const { goBack } = useGoBack()
 const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
-const swapped = ref(false)
+// 左右场地交换改为服务端状态（仅裁判可操作），所有人实时同步。
+// 这里不再保留本地 ref，避免出现「双数据源」导致各端不一致。
+const swapped = computed(() => !!match.value?.is_swapped)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 // --- 比赛持续时长（服务端为准，所有人一致） ---
@@ -185,7 +196,10 @@ const calibrateTimer = setInterval(() => {
 }, 30000)
 // --- 时长逻辑结束 ---
 
-const isReferee = computed(() => match.value?.referee?.id === auth.user?.id)
+// 只有在任裁判才有记分/交换场地权限；referee 可能只是历史记录（已卸任）
+const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
+// 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
+const readOnly = computed(() => match.value?.tournament_status === 'finished')
 
 function pp(path: string) {
   const parts = path.split('.')
@@ -237,7 +251,12 @@ const rightWin = computed(() => {
   return swapped.value ? w === match.value?.pairing_a?.id : w === match.value?.pairing_b?.id
 })
 
-function swapTeams() { swapped.value = !swapped.value }
+function swapTeams() {
+  // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
+  if (!isReferee.value || readOnly.value || match.value?.status === 'finished') return
+  api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`, {}, { skipLoading: true } as any)
+    .catch(() => {})
+}
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
@@ -356,6 +375,8 @@ watch(lastMessage, (msg) => {
       if (msg.score_b != null) match.value.score_b = msg.score_b
     }
     if (msg.status) match.value.status = msg.status
+    // 裁判交换场地后，所有正在看这场的人一起切换
+    if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
     // 「比赛开始」这一刻服务端会带 now 过来，用它校准计时基准，
     // 不必等下一次拉取，计时器即可立刻从 00:00 开始走字
     if (msg.status === 'ongoing' && msg.now) {
@@ -387,6 +408,12 @@ onUnmounted(() => {
 
 <style scoped>
 .score-root { min-height: 100vh; background: #f0f2f5; padding-bottom: 40px; }
+.readonly-banner {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  margin: 10px 12px 0; padding: 10px 12px;
+  font-size: 13px; color: #8a6d3b;
+  background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
+}
 .loading { display: flex; justify-content: center; margin-top: 120px; }
 .elapsed { font-size: 12px; color: #666; margin-right: 4px; font-variant-numeric: tabular-nums; }
 
