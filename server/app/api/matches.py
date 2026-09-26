@@ -32,8 +32,11 @@ async def list_rounds(
     bye_map = await _get_bye_players(rounds, db)
     out = []
     for r in rounds:
+        # 必须显式按 id 排序：PostgreSQL 无 ORDER BY 时按堆内物理顺序返回，
+        # 而 UPDATE（如认领裁判、记分）会把行写成新版本并挪到堆尾，
+        # 导致同一场比赛在刷新后位置漂移、整张对阵表顺序跳动。
         matches_result = await db.execute(
-            select(Match).where(Match.round_id == r.id)
+            select(Match).where(Match.round_id == r.id).order_by(Match.id)
         )
         matches = matches_result.scalars().all()
         match_outs = await _build_matches_out(matches, db, user)
