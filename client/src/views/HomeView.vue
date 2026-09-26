@@ -13,9 +13,17 @@
     <div class="home-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-      <van-list v-model:loading="store.loading" :finished="finished" @load="onLoad">
+      <van-list
+        v-model:loading="loading"
+        :finished="finished"
+        :error="loadError"
+        error-text="加载失败，点击重试"
+        finished-text="没有更多了"
+        @update:error="loadError = false"
+        @load="onLoad"
+      >
         <div
-          v-for="t in store.list"
+          v-for="t in list"
           :key="t.id"
           class="t-card"
           @click="$router.push(`/tournament/${t.id}`)"
@@ -36,6 +44,11 @@
             <div class="t-card-count">{{ t.registered_count }}/{{ t.max_participants }}</div>
           </div>
         </div>
+        <!-- 首屏就失败时给一个明确的失败态：不要把空列表说成「没有更多了」 -->
+        <div v-if="list.length === 0 && firstLoadFailed" class="home-error">
+          <van-icon name="warning-o" size="20" />
+          <span>加载失败，请下拉重试</span>
+        </div>
       </van-list>
     </div>
     </van-pull-refresh>
@@ -48,8 +61,15 @@ import { ref } from 'vue'
 import { useTournamentStore } from '@/stores/tournament'
 
 const store = useTournamentStore()
+// 解构成本地 ref 而不是继续用 store.xxx：解构 Pinia 的 state 会丢响应式，
+// 本地 ref 是同一份引用，赋值后依然能触发视图更新
+const list = ref(store.list)
+const loading = ref(store.loading)
 const refreshing = ref(false)
 const finished = ref(false)
+// van-list 的错误态：置位后停止自动加载，点错误文案可重试
+const loadError = ref(false)
+const firstLoadFailed = ref(false)
 
 function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
 function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.registration_open_at).getTime() > Date.now() }
@@ -66,16 +86,39 @@ function fmtDateTime(start: string, end: string) {
 }
 
 async function onLoad() {
-  finished.value = true
-  await store.fetchList(undefined, true)
+  // 首次进入：van-list 在挂载时会自动触发一次 @load，与下拉刷新的初始 check 可能重叠；
+  // 用 store.page 判断，避免同一次进入把第一页拉两遍
+  const reset = store.page === 0
+  try {
+    await store.fetchList(undefined, reset, !reset)
+    list.value = store.list
+    firstLoadFailed.value = false
+    // 拉完一页后按「是否还有更多」收尾；注意不能在上面的 fetch 之前就置 finished ——
+    // 那会让 van-list 的转圈条件（loading && !finished）永远不成立，首屏没有加载提示
+    finished.value = !store.hasMore
+  } catch {
+    if (reset) {
+      firstLoadFailed.value = true
+      finished.value = true   // 停止自动加载，改为展示失败态 / 下拉重试
+    } else {
+      loadError.value = true  // 追加失败：保留已加载内容，点错误文案可重试
+    }
+  }
 }
 
 async function onRefresh() {
   try {
-    await store.fetchList(undefined, true)
-  } finally {
-    refreshing.value = false
+    store.reset()
+    await store.fetchList(undefined, true, true)
+    list.value = store.list
+    finished.value = !store.hasMore
+    firstLoadFailed.value = false
+  } catch {
+    firstLoadFailed.value = true
     finished.value = true
+  } finally {
+    loadError.value = false
+    refreshing.value = false
   }
 }
 
@@ -107,4 +150,8 @@ async function onRefresh() {
 .t-card-court { font-size: 11px; color: #1989fa; background: #e8f4ff; padding: 0 4px; border-radius: 3px; margin-left: 6px; }
 .t-card-right { text-align: center; flex-shrink: 0; margin-left: 10px; }
 .t-card-count { font-size: 13px; color: #666; margin-top: 4px; }
+.home-error {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 60px 0; color: #969799; font-size: 13px;
+}
 </style>

@@ -13,24 +13,37 @@ from app.core.websocket import manager
 from app.core.mailer import send_tournament_invite
 from app.core.config import get_settings
 from app.schemas.tournament import (
-    TournamentCreate, TournamentBrief, TournamentDetail, RegistrationOut, CourtOut, TimeSlotOut,
+    TournamentCreate, TournamentBrief, TournamentListOut, TournamentDetail,
+    RegistrationOut, CourtOut, TimeSlotOut,
 )
 
 router = APIRouter(prefix="/api/tournaments", tags=["tournaments"])
 
 
-@router.get("", response_model=list[TournamentBrief])
+@router.get("", response_model=TournamentListOut)
 async def list_tournaments(
     status: str | None = None,
+    skip: int = 0,
+    limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(Tournament).order_by(Tournament.created_at.desc())
+    skip = max(0, skip)
+    limit = max(1, min(limit, 100))
+    query = select(Tournament)
     if status:
         query = query.where(Tournament.status == status)
-    result = await db.execute(query)
+    total = (await db.execute(
+        select(func.count()).select_from(query.subquery())
+    )).scalar() or 0
+    # id 兜底排序：上下场是同一事务创建、created_at 完全相同，
+    # 只按 created_at 排序时并列行的顺序会随物理位置漂移（与 matches 同一个坑）
+    result = await db.execute(
+        query.order_by(Tournament.created_at.desc(), Tournament.id.desc())
+        .offset(skip).limit(limit)
+    )
     tournaments = result.scalars().all()
     if not tournaments:
-        return []
+        return TournamentListOut(items=[], total=total, has_more=False)
 
     tournament_ids = [t.id for t in tournaments]
     # 批量报名数（1 次查询替代 N 次）
@@ -72,7 +85,11 @@ async def list_tournaments(
             court_name=first_court.name if first_court else None,
             created_at=t.created_at.isoformat() if t.created_at else "",
         ))
-    return out
+    return TournamentListOut(
+        items=out,
+        total=total,
+        has_more=skip + len(tournaments) < total,
+    )
 
 
 @router.post("", response_model=TournamentDetail)
