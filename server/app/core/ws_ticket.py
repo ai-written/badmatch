@@ -25,9 +25,14 @@ TICKET_TTL_SECONDS = 60
 # 单用户同时最多持有的有效票据数：客户端重连会持续申请，
 # 只保留最近的几个，避免长期不清理导致内存无界
 MAX_TICKETS_PER_USER = 5
+# 全局硬上限：超过后拒绝签发（宁可让客户端稍后重试，也不让内存无界增长）
+MAX_TICKETS_TOTAL = 10_000
+# 每 N 次操作才做一次全表清理（摊还 O(1)），避免每次签发都 O(N) 扫描
+_PRUNE_EVERY = 500
 
 # ticket -> {"user_id": int, "expires_at": float}
 _tickets: dict[str, dict] = {}
+_op_count = 0
 
 
 def _prune(now: float) -> None:
@@ -36,10 +41,25 @@ def _prune(now: float) -> None:
         _tickets.pop(t, None)
 
 
+def _maybe_prune(now: float) -> None:
+    """每 _PRUNE_EVERY 次操作清理一次过期票据，把 O(N) 扫描摊薄。"""
+    global _op_count
+    _op_count += 1
+    if _op_count >= _PRUNE_EVERY:
+        _op_count = 0
+        _prune(now)
+
+
 def issue_ticket(user_id: int, ttl: int = TICKET_TTL_SECONDS) -> str:
     """为用户签发一张一次性票据。"""
     now = time.time()
-    _prune(now)
+    _maybe_prune(now)
+
+    if len(_tickets) >= MAX_TICKETS_TOTAL:
+        # 到上限先做一次全量清理，仍然满就拒绝（不无限增长）
+        _prune(now)
+        if len(_tickets) >= MAX_TICKETS_TOTAL:
+            raise RuntimeError("WebSocket 票据池已满，请稍后重试")
 
     # 同一用户的旧票据不主动删（可能有一张正在握手中），但限制数量上限
     mine = [t for t, v in _tickets.items() if v["user_id"] == user_id]
@@ -57,14 +77,24 @@ def consume_ticket(ticket: str | None) -> int | None:
 
     无论校验结果如何都会删除该票据：失败时删除是为了避免有人拿一个
     过期票据反复试探；成功时删除是为了保证一次性。
+
+    注意：这里不做用户存活/凭证有效性校验（那需要查库）。票据只是
+    「签发那一刻的身份断言」，调用方（WebSocket 握手）需要自己再确认
+    该用户仍然存在，否则「签发后 60 秒内账号被删」仍能用票据建连。
     """
     if not ticket:
         return None
     now = time.time()
-    _prune(now)
+    _maybe_prune(now)
     entry = _tickets.pop(ticket, None)
     if entry is None:
         return None
     if entry["expires_at"] <= now:
         return None
     return entry["user_id"]
+
+
+def revoke_user(user_id: int) -> None:
+    """作废某用户的全部未用票据（登出/改密/删号时调用）。"""
+    for t in [t for t, v in _tickets.items() if v["user_id"] == user_id]:
+        _tickets.pop(t, None)

@@ -52,12 +52,25 @@ def resolve_client_ip(settings, headers: dict, peer_ip: str) -> str:
 
     抽出来是为了让访问日志（ASGI 中间件，拿不到 Request 对象）
     与各接口共用同一套判定，避免两处实现不一致而漏改一处。
+
+    顺序很关键：**X-Real-IP 优先于 CF-Connecting-IP**。
+    nginx 用 $remote_addr 覆盖式写入 X-Real-IP，是可信度最高的；
+    若让 CF 头优先，那么在「开启了 CF 开关、但源站仍可被直连」的部署里，
+    攻击者绕过 CF 直达源站、自带 CF-Connecting-IP 就能把 nginx 的覆盖覆盖掉，
+    重新获得伪造来源 IP 的能力（按 IP 的限流与审计 IP 又会失效）。
     """
+    # 先看代理覆盖式写入的 X-Real-IP
+    if settings.TRUST_PROXY_HEADERS:
+        real = (headers.get("x-real-ip") or "").strip()
+        if real and not any(ch in real for ch in ", \t"):
+            return real
+
     if settings.TRUST_CF_CONNECTING_IP:
         cf = (headers.get("cf-connecting-ip") or "").strip()
         if cf and not any(ch in cf for ch in ", \t"):
             return cf
 
+    # 其次才轮到 X-Forwarded-For（追加式写入，取最后一跳）
     if settings.TRUST_PROXY_HEADERS:
         return forwarded_client_ip(headers, peer_ip)
 

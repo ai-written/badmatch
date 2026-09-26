@@ -30,6 +30,9 @@ invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WIN
 init_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 # 头像上传限流（按 IP，宽松一些：正常用户改头像不会太频繁）
 avatar_limiter = RateLimiter(20, 600)
+# WebSocket 连接票据限流（按用户，宽松）：前端每次切页/重连都会申请，
+# 正常用量很低（一次连接一张），60 次/分钟足够，仅用于挡住高频滥用
+ws_ticket_limiter = RateLimiter(60, 60)
 # 用户不存在时也要跑一次 bcrypt，才能让「查无此人」与「密码错误」的耗时接近，
 # 否则响应时间差可被用来枚举用户名。模块加载时算一次，避免每次请求都算。
 _DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-constant-time-compare")
@@ -146,9 +149,10 @@ async def login(
         )
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     login_limiter.reset(req.username)
-    # 同时清掉该 IP 的失败计数：同一出口（办公网 NAT、手机蜂窝）下的其他同事
-    # 不该被别人的失败尝试连带封锁；有人成功登录就说明这个出口是正常的
-    login_ip_limiter.reset(ip)
+    # 刻意**不**清零该 IP 的失败计数：登录成功者的身份是攻击者可以自己持有的
+    # （注册任意一个账号即可），若成功一次就清零，攻击者用自有账号登录一次
+    # 就能把 IP 计数刷回 0，按 IP 的兜底限流形同虚设。
+    # 同出口（办公网 NAT）被他人失败尝试牵连的代价，由窗口时间（10 分钟）自然消化。
     await audit(
         user=user, action="login_success",
         detail={"username": user.username},
@@ -175,7 +179,16 @@ async def issue_ws_ticket(
     （用户每次切页面/重连都会申请）。
     """
     from app.core.ws_ticket import issue_ticket, TICKET_TTL_SECONDS
-    return {"ticket": issue_ticket(user.id), "expires_in": TICKET_TTL_SECONDS}
+    # 宽松限流：前端每次切页/重连都会申请，正常用量很低；
+    # 加限流是为了挡住高频调用（票据池的清理是摊还 O(1)，但仍不该无限调用）
+    if not ws_ticket_limiter.check(str(user.id)):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+    ws_ticket_limiter.record_failure(str(user.id))
+    try:
+        ticket = issue_ticket(user.id)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="连接票据繁忙，请稍后重试")
+    return {"ticket": ticket, "expires_in": TICKET_TTL_SECONDS}
 
 
 @router.post("/logout")
@@ -188,7 +201,10 @@ async def logout(
     user.token_version += 1
     await db.flush()
     from app.core.websocket import manager
+    from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
+    # 一并作废未使用的连接票据，否则登出后 60 秒内仍可用旧票据建连
+    revoke_user(user.id)
     await audit(
         user=user, action="logout",
         detail={"username": user.username},
@@ -294,7 +310,9 @@ async def change_password(
     login_limiter.reset(user.username)
     await db.flush()
     from app.core.websocket import manager
+    from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
+    revoke_user(user.id)
     await audit(user=user, action="change_password", detail={"username": user.username})
     return {"ok": True}
 
@@ -745,6 +763,13 @@ async def delete_user(
     _remove_avatar_file(user.avatar)
     await db.delete(user)
     await db.flush()
+    # 断开该用户已建立的 WebSocket 并作废其未用票据。
+    # 原先删用户没有这一步（logout/改密/重置密码都有），被删用户在别的标签页里
+    # 仍会继续收到推送，直到连接自然断开。
+    from app.core.websocket import manager
+    from app.core.ws_ticket import revoke_user
+    await manager.kick_user(user.id)
+    revoke_user(user.id)
     await audit(
         user=admin, action="admin_delete_user",
         target_type="user", target_id=user.id,
@@ -774,7 +799,9 @@ async def admin_reset_password(
     login_limiter.reset(user.username)
     await db.flush()
     from app.core.websocket import manager
+    from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
+    revoke_user(user.id)
     await audit(
         user=admin, action="admin_reset_password",
         target_type="user", target_id=user.id,

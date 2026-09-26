@@ -96,6 +96,15 @@ async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
     """
     user_id = consume_ticket(websocket.query_params.get("ticket"))
 
+    if user_id is not None:
+        # 票据只断言「签发那一刻的身份」，这里补一次存活校验：
+        # 否则签发后 60 秒内账号被删（或票据被 revoke 遗漏）仍能建连。
+        # 一次轻量 SELECT，只在握手时执行一次。
+        async with async_session_factory() as session:
+            alive = await session.execute(select(User.id).where(User.id == user_id))
+            if alive.scalar_one_or_none() is None:
+                user_id = None
+
     if user_id is None:
         # ---- 兼容分支：旧的 ?token= 方式（过渡期保留）----
         token = websocket.query_params.get("token")
