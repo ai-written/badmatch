@@ -28,6 +28,8 @@ login_ip_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WIN
 invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 # 初始管理员注册码防爆破（按 IP 限流）
 init_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
+# 头像上传限流（按 IP，宽松一些：正常用户改头像不会太频繁）
+avatar_limiter = RateLimiter(20, 600)
 
 
 @router.post("/register", response_model=TokenResponse)
@@ -277,18 +279,27 @@ async def upload_avatar(
 ):
     if user is None:
         raise HTTPException(status_code=401)
+    ip = get_client_ip(request)
+    if not avatar_limiter.check(ip):
+        raise HTTPException(status_code=429, detail="上传过于频繁，请稍后再试")
     ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "jpg"
     if ext.lower() not in ("jpg", "jpeg", "png", "gif", "webp"):
+        avatar_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="不支持的文件格式")
     content = await file.read()
     if not content or len(content) > 2 * 1024 * 1024:
+        avatar_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="文件大小不能超过 2MB")
     if not _looks_like_image(content, ext.lower()):
+        avatar_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="文件内容与图片格式不匹配")
-    # 压缩处理：缩放至 100px、白底合成、统一 JPEG 输出（低带宽友好）
+    # 压缩处理：缩放至 100px、白底合成、统一 JPEG 输出（低带宽友好）。
+    # PIL 是同步 CPU 操作，必须丢到线程池执行：直接跑在事件循环里会阻塞
+    # 整个服务（多人同时上传时其他请求一起卡住，表现为主页/记分也超时）。
     try:
-        content = _process_avatar(content)
+        content = await asyncio.to_thread(_process_avatar, content)
     except Exception:
+        avatar_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="图片无法处理，请更换图片")
     filename = f"{uuid.uuid4().hex}.jpg"
     filepath = os.path.join(UPLOAD_DIR, filename)

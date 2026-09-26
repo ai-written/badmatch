@@ -108,7 +108,8 @@ import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
-import { showToast } from 'vant'
+import { showToast, showFailToast } from 'vant'
+import { compressAvatar } from '@/utils/avatar'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -150,10 +151,32 @@ function doRedirect() {
 
 function triggerUpload() { fileInput.value?.click() }
 
+const avatarUploading = ref(false)
+
 async function onFileChange(e: Event) {
-  const f = (e.target as HTMLInputElement).files?.[0]; if (!f) return
-  const fd = new FormData(); fd.append('file', f)
-  try { const res = await api.post('/auth/upload-avatar', fd, { headers: { 'Content-Type': 'multipart/form-data' } }); auth.user!.avatar = res.data.avatar; showToast('头像更新成功') } catch {}
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  // 先清空 value，否则连续选同一张图不会再触发 change
+  input.value = ''
+  if (!f || avatarUploading.value) return
+
+  avatarUploading.value = true
+  try {
+    // 先在浏览器端压缩（2MB 原图 -> 约 20KB），避免低带宽下上传超时
+    const blob = await compressAvatar(f)
+    const fd = new FormData()
+    fd.append('file', blob, 'avatar.jpg')
+    const res = await api.post('/auth/upload-avatar', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    auth.user!.avatar = res.data.avatar
+    showToast('头像更新成功')
+  } catch (err: any) {
+    // 压缩/校验阶段的错误直接提示；接口错误已由全局拦截器提示，避免弹两次
+    showFailToast(err?.message || '头像上传失败')
+  } finally {
+    avatarUploading.value = false
+  }
 }
 
 async function onLogin() {
