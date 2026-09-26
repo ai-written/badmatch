@@ -34,16 +34,16 @@
 
       <div class="action-block" v-if="tournament.status === 'open'">
         <div v-if="openLocked" class="reg-countdown">距报名开放还有 {{ countdownText }}</div>
-        <van-button type="primary" block round :disabled="tournament.is_registered || openLocked || regFull" @click="doRegister">
+        <van-button type="primary" block round :loading="submitting" :disabled="submitting || tournament.is_registered || openLocked || regFull" @click="doRegister">
           {{ tournament.is_registered ? '已报名' : (regFull ? '人数已满' : '立即报名') }}
         </van-button>
-        <van-button v-if="tournament.is_registered && tournament.status === 'open'" plain block round style="margin-top:8px" @click="doCancelRegister">
+        <van-button v-if="tournament.is_registered && tournament.status === 'open'" plain block round style="margin-top:8px" :loading="submitting" :disabled="submitting" @click="doCancelRegister">
           取消报名
         </van-button>
       </div>
 
       <div class="action-block" v-if="tournament.is_registered && tournament.status === 'ongoing'">
-        <van-button type="warning" plain block round @click="doWithdraw">
+        <van-button type="warning" plain block round :loading="submitting" :disabled="submitting" @click="doWithdraw">
           退出比赛
         </van-button>
       </div>
@@ -66,7 +66,7 @@
       </div>
 
       <div class="creator-block" v-if="isCreator && tournament.status === 'ongoing'">
-        <van-button type="danger" block round @click="doEndTournament">提前结束赛事</van-button>
+        <van-button type="danger" block round :loading="submitting" :disabled="submitting" @click="doEndTournament">提前结束赛事</van-button>
       </div>
 
       <div class="nav-block" v-if="tournament.status !== 'open'">
@@ -77,7 +77,7 @@
       </div>
 
       <div class="creator-block" v-if="isCreator && tournament.status === 'open'">
-        <van-button type="danger" block round @click="doStart" :disabled="tournament.registered_count < 4">
+        <van-button type="danger" block round :loading="submitting" :disabled="submitting || tournament.registered_count < 4" @click="doStart">
           开始比赛<template v-if="tournament.registered_count < 4">（还需 {{ 4 - tournament.registered_count }} 人）</template>
         </van-button>
       </div>
@@ -126,7 +126,7 @@
         <h3>选择新房主</h3>
         <div class="popup-grid">
           <div
-            v-for="r in registrations.filter(p => p.user_id !== auth.user?.id)"
+            v-for="r in otherActivePlayers"
             :key="r.id"
             class="transfer-player"
             :class="{ selected: selectedNewCreator === r.user_id }"
@@ -136,6 +136,7 @@
             <span>{{ r.username }}</span>
           </div>
         </div>
+        <van-empty v-if="!canTransfer" image-size="60" description="暂无其他报名者可接手" />
         <div style="padding: 12px 16px;">
           <van-button type="primary" block round :disabled="!selectedNewCreator" @click="doTransferAndWithdraw">确认转让并退出</van-button>
         </div>
@@ -163,12 +164,21 @@ const { lastMessage } = useWebSocket(tid)
 
 const refreshing = ref(false)
 const tournament = ref<any>(null)
+// 写操作进行中：防止连点导致重复提交与矛盾提示
+// （例如连点「立即报名」会先后弹出「报名成功」和「已报名」两条 toast）
+const submitting = ref(false)
 // 赛事不存在/加载失败：原先只有 loading 分支，404 会永远转圈
 const loadFailed = ref(false)
 const registrations = ref<any[]>([])
 const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
 const showTransferPicker = ref(false)
+// 除自己外没有其他报名者：房主此时无法「转让后退出」（弹窗里没有候选），
+// 需要走「直接退出 + 赛事自动结束」这条路（后端在剩余人数不足 4 人时会自动结束）
+const otherActivePlayers = computed(() =>
+  (registrations.value || []).filter(r => r.user_id !== auth.user?.id && r.is_active !== false)
+)
+const canTransfer = computed(() => otherActivePlayers.value.length > 0)
 const selectedNewCreator = ref(0)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const matchTotal = ref(0)
@@ -269,43 +279,75 @@ async function fetchRegistrations(skipLoading = false) {
   const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
   registrations.value = res.data
 }
+/** 写操作统一包一层：进行中忽略重复点击，结束后必定复位 */
+async function withSubmitting(fn: () => Promise<void>) {
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    await fn()
+  } catch {
+    // 错误提示交给 axios 拦截器
+  } finally {
+    submitting.value = false
+  }
+}
+
 async function doRegister() {
-  await api.post(`/tournaments/${route.params.id}/register`)
-  showToast('报名成功')
-  await Promise.all([fetchDetail(), fetchRegistrations()])
+  await withSubmitting(async () => {
+    await api.post(`/tournaments/${route.params.id}/register`)
+    showToast('报名成功')
+    await Promise.all([fetchDetail(), fetchRegistrations()])
+  })
 }
 async function doCancelRegister() {
-  await api.post(`/tournaments/${route.params.id}/cancel-register`)
-  showToast('已取消报名')
-  await Promise.all([fetchDetail(), fetchRegistrations()])
+  await withSubmitting(async () => {
+    await api.post(`/tournaments/${route.params.id}/cancel-register`)
+    showToast('已取消报名')
+    await Promise.all([fetchDetail(), fetchRegistrations()])
+  })
 }
 
 async function doWithdraw() {
-  const iAmCreator = auth.user?.id === tournament.value?.creator_id
-  if (iAmCreator) {
-    showTransferPicker.value = true
-    return
-  } else {
-    try { await showConfirmDialog({ title: '确认退出', message: '退出比赛后赛程将重新排列，确定退出？' }) } catch { return }
+  await withSubmitting(async () => {
+    const iAmCreator = auth.user?.id === tournament.value?.creator_id
+    if (iAmCreator && canTransfer.value) {
+      // 有可转让对象：先选新房主再退出
+      showTransferPicker.value = true
+      return
+    }
+    if (iAmCreator) {
+      // 自己是唯一报名者：没有新房主可选，只能直接退出。
+      // 退出后剩余人数不足 4 人，服务端会自动结束赛事。
+      try {
+        await showConfirmDialog({
+          title: '确认退出',
+          message: '你是唯一报名者，退出后赛事将自动结束，确定退出？',
+        })
+      } catch { return }
+    } else {
+      try { await showConfirmDialog({ title: '确认退出', message: '退出比赛后赛程将重新排列，确定退出？' }) } catch { return }
+    }
     await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
     showToast('已退出比赛')
     await Promise.all([fetchDetail(), fetchRegistrations()])
-  }
+  })
 }
 
 async function doTransferAndWithdraw() {
   if (!selectedNewCreator.value) return
-  try {
-    const target = registrations.value.find(r => r.user_id === selectedNewCreator.value)
-    await showConfirmDialog({
-      title: '转让房主并退出',
-      message: `退出后房主将转让给 ${target?.username || '所选用户'}，确定退出？`,
-    })
-  } catch { return }
-  await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
-  showToast('已退出比赛')
-  showTransferPicker.value = false
-  await Promise.all([fetchDetail(), fetchRegistrations()])
+  await withSubmitting(async () => {
+    try {
+      const target = registrations.value.find(r => r.user_id === selectedNewCreator.value)
+      await showConfirmDialog({
+        title: '转让房主并退出',
+        message: `退出后房主将转让给 ${target?.username || '所选用户'}，确定退出？`,
+      })
+    } catch { return }
+    await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
+    showToast('已退出比赛')
+    showTransferPicker.value = false
+    await Promise.all([fetchDetail(), fetchRegistrations()])
+  })
 }
 async function fetchMatchOptionsForStart() {
   const n = tournament.value?.registered_count || 0
@@ -323,35 +365,48 @@ function selectMatchStart(total: number) {
 }
 
 async function doStartWithTotal() {
-  await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
-  showToast('比赛已开始')
-  await fetchDetail()
+  await withSubmitting(async () => {
+    await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
+    showToast('比赛已开始')
+    await fetchDetail()
+  })
 }
 
 async function doStart() {
   const count = tournament.value?.registered_count || 0
   const max = tournament.value?.max_participants || 0
   if (count < max) {
+    // 人数未满：让创建者先选总场次（服务端只对显式传入的场次做校验）
     await fetchMatchOptionsForStart()
+    if (matchOptions.value.length === 0) {
+      showToast('暂无可选的场次，请确认人数')
+      return
+    }
     showMatchPicker.value = true
-  } else {
+    return
+  }
+  await withSubmitting(async () => {
     await api.post(`/tournaments/${route.params.id}/start`)
     showToast('比赛已开始')
     await fetchDetail()
-  }
+  })
 }
 async function doDelete() {
-  try { await showConfirmDialog({ title: '确认删除', message: '删除后不可恢复，确定要删除？' }) } catch { return }
-  await api.delete(`/tournaments/${route.params.id}`)
-  showToast('已删除')
-  router.replace('/')
+  await withSubmitting(async () => {
+    try { await showConfirmDialog({ title: '确认删除', message: '删除后不可恢复，确定要删除？' }) } catch { return }
+    await api.delete(`/tournaments/${route.params.id}`)
+    showToast('已删除')
+    router.replace('/')
+  })
 }
 
 async function doEndTournament() {
-  try { await showConfirmDialog({ title: '确认结束', message: '提前结束赛事？结束后无法恢复。' }) } catch { return }
-  await api.post(`/tournaments/${route.params.id}/end-tournament`)
-  showToast('赛事已结束')
-  await fetchDetail()
+  await withSubmitting(async () => {
+    try { await showConfirmDialog({ title: '确认结束', message: '提前结束赛事？结束后无法恢复。' }) } catch { return }
+    await api.post(`/tournaments/${route.params.id}/end-tournament`)
+    showToast('赛事已结束')
+    await fetchDetail()
+  })
 }
 
 async function onRefresh() {
