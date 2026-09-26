@@ -13,14 +13,25 @@ def generate_schedule(players, total_matches, partner_history=None):
     if partner_history is None:
         partner_history = defaultdict(int)
 
-    schedule, played, partner_count, cool_down = _greedy_build(
-        players, total_matches, target, dict(partner_history)
-    )
+    # 贪心构造是确定性的，个别组合会走进死路（实测 5 人 + 15 场：后期只剩
+    # 3 人「还差场次」，无法再凑一场），而 4*total_matches 能被 N 整除本身
+    # 并不保证贪心一定能排出来。这里用随机重排重试几次：只要存在可行解，
+    # 打乱同分候选的顺序通常就能绕开死路（生成只在开赛时跑一次，成本可忽略）。
+    attempts = 8
+    last_error: ValueError | None = None
+    for attempt in range(attempts):
+        rng = random.Random(attempt) if attempt else None
+        try:
+            schedule, played, partner_count, cool_down = _greedy_build(
+                players, total_matches, target, dict(partner_history), rng
+            )
+            return schedule
+        except ValueError as e:
+            last_error = e
+    raise last_error or ValueError("总场次无法为每名选手安排相同比赛场次")
 
-    return schedule
 
-
-def _greedy_build(players, total_matches, target, partner_history):
+def _greedy_build(players, total_matches, target, partner_history, rng=None):
     played = {p: 0 for p in players}
     partner_count = defaultdict(int, partner_history)
     cool_down = {p: 0 for p in players}
@@ -29,6 +40,9 @@ def _greedy_build(players, total_matches, target, partner_history):
     for _ in range(total_matches):
         eligible = [p for p in players if played[p] < target]
         eligible.sort(key=lambda p: -cool_down[p])
+        # 打乱同 cool_down 的并列顺序，让每次重启走不同的选择路径
+        if rng is not None:
+            rng.shuffle(eligible)
 
         best_score = float("-inf")
         best_group = None
@@ -41,13 +55,17 @@ def _greedy_build(players, total_matches, target, partner_history):
                 - played[a] - played[b] - played[c] - played[d]
                 + cool_down[a] + cool_down[b] + cool_down[c] + cool_down[d]
             )
-            if score > best_score:
+            # 同分时随机选一个（仅重试时），避免固定路径反复撞同一个死路
+            if score > best_score or (rng is not None and score == best_score and rng.random() < 0.5):
                 best_score = score
                 best_group = ((a, b), (c, d))
 
         if best_group is None:
-            if not eligible:
-                raise ValueError("总场次无法为每名选手安排相同比赛场次")
+            if len(eligible) < 4:
+                # 剩余「还差场次」的人不足 4 个 —— 走到死路，交由上层重试
+                raise ValueError(
+                    f"排程走入死路：第 {len(schedule) + 1} 场时只剩 {len(eligible)} 人可上场"
+                )
             a, b, c, d = eligible[:4]
             best_group = ((a, b), (c, d))
 

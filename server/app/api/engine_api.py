@@ -71,22 +71,26 @@ async def start_tournament(
         # 未设置，或存量值与当前人数不匹配：按当前人数取最小可行场次
         M = compute_match_count(len(player_ids))
 
-    # 排程本身还有一个「整除」保证不了的边界：贪婪选人在个别组合下会走到死路
-    # （实测 5 人 + 15 场必失败，而 5 人的 5/10/20/25 场都正常），
-    # 抛出的 ValueError 原先没有兜底 → 500、事务回滚、赛事卡在 open，
-    # 每次重试都 500，与之前修过的那个场景同一类。这里退到可行的最小场次，
-    # 保证赛事总能开起来，并把实际场次返回给前端提示。
+    # 排程理论上对「4M 能被 N 整除」的组合都可行（scheduler 内部已用随机重试
+    # 消除贪婪选人的死路），但仍保留一层兜底：万一某个组合排不出来，
+    # 退到可行的最小场次，保证赛事总能开起来，而不是 500 回滚后卡在 open。
+    # 顺序很重要：必须先试请求值，否则会把用户明确选择的场次无故改小。
     schedule = None
     adjusted_M = M
-    candidate = compute_match_count(len(player_ids))
-    limit = max(M, 30)
-    while candidate <= limit:
-        try:
-            schedule = generate_schedule(player_ids, candidate)
-            adjusted_M = candidate
-            break
-        except ValueError:
-            candidate += len(player_ids)   # 只试整除的组合，避免无谓重试
+    try:
+        schedule = generate_schedule(player_ids, M)
+    except ValueError:
+        candidate = compute_match_count(len(player_ids))
+        while candidate <= max(M, 30):
+            if candidate == M:
+                candidate += len(player_ids)
+                continue
+            try:
+                schedule = generate_schedule(player_ids, candidate)
+                adjusted_M = candidate
+                break
+            except ValueError:
+                candidate += len(player_ids)   # 只试整除的组合
     if schedule is None:
         raise HTTPException(
             status_code=400,
