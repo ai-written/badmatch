@@ -30,6 +30,9 @@ invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WIN
 init_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 # 头像上传限流（按 IP，宽松一些：正常用户改头像不会太频繁）
 avatar_limiter = RateLimiter(20, 600)
+# 用户不存在时也要跑一次 bcrypt，才能让「查无此人」与「密码错误」的耗时接近，
+# 否则响应时间差可被用来枚举用户名。模块加载时算一次，避免每次请求都算。
+_DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-constant-time-compare")
 
 
 @router.post("/register", response_model=TokenResponse)
@@ -39,20 +42,11 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ):
     _validate_password_length(req.password)
+    ip = get_client_ip(request)
 
-    exist = await db.execute(select(User).where(User.username == req.username))
-    if exist.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="用户名已存在")
-
-    email = req.email.strip()
-    if not email:
-        raise HTTPException(status_code=400, detail="邮箱不能为空")
-    if not _is_valid_email(email):
-        raise HTTPException(status_code=400, detail="邮箱格式不正确")
-    email_exist = await db.execute(select(User).where(User.email == email))
-    if email_exist.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="邮箱已被使用")
-
+    # 校验顺序很重要：先校验邀请码，再做用户名/邮箱的占用检查。
+    # 反过来（原先的顺序）会让未持有任何凭证的人靠错误文案枚举全站用户名与邮箱
+    # —— 提供已存在的用户名会得到「用户名已存在」，不存在的则得到「需要邀请码」。
     first_check = await db.execute(select(func.count(User.id)))
     is_first = first_check.scalar() == 0
     if is_first:
@@ -66,17 +60,18 @@ async def register(
     if not is_first:
         if not req.invite_code:
             raise HTTPException(status_code=400, detail="需要邀请码")
-        if not invite_limiter.check(req.invite_code):
+        # 限流 key 用来源 IP，不能用提交上来的邀请码本身：
+        # 那个值是攻击者可控的，换一个码就重新计数，等于没有限流。
+        if not invite_limiter.check(ip):
             raise HTTPException(status_code=429, detail="邀请码尝试次数过多，请稍后再试")
         inviter = await db.execute(select(User).where(User.invite_code == req.invite_code))
         inviter_user = inviter.scalar_one_or_none()
         if not inviter_user:
-            invite_limiter.record_failure(req.invite_code)
+            invite_limiter.record_failure(ip)
             raise HTTPException(status_code=400, detail="邀请码无效")
         invited_by_id = inviter_user.id
     else:
         # 首个用户将成为超级管理员，必须提供初始化注册码，防止被抢先注册
-        ip = get_client_ip(request)
         if not init_limiter.check(ip):
             raise HTTPException(status_code=429, detail="初始注册码尝试次数过多，请稍后再试")
         code = req.init_code.strip() if req.init_code else ""
@@ -84,6 +79,19 @@ async def register(
             init_limiter.record_failure(ip)
             raise HTTPException(status_code=400, detail="初始管理员注册码不正确")
         init_limiter.reset(ip)
+
+    # 走到这里说明邀请码已通过校验，此时才做占用性检查
+    email = (req.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="邮箱不能为空")
+    if not _is_valid_email(email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    exist = await db.execute(select(User).where(User.username == req.username))
+    if exist.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="用户名已存在")
+    email_exist = await db.execute(select(User).where(User.email == email))
+    if email_exist.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="邮箱已被使用")
 
     user = User(
         username=req.username,
@@ -106,7 +114,7 @@ async def register(
     await audit(
         user=user, action="register",
         detail={"is_first": is_first, "role": user.role, "username": user.username},
-        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+        ip=ip, user_agent=request.headers.get("user-agent"),
     )
     return TokenResponse(access_token=token, user=_profile(user))
 
@@ -124,6 +132,10 @@ async def login(
         raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
     result = await db.execute(select(User).where(User.username == req.username))
     user = result.scalar_one_or_none()
+    if not user:
+        # 用户不存在时也做一次 bcrypt 校验：否则「查不到用户」会立刻返回，
+        # 响应时间与「密码错误」明显不同，可用来枚举用户名。
+        verify_password(req.password, _DUMMY_PASSWORD_HASH)
     if not user or not verify_password(req.password, user.password_hash):
         login_limiter.record_failure(req.username)
         login_ip_limiter.record_failure(ip)
@@ -134,6 +146,9 @@ async def login(
         )
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     login_limiter.reset(req.username)
+    # 同时清掉该 IP 的失败计数：同一出口（办公网 NAT、手机蜂窝）下的其他同事
+    # 不该被别人的失败尝试连带封锁；有人成功登录就说明这个出口是正常的
+    login_ip_limiter.reset(ip)
     await audit(
         user=user, action="login_success",
         detail={"username": user.username},
@@ -354,7 +369,16 @@ async def generate_invite(
         raise HTTPException(status_code=401)
     if user.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="只有管理员可以生成邀请码")
-    code = uuid.uuid4().hex[:8]
+    # 邀请码列有唯一约束，撞码时 flush 会抛 IntegrityError（未被捕获 → 500）。
+    # 虽然 32 位空间碰撞概率极低，但生成失败不该表现成服务器错误：
+    # 重试几次，并把长度从 8 位提到 12 位（48 位空间）进一步降低概率。
+    for _ in range(5):
+        code = secrets.token_hex(6)
+        clash = await db.execute(select(User).where(User.invite_code == code))
+        if clash.scalar_one_or_none() is None:
+            break
+    else:
+        raise HTTPException(status_code=500, detail="邀请码生成失败，请重试")
     user.invite_code = code
     await db.flush()
     await audit(
@@ -615,6 +639,7 @@ async def selectable_users(
 @router.post("/admin/set-role")
 async def set_role(
     body: AdminSetRole,
+    request: Request,
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -637,6 +662,7 @@ async def set_role(
         user=admin, action="admin_set_role",
         target_type="user", target_id=target_user.id,
         detail={"username": target_user.username, "old_role": old_role, "new_role": body.role},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "user_id": target_user.id, "role": target_user.role}
 
@@ -644,10 +670,16 @@ async def set_role(
 @router.delete("/admin/users/{user_id}")
 async def delete_user(
     user_id: int,
+    request: Request,
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if admin.role != "superadmin":
+    # 权限模型必须与前端一致（AdminView 会给普通 admin 显示「自己邀请的用户」的删除按钮）：
+    # 超管可删任意人，普通 admin 只能删自己邀请来的普通用户。
+    # 原先这里是无条件「非超管即 403」，后面两条规则永远不执行 —— 是死代码，
+    # 而且一旦有人为了修前端把这个条件放宽，删除权限会立刻变成
+    # 「admin 可删任意用户（含其他 admin）」，因为那两条规则已经不生效了。
+    if admin.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403)
     u = await db.execute(select(User).where(User.id == user_id))
     user = u.scalar_one_or_none()
@@ -655,10 +687,11 @@ async def delete_user(
         raise HTTPException(status_code=404)
     if user.id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己")
-    if admin.role != "superadmin" and user.invited_by != admin.id:
-        raise HTTPException(status_code=403, detail="只能删除通过自己邀请码注册的用户")
-    if admin.role != "superadmin" and user.role != "user":
-        raise HTTPException(status_code=403, detail="只能删除普通用户")
+    if admin.role != "superadmin":
+        if user.invited_by != admin.id:
+            raise HTTPException(status_code=403, detail="只能删除通过自己邀请码注册的用户")
+        if user.role != "user":
+            raise HTTPException(status_code=403, detail="只能删除普通用户")
     from app.models.tournament import Registration, Tournament, PlayerStats as PS
     from app.models.round import Match, MatchSupport, Notification, RoundPairing
 
@@ -696,6 +729,7 @@ async def delete_user(
         user=admin, action="admin_delete_user",
         target_type="user", target_id=user.id,
         detail={"username": user.username},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True}
 
@@ -703,6 +737,7 @@ async def delete_user(
 @router.post("/admin/reset-password")
 async def admin_reset_password(
     body: AdminResetPassword,
+    request: Request,
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -724,6 +759,7 @@ async def admin_reset_password(
         user=admin, action="admin_reset_password",
         target_type="user", target_id=user.id,
         detail={"username": user.username},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True}
 

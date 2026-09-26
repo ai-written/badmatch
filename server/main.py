@@ -28,11 +28,17 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 生产环境必须使用强随机 SECRET_KEY，否则拒绝启动（防 JWT 伪造）
-    if not settings.DEBUG and settings.secret_key_is_default():
+    # SECRET_KEY 不安全时拒绝启动（防 JWT 伪造）。
+    # 判定不看 DEBUG：DEBUG 默认就是 True，用「not DEBUG」当开关属于 fail-open ——
+    # 任何漏设 DEBUG=false 的部署（裸 uvicorn、自建 compose、环境变量拼写错误）
+    # 都会带着公开的默认密钥正常启动，任何人都能离线伪造出任意用户（含超管）的 token。
+    # 本地开发如确需默认密钥，显式设置 ALLOW_INSECURE_SECRET_KEY=true。
+    insecure = settings.secret_key_is_default() or len(settings.SECRET_KEY.encode()) < 32
+    if insecure and not settings.ALLOW_INSECURE_SECRET_KEY:
         raise RuntimeError(
-            "生产环境禁止使用默认 SECRET_KEY！请在环境变量中设置强随机密钥 "
-            "（如 openssl rand -hex 32），再重新启动。"
+            "SECRET_KEY 不安全（使用了默认值，或长度不足 32 字节），拒绝启动！\n"
+            "请设置强随机密钥：openssl rand -hex 32\n"
+            "本地开发若坚持使用默认密钥，请显式设置 ALLOW_INSECURE_SECRET_KEY=true。"
         )
     async with engine.begin() as conn:
         await run_startup_migrations(conn)

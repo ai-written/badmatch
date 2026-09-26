@@ -1,19 +1,24 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    gender: str | None = None
-    invite_code: str | None = None
+    # 上限与 DB 列一致（users.username 是 String(64)、email 是 String(255)）。
+    # 不给上限的话超长值会在写库时抛 DataError（列宽溢出），
+    # 而 DataError 不是 IntegrityError 的子类，不会被现有的 except 捕获 → 500。
+    username: str = Field(min_length=1, max_length=64)
+    # 上限 200 是为了挡住超长输入：bcrypt 只取前 72 字节，
+    # 允许无限长既无意义又白白消耗 CPU（真正的 72 字节上限由接口层校验）
+    password: str = Field(min_length=6, max_length=200)
+    gender: str | None = Field(default=None, max_length=1)
+    invite_code: str | None = Field(default=None, max_length=32)
     # 首个用户（成为超级管理员）所需的初始化注册码
-    init_code: str | None = None
-    email: str
+    init_code: str | None = Field(default=None, max_length=64)
+    email: str = Field(min_length=3, max_length=255)
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=200)
 
 
 class ChangePasswordRequest(BaseModel):
