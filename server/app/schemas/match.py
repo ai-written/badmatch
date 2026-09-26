@@ -40,6 +40,12 @@ class MatchOut(BaseModel):
     support_b_users: list[str] = []
     is_swapped: bool = False
     duration_seconds: int | None = None
+    # 比赛开始/结束时间：前端据此本地走字（配合 now 换算基准，不依赖本机时钟）
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    # 服务端当前时间：前端用 (now - started_at) 作为「已进行秒数」的基准，
+    # 从而不依赖任何一台设备的本机时钟与所在时区
+    now: datetime | None = None
 
     class Config:
         from_attributes = True

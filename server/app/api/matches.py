@@ -13,10 +13,7 @@ from app.models.round import (
     MatchSupport,
     Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification,
 )
-from app.schemas.match import (
-    MatchOut, RoundOut, PlayerInfo, RoundPairingOut, ScoreUpdate, SupportUpdate,
-    SupportResponse, SwapUpdate,
-)
+from app.schemas.match import MatchOut, RoundOut, PlayerInfo, RoundPairingOut, ScoreUpdate, SupportUpdate, SupportResponse
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["matches"])
 
@@ -134,49 +131,6 @@ async def update_score(
         high_freq=True,
     )
     return {"ok": True}
-
-
-@router.post("/matches/{match_id}/swap-sides")
-async def swap_sides(
-    tournament_id: int,
-    match_id: int,
-    request: Request,
-    body: SwapUpdate = SwapUpdate(),
-    user: User = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """交换左右场地：仅本场裁判可操作，落库后广播给所有人，保证各端显示一致。
-
-    此前这是纯前端行为，每个观众各自的视角只在自己浏览器里生效；
-    改为服务端状态后，裁判交换一次，所有正在看这场的人一起切换。
-    """
-    result = await db.execute(
-        select(Match)
-        .where(Match.id == match_id, Match.tournament_id == tournament_id)
-        .with_for_update()
-    )
-    m = result.scalar_one_or_none()
-    if not m:
-        raise HTTPException(status_code=404, detail="比赛不存在")
-    if m.referee_id != user.id:
-        raise HTTPException(status_code=403, detail="只有本场裁判可以交换场地")
-    if m.status == MatchStatus.FINISHED:
-        raise HTTPException(status_code=400, detail="比赛已结束")
-
-    m.is_swapped = (not m.is_swapped) if body.swapped is None else body.swapped
-    await db.flush()
-    await manager.broadcast(tournament_id, {
-        "type": "match_updated",
-        "match_id": match_id,
-        "is_swapped": m.is_swapped,
-    })
-    await audit(
-        user=user, action="match_swap_sides",
-        target_type="match", target_id=m.id,
-        detail={"is_swapped": m.is_swapped},
-        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
-    )
-    return {"ok": True, "is_swapped": m.is_swapped}
 
 
 @router.post("/rounds/{round_id}/start-round")
@@ -474,7 +428,6 @@ async def _build_matches_out(matches: list[Match], db: AsyncSession, user: User 
             my_support=my_supports.get(m.id),
             support_a_users=support_a_users,
             support_b_users=support_b_users,
-            is_swapped=m.is_swapped,
             duration_seconds=_match_duration(m),
             started_at=m.started_at,
             ended_at=m.ended_at,

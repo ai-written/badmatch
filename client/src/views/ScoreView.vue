@@ -35,7 +35,6 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}</span>
           </div>
-          <div class="swap-hint">{{ isReferee ? '点击交换场地' : (match.status === 'finished' ? '' : '仅裁判可交换场地') }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -140,9 +139,7 @@ const { goBack } = useGoBack()
 const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
-// 左右场地交换改为服务端状态（仅裁判可操作），所有人实时同步。
-// 这里不再保留本地 ref，避免出现「双数据源」导致各端不一致。
-const swapped = computed(() => !!match.value?.is_swapped)
+const swapped = ref(false)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 // --- 比赛持续时长（服务端为准，所有人一致） ---
@@ -240,12 +237,7 @@ const rightWin = computed(() => {
   return swapped.value ? w === match.value?.pairing_a?.id : w === match.value?.pairing_b?.id
 })
 
-function swapTeams() {
-  // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
-  if (!isReferee.value || match.value?.status === 'finished') return
-  api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`, {}, { skipLoading: true } as any)
-    .catch(() => {})
-}
+function swapTeams() { swapped.value = !swapped.value }
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
@@ -364,8 +356,6 @@ watch(lastMessage, (msg) => {
       if (msg.score_b != null) match.value.score_b = msg.score_b
     }
     if (msg.status) match.value.status = msg.status
-    // 裁判交换场地后，所有正在看这场的人一起切换
-    if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
     // 「比赛开始」这一刻服务端会带 now 过来，用它校准计时基准，
     // 不必等下一次拉取，计时器即可立刻从 00:00 开始走字
     if (msg.status === 'ongoing' && msg.now) {
