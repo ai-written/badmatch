@@ -161,6 +161,23 @@ async def login(
     return TokenResponse(access_token=token, user=_profile(user))
 
 
+@router.post("/ws-ticket")
+async def issue_ws_ticket(
+    user: User = Depends(require_user),
+):
+    """签发 WebSocket 一次性连接票据。
+
+    浏览器无法给 WebSocket 握手加自定义头，凭证只能放 URL；而 nginx 会把
+    请求行写进 access log，等于长期有效的 JWT 明文落盘。改为先用这个接口
+    （JWT 走 Authorization 头，不落日志）换一张一次性短时票据。
+
+    这里不写审计：连接票据是高频、无业务含义的操作，写审计只会淹没日志
+    （用户每次切页面/重连都会申请）。
+    """
+    from app.core.ws_ticket import issue_ticket, TICKET_TTL_SECONDS
+    return {"ticket": issue_ticket(user.id), "expires_in": TICKET_TTL_SECONDS}
+
+
 @router.post("/logout")
 async def logout(
     request: Request,

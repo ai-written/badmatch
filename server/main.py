@@ -16,6 +16,7 @@ from app.core.database import engine, Base, async_session_factory
 from app.core.security import decode_access_token
 from app.core.startup_migration import run_startup_migrations
 from app.core.websocket import manager
+from app.core.ws_ticket import consume_ticket
 from app.core.access_log import AccessLogMiddleware
 from app.core.etag import ETagMiddleware
 from app.core.audit import cleanup_expired_audit_logs
@@ -83,28 +84,42 @@ async def health():
 
 @app.websocket("/ws/tournaments/{tournament_id}")
 async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
-    token = websocket.query_params.get("token")
-    payload = decode_access_token(token) if token else None
+    """WebSocket 握手鉴权。
+
+    优先用一次性票据（?ticket=xxx，由 POST /api/auth/ws-ticket 换取）。
+    票据只是连接凭证，不能换 JWT，且一次性 + 60 秒过期，因此即使被 nginx
+    access log 记录也无利用价值。
+
+    过渡期仍兼容旧的 ?token=<JWT>：直接部署后端时，用户浏览器里已打开的
+    页面还在用旧方式重连，若不兼容会表现为"实时更新忽然失效"。
+    待所有前端都刷新过后即可删除这一段。
+    """
+    user_id = consume_ticket(websocket.query_params.get("ticket"))
+
+    if user_id is None:
+        # ---- 兼容分支：旧的 ?token= 方式（过渡期保留）----
+        token = websocket.query_params.get("token")
+        payload = decode_access_token(token) if token else None
+        if payload and payload.get("sub") is not None:
+            try:
+                uid = int(payload["sub"])
+            except (TypeError, ValueError):
+                uid = None
+            if uid is not None:
+                # 手动短会话：校验完立即释放数据库连接，
+                # 避免每个长连接占用连接池导致池耗尽
+                async with async_session_factory() as session:
+                    result = await session.execute(select(User).where(User.id == uid))
+                    u = result.scalar_one_or_none()
+                    # 同时校验 token 版本号（旧 token 按 0 处理），登出/作废后的 token 不可订阅
+                    if u is not None and payload.get("tv", 0) == u.token_version:
+                        user_id = u.id
+
     await websocket.accept()
-    user = None
-    if payload and payload.get("sub") is not None:
-        try:
-            uid = int(payload["sub"])
-        except (TypeError, ValueError):
-            uid = None
-        if uid is not None:
-            # 手动短会话：校验完立即释放数据库连接，
-            # 避免每个长连接占用连接池导致池耗尽
-            async with async_session_factory() as session:
-                result = await session.execute(select(User).where(User.id == uid))
-                u = result.scalar_one_or_none()
-                # 同时校验 token 版本号（旧 token 按 0 处理），登出/作废后的 token 不可订阅
-                if u is not None and payload.get("tv", 0) == u.token_version:
-                    user = u
-    if user is None:
+    if user_id is None:
         await websocket.close(code=4401, reason="未授权")
         return
-    await manager.connect(tournament_id, websocket, user.id)
+    await manager.connect(tournament_id, websocket, user_id)
     try:
         while True:
             # 客户端每 30s 发一次应用层 ping 用于保活。

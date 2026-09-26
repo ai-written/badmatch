@@ -1,4 +1,5 @@
 import { ref, onMounted, onUnmounted } from 'vue'
+import api from '@/api/client'
 
 // 连接建立超时：SYN 被静默丢弃时 TCP 握手会一直挂起，
 // WebSocket 停在 CONNECTING 且既不触发 onopen 也不触发 onclose，
@@ -51,11 +52,11 @@ export function useWebSocket(tournamentId: number | null) {
     // 触发后置空：下面的心跳兜底靠它判断「是否已有待重连」，留着旧句柄会判断失真
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
-      connect()
+      connect().catch(() => {})
     }, RECONNECT_DELAY_MS)
   }
 
-  function connect() {
+  async function connect() {
     if (!tournamentId || disposed) return
     // 已有一个正在连接或已连接的实例时不要重复创建
     if (ws.value && (ws.value.readyState === WebSocket.CONNECTING || ws.value.readyState === WebSocket.OPEN)) {
@@ -63,14 +64,28 @@ export function useWebSocket(tournamentId: number | null) {
     }
     closeCurrent()
 
+    // 先用普通 HTTP 换一张一次性连接票据：JWT 走 Authorization 头，
+    // 不会像放在 WebSocket URL 里那样被 nginx 的 access log 记录。
+    // 票据是一次性的，所以每次（含重连）都要重新申请。
+    let ticket: string
+    try {
+      const res = await api.post('/auth/ws-ticket', null, { skipLoading: true, skipGlobalError: true } as any)
+      ticket = res.data?.ticket
+      if (!ticket) throw new Error('empty ticket')
+    } catch {
+      // 网络异常或登录态失效：稍后重连（401 已由拦截器统一处理）
+      scheduleReconnect()
+      return
+    }
+    // await 期间可能已卸载或已由别的路径建立连接
+    if (disposed || ws.value) return
+
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // localStorage 在隐私模式/禁用存储时会抛异常；new WebSocket 也可能抛。
-    // 抛在这里若不接住，调用方 onMounted 会中断（连心跳定时器都建不起来），
-    // 且不会进入任何事件回调 -> 永远不会重连。
+    // new WebSocket 也可能抛（URL 非法等）；
+    // 抛在这里若不接住，调用方会中断且不会进入任何事件回调 -> 永远不会重连。
     let socket: WebSocket
     try {
-      const token = localStorage.getItem('token') || ''
-      const url = `${protocol}//${location.host}/ws/tournaments/${tournamentId}?token=${encodeURIComponent(token)}`
+      const url = `${protocol}//${location.host}/ws/tournaments/${tournamentId}?ticket=${encodeURIComponent(ticket)}`
       socket = new WebSocket(url)
     } catch {
       scheduleReconnect()
@@ -159,7 +174,9 @@ export function useWebSocket(tournamentId: number | null) {
   }
 
   onMounted(() => {
-    connect()
+    // connect 现在是异步的（要先换票据）；内部已各自兜住异常，
+    // 这里再挂一个 catch 只为避免出现未处理的 Promise 拒绝
+    connect().catch(() => {})
     heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_MS)
   })
 

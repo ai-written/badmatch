@@ -44,6 +44,11 @@ docker compose -f docker-compose.prod.yml up -d
 
 ### 安全注意
 
+- **WebSocket 用一次性票据连接**：浏览器无法给 WebSocket 握手加自定义头，凭证只能放进 URL，
+  而 nginx 会把请求行写进 access log —— 等于把长期有效的 JWT 明文落盘。
+  因此改为先用 `POST /api/auth/ws-ticket`（JWT 走 `Authorization` 头，不落日志）换一张票据，
+  再用 `?ticket=xxx` 连接。票据**一次性、60 秒过期、不能换 JWT**，即使被日志记录也无利用价值。
+  过渡期仍兼容旧的 `?token=<JWT>` 方式，待所有前端刷新过后可删除该兼容分支。
 - **`SECRET_KEY` 校验是 fail-closed 的**：留空、使用默认/示例值、或长度不足 32 字节时，服务**拒绝启动**（不再看 `DEBUG`）。
   这是刻意的——默认密钥是公开的，一旦被用上，任何人都能离线伪造出任意用户（含超级管理员）的登录凭证。
   本地开发如确需使用默认密钥，显式设置 `ALLOW_INSECURE_SECRET_KEY=true`（dev compose 已这样配置）。
