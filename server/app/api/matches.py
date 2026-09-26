@@ -139,8 +139,6 @@ async def update_score(
             raise HTTPException(status_code=400, detail="比分相同，无法结束")
         winner = m.pairing_a_id if sa > sb else m.pairing_b_id
         await _finalize_match(m, winner, db)
-        await db.flush()
-        await _broadcast_match(m, tournament_id)
         await _maybe_finish_tournament(tournament_id, db)
         await audit(
             user=user, action="match_force_end",
@@ -148,10 +146,12 @@ async def update_score(
             detail={"score_a": sa, "score_b": sb, "winner_pairing_id": winner},
             ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         )
+        # 先提交再广播（同 swap_sides）：广播是网络 IO，不应在持有行锁时进行；
+        # 提交后订阅者立刻拉取也能读到最新比分与赛事状态。
+        await db.commit()
+        await _broadcast_match(m, tournament_id)
         return {"ok": True, "finished": True}
 
-    await db.flush()
-    await _broadcast_match(m, tournament_id)
     # 高频操作：默认不记录，由 AUDIT_HIGH_FREQ_ENABLED 控制
     await audit(
         user=user, action="match_score_update",
@@ -160,6 +160,9 @@ async def update_score(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         high_freq=True,
     )
+    # 同上：先提交再广播，缩短持锁时间（记分是最高频的写操作，影响最明显）
+    await db.commit()
+    await _broadcast_match(m, tournament_id)
     return {"ok": True}
 
 
@@ -194,18 +197,21 @@ async def swap_sides(
         raise HTTPException(status_code=400, detail="比赛已结束")
 
     m.is_swapped = (not m.is_swapped) if body.swapped is None else body.swapped
-    await db.flush()
-    await manager.broadcast(tournament_id, {
-        "type": "match_updated",
-        "match_id": match_id,
-        "is_swapped": m.is_swapped,
-    })
     await audit(
         user=user, action="match_swap_sides",
         target_type="match", target_id=m.id,
         detail={"is_swapped": m.is_swapped},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
+    # 先提交再广播：广播是可能阻塞的网络 IO，而此处仍持有该行的 FOR UPDATE 锁，
+    # 拖长持锁时间会挡住同一场比赛的记分请求。提交后数据也已可见，
+    # 订阅者收到广播再拉取时不会读到旧值。
+    await db.commit()
+    await manager.broadcast(tournament_id, {
+        "type": "match_updated",
+        "match_id": match_id,
+        "is_swapped": m.is_swapped,
+    })
     return {"ok": True, "is_swapped": m.is_swapped}
 
 
@@ -483,7 +489,19 @@ async def _build_matches_out(
         active_referee = referee if m.has_active_referee else None
 
         can_referee = False
-        if user and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING) and m.referee_id is None:
+        # 必须与 POST /claim-referee 的实际校验完全等价，否则会出现
+        # 「显示按钮但点了报错」或「该给按钮却没给」：
+        #   1) 赛事进行中（赛事结束后该场只读）
+        #   2) 比赛未结束
+        #   3) 无人执裁过（referee_id 为空）——任何人可认领；
+        #      或者已有历史裁判但已卸任，且当前用户就是那位原裁判（可收回）
+        #   4) 自己不是本场参赛者
+        if (
+            user
+            and tournament_status == TournamentStatus.ONGOING.value
+            and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING)
+            and (m.referee_id is None or (m.referee_id == user.id and not m.has_active_referee))
+        ):
             match_player_ids = {
                 pairing_a.player_a_id, pairing_a.player_b_id,
                 pairing_b.player_a_id, pairing_b.player_b_id,
@@ -528,8 +546,9 @@ async def _build_matches_out(
     return out
 
 
-# 超过该秒数视为异常（如忘记结束、跨天补录），不再显示耗时
-MAX_MATCH_DURATION_SECONDS = 3 * 60 * 60
+# 已结束比赛的耗时上限：超过视为异常（如忘记结束、跨天补录），不再显示耗时。
+# 取 8 小时：双打打满多局也可能到两三小时，原来的 3 小时容易误伤真实比赛。
+MAX_MATCH_DURATION_SECONDS = 8 * 60 * 60
 
 
 def _match_duration(m: Match) -> int | None:
@@ -586,7 +605,10 @@ async def _broadcast_match(m: Match, tournament_id: int) -> None:
         "score_a": m.score_a,
         "score_b": m.score_b,
         "status": m.status.value,
-        # 带上服务端时间：前端收到「比赛开始」时可立即校准计时基准
+        # 必须带上真实的 started_at：客户端用 (now - started_at) 换算耗时。
+        # 只给 now 的话，每次记分都被当成「刚刚开始」，计时器会归零重走。
+        "started_at": m.started_at.isoformat() if m.started_at else None,
+        "duration_seconds": _match_duration(m),
         "now": datetime.now().isoformat(),
     })
 

@@ -217,9 +217,6 @@ async def update_profile(
             raise HTTPException(status_code=400, detail="用户名已存在")
         changes["username"] = {"old": user.username, "new": username}
         user.username = username
-    if body.avatar:
-        changes["avatar"] = {"old": user.avatar, "new": body.avatar}
-        user.avatar = body.avatar
     if body.gender is not None:
         changes["gender"] = {"old": user.gender, "new": body.gender or None}
         user.gender = body.gender or None
@@ -676,7 +673,13 @@ async def delete_user(
     await db.execute(delete(PS).where(PS.user_id == user.id))
     await db.execute(delete(MatchSupport).where(MatchSupport.user_id == user.id))
     await db.execute(delete(Notification).where(Notification.user_id == user.id))
-    await db.execute(update(Match).where(Match.referee_id == user.id).values(referee_id=None))
+    # 用户被删除后无法再作为裁判：连带清掉卸任时间标记，
+    # 否则会留下 referee_id 为空但 referee_released_at 有值的自相矛盾数据
+    await db.execute(
+        update(Match)
+        .where(Match.referee_id == user.id)
+        .values(referee_id=None, referee_released_at=None)
+    )
     await db.execute(update(User).where(User.invited_by == user.id).values(invited_by=None))
     _remove_avatar_file(user.avatar)
     await db.delete(user)

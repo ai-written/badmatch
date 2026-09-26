@@ -21,8 +21,12 @@ async def claim_referee(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 行锁：并发认领同一场比赛时串行化，否则两人都会读到「无裁判」，
+    # 后提交者覆盖前者——前者收到「认领成功」却立刻失去权限。
     result = await db.execute(
-        select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id)
+        select(Match)
+        .where(Match.id == match_id, Match.tournament_id == tournament_id)
+        .with_for_update()
     )
     m = result.scalar_one_or_none()
     if not m:

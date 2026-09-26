@@ -1,8 +1,12 @@
 <template>
   <div class="score-root">
-    <van-nav-bar :title="matchNum" left-text="返回" left-arrow @click-left="goBack">
+    <van-nav-bar left-text="返回" left-arrow @click-left="goBack">
+      <!-- 中间：场次 + 耗时；右侧：积分榜入口 -->
+      <template #title>
+        <span class="nav-title" :class="{ overdue: timerOverdue }">{{ matchNum }}<template v-if="timerText">（{{ timerText }}）</template></span>
+      </template>
       <template #right>
-        <span v-if="timerText" class="elapsed">{{ timerText }}</span>
+        <span class="nav-rank" @click.stop="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
       </template>
     </van-nav-bar>
 
@@ -39,7 +43,7 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
-          <div class="swap-hint">{{ readOnly || match.status === 'finished' ? '比赛已结束' : (isReferee ? '点击交换场地' : '仅裁判可交换场地') }}</div>
+          <div class="swap-hint">{{ match.status === 'finished' ? '比赛已结束' : (readOnly ? '赛事已结束，本场已锁定' : (isReferee ? '点击交换场地' : '仅裁判可交换场地')) }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -138,7 +142,7 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
-import { serverElapsedSeconds, displayElapsedSeconds, formatElapsed } from '@/utils/timer'
+import { serverElapsedSeconds, displayElapsedSeconds, timerDisplay, ONGOING_DISPLAY_LIMIT_SECONDS } from '@/utils/timer'
 import { useGoBack } from '@/composables/useGoBack'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
@@ -168,12 +172,9 @@ const elapsed = computed(() => {
   tick.value
   return displayElapsedSeconds(match.value?.status, durationSecs.value, serverElapsed.value, anchorNow.value, Date.now())
 })
-const timerText = computed(() => {
-  if (match.value?.status === 'ongoing' || (match.value?.status === 'finished' && durationSecs.value != null)) {
-    return formatElapsed(elapsed.value)
-  }
-  return ''
-})
+const timerText = computed(() => timerDisplay(match.value?.status, elapsed.value, durationSecs.value))
+// 超长比赛（多为忘记结束）时用醒目样式提示
+const timerOverdue = computed(() => match.value?.status === 'ongoing' && elapsed.value > ONGOING_DISPLAY_LIMIT_SECONDS)
 
 /** 用服务端返回的 started_at 与 now 校准基准（差值与时区无关，两端都是服务端本地时间） */
 function syncTimerAnchor() {
@@ -225,7 +226,9 @@ const canSupport = computed(() => {
     match.value.pairing_b?.player_a?.id, match.value.pairing_b?.player_b?.id,
   ]
   if (players.includes(auth.user.id)) return false
-  if (match.value.referee?.id === auth.user.id) return false
+  // 只有在任裁判不能投票：已卸任者（referee 有值但 active_referee 为空）可以正常应援，
+  // 与服务端 POST /support 的校验保持一致
+  if (match.value.active_referee?.id === auth.user.id) return false
   return true
 })
 const supportA = computed(() => {
@@ -261,12 +264,19 @@ function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a'
 
 async function fetchMatch() {
   const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
+  // 本地有尚未提交的乐观比分时予以保留：否则响应里还是旧比分，
+  // 会把裁判刚点的那一分覆盖回去（随后 flush 才写回，表现为闪一下）
+  if (pendingScore && match.value) {
+    res.data.score_a = match.value.score_a
+    res.data.score_b = match.value.score_b
+  }
   match.value = res.data
   syncTimerAnchor()
 }
 
 async function doSupport(side: string) {
-  if (!canSupport.value || match.value?.status === 'finished') return
+  // 赛事结束（只读）后不再应援：服务端也会拒绝，这里提前拦住避免无声失败
+  if (!canSupport.value || readOnly.value || match.value?.status === 'finished') return
   const actualSide = swapped.value ? (side === 'a' ? 'b' : 'a') : side
   try {
     const res = await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/support`, { side: actualSide }, { skipLoading: true } as any)
@@ -374,16 +384,26 @@ watch(lastMessage, (msg) => {
       if (msg.score_a != null) match.value.score_a = msg.score_a
       if (msg.score_b != null) match.value.score_b = msg.score_b
     }
-    if (msg.status) match.value.status = msg.status
+    if (msg.status) {
+      const wasPending = match.value.status !== 'ongoing'
+      match.value.status = msg.status
+      // 计时基准以服务端给的 started_at 为准（每次广播都会带上真实开赛时间）。
+      // 绝不能改用 msg.now：那是广播时刻，会让计时器每次记分归零重走。
+      if (msg.started_at) {
+        match.value.started_at = msg.started_at
+        match.value.now = msg.now ?? match.value.now
+        syncTimerAnchor()
+      } else if (msg.status === 'ongoing' && msg.now && wasPending) {
+        // 兼容旧服务的兜底：只在「由未开始变为进行中」这一刻采用 now 作为起点
+        match.value.started_at = msg.now
+        match.value.now = msg.now
+        syncTimerAnchor()
+      }
+      // 比赛结束的广播会带上最终耗时，直接采用，省一次请求
+      if (msg.duration_seconds != null) match.value.duration_seconds = msg.duration_seconds
+    }
     // 裁判交换场地后，所有正在看这场的人一起切换
     if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
-    // 「比赛开始」这一刻服务端会带 now 过来，用它校准计时基准，
-    // 不必等下一次拉取，计时器即可立刻从 00:00 开始走字
-    if (msg.status === 'ongoing' && msg.now) {
-      match.value.started_at = msg.now
-      match.value.now = msg.now
-      syncTimerAnchor()
-    }
   }
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
     match.value.support_a = msg.support_a
@@ -415,7 +435,12 @@ onUnmounted(() => {
   background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
 }
 .loading { display: flex; justify-content: center; margin-top: 120px; }
-.elapsed { font-size: 12px; color: #666; margin-right: 4px; font-variant-numeric: tabular-nums; }
+/* 导航栏中间：场次（耗时）。用等宽数字，避免计时跳秒时标题左右抖动 */
+.nav-title { font-variant-numeric: tabular-nums; }
+/* 比赛超过最长时长（多半忘记结束）时用醒目色提示 */
+.nav-title.overdue { color: #ee0a24; }
+/* 导航栏右侧的积分榜入口 */
+.nav-rank { font-size: 14px; color: #1989fa; }
 
 .scoreboard { display: flex; align-items: center; padding: 16px 8px; background: #fff; margin: 10px 12px; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
 .sb-team { flex: 1; display: flex; justify-content: center; gap: 4px; cursor: pointer; }
