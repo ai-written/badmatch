@@ -351,16 +351,12 @@ async def register(
         )
     )
     reg = exist.scalar_one_or_none()
-    if reg:
-        if reg.is_active:
-            raise HTTPException(status_code=400, detail="已报名")
-        else:
-            reg.is_active = True
-            await db.flush()
-            await manager.broadcast(tournament_id, {"type": "registration_updated"})
-            await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
-            return {"ok": True}
+    if reg and reg.is_active:
+        raise HTTPException(status_code=400, detail="已报名")
 
+    # 容量校验必须放在「重新激活」之前：
+    # 原先重新激活分支直接 return，容量检查永远走不到，
+    # 于是「报名 → 取消 → 别人报满 → 自己再报名」就能突破人数上限。
     cnt_result = await db.execute(
         select(func.count(Registration.id)).where(
             Registration.tournament_id == tournament_id, Registration.is_active == True
@@ -370,10 +366,16 @@ async def register(
     if cnt >= t.max_participants:
         raise HTTPException(status_code=400, detail="报名人数已满")
 
-    db.add(Registration(tournament_id=tournament_id, user_id=user.id))
-    await db.flush()
-    await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    if reg:
+        # 曾取消过的记录重新激活，不新增行（有 (tournament_id, user_id) 唯一约束）
+        reg.is_active = True
+    else:
+        db.add(Registration(tournament_id=tournament_id, user_id=user.id))
+
     await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
+    # 先提交再广播：广播是网络 IO，提交后订阅者回查也不会读到旧数据
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 

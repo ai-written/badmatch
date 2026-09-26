@@ -28,8 +28,8 @@
 
       <div class="action-block" v-if="tournament.status === 'open'">
         <div v-if="openLocked" class="reg-countdown">距报名开放还有 {{ countdownText }}</div>
-        <van-button type="primary" block round :disabled="tournament.is_registered || openLocked" @click="doRegister">
-          {{ tournament.is_registered ? '已报名' : '立即报名' }}
+        <van-button type="primary" block round :disabled="tournament.is_registered || openLocked || regFull" @click="doRegister">
+          {{ tournament.is_registered ? '已报名' : (regFull ? '人数已满' : '立即报名') }}
         </van-button>
         <van-button v-if="tournament.is_registered && tournament.status === 'open'" plain block round style="margin-top:8px" @click="doCancelRegister">
           取消报名
@@ -177,6 +177,12 @@ const remainingMs = computed(() => {
   return Math.max(0, new Date(openAt).getTime() - clockOffset - nowTick.value)
 })
 const openLocked = computed(() => remainingMs.value > 0)
+// 报名人数已满时禁用「立即报名」：仅靠后端返回 400 会让用户点了才知道
+const regFull = computed(() => {
+  const t = tournament.value
+  if (!t) return false
+  return (t.registered_count ?? 0) >= (t.max_participants ?? 0)
+})
 const countdownText = computed(() => {
   if (!openLocked.value) return ''
   const s = Math.floor(remainingMs.value / 1000)

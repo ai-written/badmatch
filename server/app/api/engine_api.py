@@ -55,15 +55,21 @@ async def start_tournament(
     if len(player_ids) < 4:
         raise HTTPException(status_code=400, detail="至少需要 4 人参赛")
 
-    # update total_matches if provided
+    # 总场次：显式传入的值先校验；库里的存量值也必须复检。
+    # 库里可能是「创建时按旧人数钉下的场次」，报名人数变化后就不整除了，
+    # 直接拿去排程会抛异常（未捕获 → 500 → 赛事永远开不起来），
+    # 这里与 withdraw 的重排逻辑保持一致：不整除就按当前人数重算。
     if body and body.total_matches is not None:
         requested = body.total_matches
         if requested < 1 or requested > 100 or (4 * requested) % len(player_ids) != 0:
             raise HTTPException(status_code=400, detail="总场次需在 1-100 之间且保证每名选手场次相同")
         tournament.total_matches = requested
-    M = compute_match_count(len(player_ids))
-    if tournament.total_matches:
+        M = requested
+    elif tournament.total_matches and (4 * tournament.total_matches) % len(player_ids) == 0:
         M = tournament.total_matches
+    else:
+        # 未设置，或存量值与当前人数不匹配：按当前人数取最小可行场次
+        M = compute_match_count(len(player_ids))
     schedule = generate_schedule(player_ids, M)
 
     matches_per_round = 2

@@ -37,7 +37,13 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await api.get('/auth/me', { skipLoading } as any)
       user.value = res.data
-    } catch { logout() }
+    } catch (e: any) {
+      // 只有凭证真的失效才登出。logout() 会调后端把 token_version 自增，
+      // 是「永久作废」操作：若对 5xx / 502 / 网络错误 / 超时也这么做，
+      // 一次后端重启或网关抖动就会让用户丢掉 90 天登录态。
+      const status = e?.response?.status
+      if (status === 401 || status === 403) await logout()
+    }
   }
 
   async function login(username: string, password: string) {
