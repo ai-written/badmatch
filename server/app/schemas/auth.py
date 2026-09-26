@@ -26,6 +26,17 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+class ResetPasswordRequest(BaseModel):
+    # 令牌由邮件链接的 URL fragment 传来，长度按 token_urlsafe(32) 的实际长度放宽
+    token: str = Field(min_length=16, max_length=200)
+    # 与注册/改密一致的上限；真正的 72 字节 bcrypt 限制由接口层校验
+    new_password: str = Field(min_length=6, max_length=200)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

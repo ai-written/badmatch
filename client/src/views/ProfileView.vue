@@ -13,6 +13,7 @@
           <van-field v-model="loginForm.password" label="密码" placeholder="请输入密码" type="password" required :rules="[{ required: true, message: '请输入密码' }]" />
         </van-cell-group>
         <div class="form-submit"><van-button round block type="primary" native-type="submit" :loading="submitting">登录</van-button></div>
+        <div class="forgot-link" @click="$router.push('/forgot-password')">忘记密码？</div>
       </van-form>
 
       <van-form v-else @submit="onRegister" class="auth-form">
@@ -276,6 +277,7 @@ onMounted(async () => {
 .auth-tabs { margin-top: 0; }
 .auth-form { margin-top: 16px; }
 .form-submit { margin: 16px; }
+.forgot-link { text-align: center; font-size: 13px; color: #1989fa; padding: 4px 0 20px; }
 .profile-header { display: flex; flex-direction: column; align-items: center; padding: 30px 0 20px; }
 .avatar-wrapper { position: relative; cursor: pointer; }
 .avatar-overlay { position: absolute; inset: 0; border-radius: 50%; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .2s; }

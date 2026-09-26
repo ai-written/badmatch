@@ -175,6 +175,7 @@ const ACTION_LABELS: Record<string, string> = {
   round_start: '开始轮次', match_force_end: '结束比赛', match_score_update: '记分',
   support_vote: '投票', referee_claim: '认领裁判', referee_release: '释放裁判',
   update_profile: '修改资料', upload_avatar: '上传头像', generate_invite: '生成邀请码',
+  password_reset_request: '申请重置密码', password_reset: '重置密码',
 }
 
 const actionOptions = computed(() => [

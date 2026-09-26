@@ -11,7 +11,7 @@ from app.core.audit import audit, get_client_ip
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
     AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
-    ChangePasswordRequest,
+    ChangePasswordRequest, ForgotPasswordRequest, ResetPasswordRequest,
 )
 from app.models.user import User
 from app.models.tournament import PlayerStats
@@ -33,6 +33,10 @@ avatar_limiter = RateLimiter(20, 600)
 # WebSocket 连接票据限流（按用户，宽松）：前端每次切页/重连都会申请，
 # 正常用量很低（一次连接一张），60 次/分钟足够，仅用于挡住高频滥用
 ws_ticket_limiter = RateLimiter(60, 60)
+# 找回密码：按来源 IP 限制申请次数，避免被用来给他人邮箱灌邮件
+forgot_limiter = RateLimiter(5, 900)
+# 提交新密码：按来源 IP 限制，避免拿令牌反复试探
+reset_limiter = RateLimiter(10, 900)
 # 用户不存在时也要跑一次 bcrypt，才能让「查无此人」与「密码错误」的耗时接近，
 # 否则响应时间差可被用来枚举用户名。模块加载时算一次，避免每次请求都算。
 _DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-constant-time-compare")
@@ -163,6 +167,97 @@ async def login(
         token_version=user.token_version,
     )
     return TokenResponse(access_token=token, user=_profile(user))
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """申请找回密码：给该邮箱发一封带重置链接的邮件。
+
+    无论邮箱是否存在、是否配置了 SMTP，都返回同一句话 —— 否则这个接口就变成
+    「任意人可批量探测某邮箱是否注册过」的工具（注册接口已经因为同类问题
+    把占用性检查挪到了邀请码之后，这里同样不能泄露）。
+    """
+    ip = get_client_ip(request)
+    if not forgot_limiter.check(ip):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+    forgot_limiter.record_failure(ip)
+
+    email = (body.email or "").strip().lower()
+    user = None
+    if email:
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+    if user is not None:
+        from app.core.password_reset import issue_reset_token, TOKEN_TTL_MINUTES
+        from app.core.mailer import send_password_reset
+        token = await issue_reset_token(db, user.id, request_ip=ip)
+        # token 放在 fragment（#）之后：不会随请求发给服务器，因此不进任何日志，
+        # 也不会通过 Referer 泄露给第三方
+        url = f"{_settings.FRONTEND_URL.rstrip('/')}/reset-password#token={token}"
+        # 先提交再发信：邮件里带的是能改密码的凭证，若事务随后回滚会留下无效链接
+        await db.commit()
+        sent = send_password_reset(user.email, user.username, url, TOKEN_TTL_MINUTES)
+        if not sent:
+            logger.warning(
+                "密码重置邮件未发出（SMTP 未配置或发送失败）: user_id=%s", user.id
+            )
+        await audit(
+            user=user, action="password_reset_request",
+            target_type="user", target_id=user.id,
+            detail={"sent": sent},
+            ip=ip, user_agent=request.headers.get("user-agent"),
+        )
+
+    return {"ok": True, "message": "如果该邮箱已注册，我们已发送重置邮件，请查收"}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    body: ResetPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """用邮件里的令牌设置新密码。"""
+    ip = get_client_ip(request)
+    if not reset_limiter.check(ip):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+
+    _validate_password_length(body.new_password)
+
+    from app.core.password_reset import consume_reset_token
+    user_id = await consume_reset_token(db, body.token)
+    if user_id is None:
+        reset_limiter.record_failure(ip)
+        raise HTTPException(status_code=400, detail="重置链接无效或已过期，请重新申请")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        reset_limiter.record_failure(ip)
+        raise HTTPException(status_code=400, detail="重置链接无效或已过期，请重新申请")
+
+    user.password_hash = hash_password(body.new_password)
+    # 改密后旧 token 必须失效：token_version 自增会让所有已签发的 access token
+    # 失效，并主动断开该用户全部 WebSocket 连接
+    user.token_version += 1
+    login_limiter.reset(user.username)
+    await db.flush()
+    from app.core.websocket import manager
+    from app.core.ws_ticket import revoke_user
+    await manager.kick_user(user.id)
+    revoke_user(user.id)
+    await audit(
+        user=user, action="password_reset",
+        target_type="user", target_id=user.id,
+        detail={"username": user.username},
+        ip=ip, user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True}
 
 
 @router.post("/ws-ticket")

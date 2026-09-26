@@ -20,7 +20,7 @@ from app.core.ws_ticket import consume_ticket
 from app.core.access_log import AccessLogMiddleware
 from app.core.etag import ETagMiddleware
 from app.core.audit import cleanup_expired_audit_logs
-from app.models import user, tournament, round, audit
+from app.models import user, tournament, round, audit, password_reset  # noqa: F401
 from app.models.user import User
 
 logger = logging.getLogger(__name__)

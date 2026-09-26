@@ -35,6 +35,25 @@ def send_email(to_email: str, subject: str, html: str) -> bool:
         return False
 
 
+def send_password_reset(to_email: str, username: str, url: str, minutes: int) -> bool:
+    """密码重置邮件。
+
+    链接里的 token 放在 URL 的 `#` 之后（fragment）：fragment 不会随请求发给
+    服务器，因此不会进入 nginx/应用访问日志，也不会进浏览器的 Referer，
+    比放在查询串里安全。
+    """
+    html = (
+        f"<div style='font-family:sans-serif;line-height:1.6'>"
+        f"<h2>重置密码</h2>"
+        f"<p>你好 {escape(username)}，我们收到了你的密码重置请求。</p>"
+        f"<p>点击下面的链接设置新密码（{minutes} 分钟内有效，且只能使用一次）：</p>"
+        f"<p><a href='{escape(url)}'>{escape(url)}</a></p>"
+        f"<p>如果不是你本人的操作，请忽略本邮件，你的密码不会被修改。</p>"
+        f"</div>"
+    )
+    return send_email(to_email, "重置密码 - 爱玩羽社", html)
+
+
 def send_tournament_invite(
     to_email: str,
     host_username: str,
