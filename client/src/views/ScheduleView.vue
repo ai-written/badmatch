@@ -1,6 +1,10 @@
 <template>
   <div class="schedule-page">
-    <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="goBack" />
+    <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="goBack">
+      <template #right>
+        <span class="nav-link" @click="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
+      </template>
+    </van-nav-bar>
 
     <div class="schedule-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
@@ -169,14 +173,16 @@ async function onRefresh() {
 // 具体规则与编号逻辑见 utils/schedule.ts（纯函数，便于单测）。
 const showAllFinished = ref(false)
 
-const hiddenIds = computed(() => hiddenFinishedIds(rounds.value, showAllFinished.value))
-const hiddenFinishedCount = computed(() => hiddenIds.value.size)
-const hasHiddenFinished = computed(() => hiddenFinishedCount.value > 0 || showAllFinished.value)
-const visibleRounds = computed(() => buildVisibleRounds(rounds.value, hiddenIds.value))
-// 赛事已提前结束时，未打完的比赛也不允许再认领裁判 / 记分
+// 赛事是否已结束（提前结束也算）。必须与「折叠」用同一套判断：
+// 否则手动提前结束时会出现「顶部说已锁定、列表却还在折叠」的自相矛盾
 const tournamentEnded = computed(() =>
   rounds.value.some((r: any) => (r.matches || []).some((m: any) => m.tournament_status === 'finished'))
 )
+
+const hiddenIds = computed(() => hiddenFinishedIds(rounds.value, showAllFinished.value, tournamentEnded.value))
+const hiddenFinishedCount = computed(() => hiddenIds.value.size)
+const hasHiddenFinished = computed(() => hiddenFinishedCount.value > 0 || showAllFinished.value)
+const visibleRounds = computed(() => buildVisibleRounds(rounds.value, hiddenIds.value))
 
 // --- 进入页面时自动定位到当前该关注的比赛 ---
 // 优先「进行中」的第一场；没有进行中的则取「待打」的第一场；
@@ -202,15 +208,21 @@ watch(
     highlightMatchId.value = targetMatchId.value
     // 目标比赛落在可视区偏上约 1/3 处：上方保留一点上文（前面打到哪），
     // 下方留出更多空间展示后续比赛，比纯居中更实用。
-    // 注意：不能先 scrollIntoView 再读 getBoundingClientRect ——
-    // scrollIntoView 的滚动不是立即可见的，随后读到的是滚动前的坐标，
-    // 会造成二次滚动、落点偏低。改用 offsetTop 在容器坐标空间里一次算准。
+    // 注意：不能先 scrollIntoView 再读坐标 —— scrollIntoView 的滚动不是立即可见的，
+    // 随后读到的是滚动前的值，会造成二次滚动、落点偏低。这里一次算准。
     const scroller = el.closest('.schedule-scroll') as HTMLElement | null
     if (scroller) {
-      const top = focusScrollTop(el.offsetTop, scroller.clientHeight)
-      // 用 scrollTo 而非直接赋值 scrollTop：显式声明 behavior，避免继承
-      // 任何全局 scroll-behavior: smooth 造成落点不精确
-      scroller.scrollTo({ top, behavior: 'auto' })
+      // 用 rect 差值换算，而不是 el.offsetTop：
+      // Vant 的 .van-pull-refresh__track 自带 position:relative，它才是真正的
+      // offsetParent，所以 offsetTop 的基准与 scroller.scrollTop 的原点并不一致
+      // （会差 .schedule-scroll 的 padding-top）。rect 差值不受此影响。
+      const offsetInScroller =
+        el.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        - scroller.clientTop + scroller.scrollTop
+      const top = focusScrollTop(offsetInScroller, scroller.clientHeight)
+      // 显式 instant：behavior:'auto' 表示「沿用 CSS scroll-behavior」，
+      // 若将来有全局 smooth 就不精确了
+      scroller.scrollTo({ top, behavior: 'instant' as ScrollBehavior })
     } else {
       // 兜底：容器结构变化时退化为居中
       el.scrollIntoView({ block: 'center' })
@@ -241,6 +253,9 @@ onMounted(() => fetchRounds())
 .empty-block { padding-top: 80px; }
 .round-section { margin: 0 12px; }
 
+/* 导航栏右侧的积分榜入口 */
+.nav-link { font-size: 14px; color: #1989fa; }
+
 /* 赛事已结束的只读提示 */
 .readonly-banner {
   display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -263,17 +278,17 @@ onMounted(() => fetchRounds())
 .match-card {
   background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,.04); position: relative;
+  /* transition 必须在基类上：若只写在 .target 上，类移除后新的计算值里
+     已经没有 transition，高亮会瞬间复位而不是淡出 */
+  transition: box-shadow .5s ease-out;
 }
 
-/* 首次进入时高亮落点比赛：明显描边保持 2.5s，移除后平滑淡出。
-   这里只用 transition 不用 animation —— animation 播放期间会覆盖 transition
-   对 box-shadow 的效果，导致淡出失效。
+/* 首次进入时高亮落点比赛：明显描边保持 2.5s，移除后由基类的 transition 平滑淡出。
    必须排在 :active 之后：两者特异性相同，靠顺序决定优先级。 */
 .match-card:active { box-shadow: 0 4px 12px rgba(0,0,0,.08); }
 
 .match-card.target {
   box-shadow: 0 0 0 2px rgba(25, 137, 250, .6), 0 3px 14px rgba(25, 137, 250, .28);
-  transition: box-shadow .5s ease-out;
 }
 
 .me-badge {

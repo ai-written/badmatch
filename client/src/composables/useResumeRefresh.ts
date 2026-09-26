@@ -12,6 +12,7 @@ import { onMounted, onUnmounted } from 'vue'
  */
 export function useResumeRefresh(refresh: () => void | Promise<void>, minIntervalMs = 2000) {
   let lastAt = 0
+  let hiddenAt = 0
   let running = false
 
   async function run() {
@@ -29,8 +30,16 @@ export function useResumeRefresh(refresh: () => void | Promise<void>, minInterva
   }
 
   function onVisibilityChange() {
-    if (document.visibilityState === 'visible') run()
-    else lastAt = 0 // 一进后台就允许下次回来立即刷新
+    if (document.visibilityState === 'visible') {
+      // 只有在后台确实待够 minIntervalMs，才允许回来立刻刷新；
+      // 否则沿用最小间隔。若在这里无条件清零 lastAt，防抖就形同虚设——
+      // 反复下拉通知栏、来回切应用会每次都打一整包请求。
+      if (hiddenAt && Date.now() - hiddenAt >= minIntervalMs) lastAt = 0
+      hiddenAt = 0
+      run()
+    } else {
+      hiddenAt = Date.now()
+    }
   }
 
   function onPageShow(e: PageTransitionEvent) {

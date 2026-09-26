@@ -17,15 +17,21 @@ function withGlobalIndex(rounds: any[]): any[] {
 /**
  * 计算需要折叠的已完成比赛 id。
  * - expanded 为 true 时返回空集（用户已展开）
- * - 没有「进行中 / 待打」的比赛时返回空集：赛事全部结束，不再折叠，
- *   让用户能完整回顾整场赛事的赛果
+ * - tournamentEnded 为 true 时返回空集：赛事已结束（含被提前结束）就不再折叠，
+ *   让用户能完整回顾赛果。必须用赛事状态而不是「有无未打完的比赛」——
+ *   手动提前结束时会留下 pending 比赛，两套判断会自相矛盾
+ * - 没有「进行中 / 待打」的比赛时返回空集（所有比赛都打完了）
  * - 已完成的比赛 ≤ 1 场时返回空集（没有可隐藏的东西）
  * - 否则取最后 1 场已完成比赛保留，其余已完成比赛全部折叠
  *
  * 「最后」按赛程顺序而非结束时间：并场进行时结束时间会乱序。
  */
-export function hiddenFinishedIds(rounds: any[], expanded: boolean): Set<number> {
-  if (expanded) return new Set<number>()
+export function hiddenFinishedIds(
+  rounds: any[],
+  expanded: boolean,
+  tournamentEnded = false,
+): Set<number> {
+  if (expanded || tournamentEnded) return new Set<number>()
   const all = rounds.flatMap((r) => r.matches || [])
   // 还有比赛没打完就保持折叠；全部结束则全部展开
   const hasUnfinished = all.some((m: any) => m.status === 'ongoing' || m.status === 'pending')
