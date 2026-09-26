@@ -94,11 +94,11 @@
     </van-dialog>
 
     <van-dialog v-model:show="showEditName" title="修改用户名" show-cancel-button @confirm="saveUsername">
-      <van-field v-model="newUsername" placeholder="新用户名" style="margin:10px 0" />
+      <van-field v-model="newUsername" placeholder="新用户名" maxlength="64" style="margin:10px 0" />
     </van-dialog>
 
     <van-dialog v-model:show="showEditEmail" title="修改邮箱" show-cancel-button @confirm="saveEmail">
-      <van-field v-model="editEmail" type="email" placeholder="邮箱（选填，留空可清除）" style="margin:10px 0" />
+      <van-field v-model="editEmail" type="email" placeholder="邮箱（选填，留空可清除）" maxlength="255" style="margin:10px 0" />
     </van-dialog>
   </div>
 </template>

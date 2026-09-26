@@ -58,12 +58,14 @@ class AdminSetRole(BaseModel):
 
 
 class UpdateProfile(BaseModel):
-    username: str | None = None
+    # 上限必须与 RegisterRequest / DB 列宽一致：超长值写库时抛的是 DataError
+    # （列宽溢出），而它不是 IntegrityError 的子类，接口的 except 抓不到 → 500
+    username: str | None = Field(default=None, min_length=1, max_length=64)
     # 刻意不接受 avatar：头像只能通过 POST /auth/upload-avatar 修改。
     # 否则任意用户可把 avatar 设成「他人头像的路径」，再上传一次头像，
     # 就会经由 _remove_avatar_file 删掉对方的头像文件（对方 DB 仍指向它 → 裂图）。
-    gender: str | None = None
-    email: str | None = None
+    gender: str | None = Field(default=None, max_length=1)
+    email: str | None = Field(default=None, max_length=255)
 
 
 class SelectableUser(BaseModel):
