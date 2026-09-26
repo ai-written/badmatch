@@ -264,11 +264,21 @@ const rightWin = computed(() => {
   return swapped.value ? w === match.value?.pairing_a?.id : w === match.value?.pairing_b?.id
 })
 
-function swapTeams() {
+async function swapTeams() {
   // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
   if (!isReferee.value || readOnly.value || match.value?.status === 'finished') return
-  api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`, {}, { skipLoading: true } as any)
-    .catch(() => {})
+  try {
+    const res = await api.post(
+      `/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`,
+      {}, { skipLoading: true } as any,
+    )
+    // 用返回值立即落本地状态，不要只等广播：WS 恰好在重连窗口时广播会丢，
+    // 那时界面毫无反馈，裁判会以为按钮坏了（服务端已翻转，下次刷新还会跳变）。
+    // 广播到达时再赋同一个值，是幂等的。
+    if (res.data?.is_swapped != null) match.value.is_swapped = res.data.is_swapped
+  } catch {
+    // 失败（例如刚被卸任、赛事已结束）：拦截器已提示，界面保持原状
+  }
 }
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
@@ -306,14 +316,35 @@ async function doSupport(side: string) {
 
 let scoreTimer: ReturnType<typeof setTimeout> | null = null
 let pendingScore: { score_a: number; score_b: number } | null = null
+// 乐观改动前的「已确认」比分，用于写库失败时回滚。
+// 必须在改动之前记录：flushScoreNow 是防抖后 300ms 才执行的，
+// 那时 match.value 里已经是加过的值，在那里取 prev 等于没回滚。
+let confirmedScore: { score_a: number; score_b: number } | null = null
 const wheelSide = ref<string | null>(null)
 let wheelGesture: { id: number; y: number; acc: number; side: string } | null = null
 
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
   const data = pendingScore
+  // 回滚目标：本批乐观改动之前的已确认比分
+  const prev = confirmedScore ?? { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
   pendingScore = null
-  await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, data, { skipLoading: true } as any).catch(() => {})
+  confirmedScore = null
+  try {
+    await api.put(
+      `/tournaments/${route.params.id}/matches/${route.params.matchId}/score`,
+      data, { skipLoading: true } as any,
+    )
+  } catch {
+    // 写库失败（例如刚被卸任 → 403、比赛已结束 → 400、网络异常）：
+    // 乐观加的那一分服务端并不存在，必须回滚，否则界面会长期显示一个幻影比分。
+    if (match.value) {
+      match.value.score_a = prev.score_a
+      match.value.score_b = prev.score_b
+    }
+    await fetchMatch().catch(() => {})
+    // 期间用户又点了，按回滚后的基准重新提交
+  }
   // await 期间用户又点击了，需要继续冲刷，避免丢分
   if (pendingScore) scheduleFlush()
 }
@@ -329,6 +360,8 @@ function scheduleFlush() {
 
 async function addScore(side: string) {
   if (!match.value) return
+  // 只在「本次乐观改动链的第一次」记录回滚目标，多次连点不能被中间值覆盖
+  if (!confirmedScore) confirmedScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
   if (side === 'a') match.value.score_a = (match.value.score_a ?? 0) + 1
   else match.value.score_b = (match.value.score_b ?? 0) + 1
   pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
@@ -337,9 +370,15 @@ async function addScore(side: string) {
 
 async function subScore(side: string) {
   if (!match.value) return
-  if (side === 'a' && (match.value.score_a ?? 0) > 0) match.value.score_a -= 1
-  else if (side === 'b' && (match.value.score_b ?? 0) > 0) match.value.score_b -= 1
-  else return
+  if (side === 'a' && (match.value.score_a ?? 0) > 0) {
+    if (!confirmedScore) confirmedScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
+    match.value.score_a -= 1
+  } else if (side === 'b' && (match.value.score_b ?? 0) > 0) {
+    if (!confirmedScore) confirmedScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
+    match.value.score_b -= 1
+  } else {
+    return
+  }
   pendingScore = { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
   scheduleFlush()
 }
