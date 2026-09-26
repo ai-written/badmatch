@@ -1,5 +1,6 @@
 import logging
 import smtplib
+import ssl
 from html import escape
 from email.header import Header
 from email.mime.text import MIMEText
@@ -9,10 +10,29 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _mask_email(addr: str | None) -> str:
+    """日志里不写完整邮箱：收件人地址属个人信息。"""
+    if not addr or "@" not in addr:
+        return "<invalid>"
+    name, _, domain = addr.partition("@")
+    return f"{name[:1]}***@{domain}"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """默认的 smtplib 上下文**不校验证书**（verify_mode=CERT_NONE）。
+
+    这点对本项目很关键：邮件里带的是可改密码的凭证，如果「服务→SMTP」之间
+    能被中间人插入，攻击者可直接读到重置链接并接管账号。
+    （Python 的 SMTP_SSL/starttls 在未显式传 context 时用的是
+    ssl._create_stdlib_context()，实测 verify_mode=0、check_hostname=False。）
+    """
+    return ssl.create_default_context()
+
+
 def send_email(to_email: str, subject: str, html: str) -> bool:
     settings = get_settings()
     if not settings.SMTP_HOST or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-        logger.warning("SMTP 未配置，跳过邮件发送: %s", to_email)
+        logger.warning("SMTP 未配置，跳过邮件发送: %s", _mask_email(to_email))
         return False
 
     msg = MIMEText(html, "html", "utf-8")
@@ -20,18 +40,21 @@ def send_email(to_email: str, subject: str, html: str) -> bool:
     msg["From"] = settings.SMTP_FROM or settings.SMTP_USER
     msg["To"] = to_email
     try:
+        context = _ssl_context()
         if settings.SMTP_PORT == 465:
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
+            with smtplib.SMTP_SSL(
+                settings.SMTP_HOST, settings.SMTP_PORT, timeout=15, context=context
+            ) as server:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
         else:
             with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as server:
-                server.starttls()
+                server.starttls(context=context)
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
         return True
     except Exception:
-        logger.exception("邮件发送失败: %s", to_email)
+        logger.exception("邮件发送失败: %s", _mask_email(to_email))
         return False
 
 

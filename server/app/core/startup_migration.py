@@ -89,6 +89,36 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             text("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email)")
         )
 
+    # 早期 update_profile 只 strip 不 lower，可能存下带大写的邮箱。
+    # 统一规范成小写，否则「忘记密码」按小写查询命中不了这些账号。
+    # 注意不能直接 UPDATE：若历史数据里已存在 A@x.com 与 a@x.com 各占一个账号
+    # （唯一约束是大小写敏感的，重复能存进去），lower 后会违反唯一约束、
+    # 导致启动失败。先检测冲突：保留 id 最小的那个，其余置空并告警。
+    if not await _migration_applied(conn, "normalize_user_emails_lowercase"):
+        dupes = (await conn.execute(text(
+            "SELECT lower(email) AS e, count(*) AS c, min(id) AS keep_id "
+            "FROM users WHERE email IS NOT NULL AND email <> '' "
+            "GROUP BY lower(email) HAVING count(*) > 1"
+        ))).all()
+        for e, c, keep_id in dupes:
+            logger.warning(
+                "migration: 邮箱 %s 存在 %d 个大小写变体（保留 id=%s，其余置空）", e, c, keep_id
+            )
+            await conn.execute(
+                text(
+                    "UPDATE users SET email = NULL "
+                    "WHERE email IS NOT NULL AND lower(email) = :e AND id <> :keep"
+                ),
+                {"e": e, "keep": keep_id},
+            )
+        result = await conn.execute(text(
+            "UPDATE users SET email = lower(email) "
+            "WHERE email IS NOT NULL AND email <> lower(email)"
+        ))
+        if result.rowcount:
+            logger.info("migration: 已将 %d 个邮箱规范为小写", result.rowcount)
+        await _mark_migration(conn, "normalize_user_emails_lowercase")
+
     if not await _column_exists(conn, "users", "token_version"):
         logger.info("migration: adding users.token_version column")
         await conn.execute(

@@ -19,7 +19,7 @@ from app.core.websocket import manager
 from app.core.ws_ticket import consume_ticket
 from app.core.access_log import AccessLogMiddleware
 from app.core.etag import ETagMiddleware
-from app.core.audit import cleanup_expired_audit_logs
+from app.core.audit import cleanup_expired_audit_logs, cleanup_expired_password_reset_tokens
 from app.models import user, tournament, round, audit, password_reset  # noqa: F401
 from app.models.user import User
 
@@ -46,6 +46,8 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         # 启动时清理过期审计记录
         await cleanup_expired_audit_logs(conn)
+        # 以及已过期/已用的密码重置令牌（不清理会无界增长）
+        await cleanup_expired_password_reset_tokens(conn)
     yield
 
 

@@ -151,3 +151,23 @@ async def cleanup_expired_audit_logs(conn: AsyncConnection) -> None:
             logger.info("audit cleanup: removed %s expired records", result.rowcount)
     except Exception:
         logger.exception("audit cleanup failed")
+
+
+async def cleanup_expired_password_reset_tokens(conn: AsyncConnection) -> None:
+    """删除已过期或已使用的密码重置令牌行。
+
+    这类行不再有任何用途（明文令牌只存在于邮件里），但每次「申请找回」都会
+    插入一行并作废旧行，不清理会无界增长、唯一索引持续膨胀。
+    留 1 天缓冲是为了排查问题时还能看到最近的记录。
+    """
+    try:
+        result = await conn.execute(
+            text(
+                "DELETE FROM password_reset_tokens "
+                "WHERE expires_at < now() - interval '1 day'"
+            )
+        )
+        if result.rowcount:
+            logger.info("password_reset cleanup: removed %s expired tokens", result.rowcount)
+    except Exception:
+        logger.exception("password_reset cleanup failed")

@@ -1,5 +1,5 @@
 import os, re, secrets, uuid, logging, json, asyncio
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update, text
 from sqlalchemy.exc import IntegrityError
@@ -96,7 +96,9 @@ async def register(
     exist = await db.execute(select(User).where(User.username == req.username))
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
-    email_exist = await db.execute(select(User).where(User.email == email))
+    # 用 lower() 比较：历史数据里可能存了带大写的邮箱（早期 update_profile
+    # 只做了 strip 没做 lower），只比 == 会让 a@x.com 与 A@x.com 同时被占用
+    email_exist = await db.execute(select(User).where(func.lower(User.email) == email))
     if email_exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="邮箱已被使用")
 
@@ -169,10 +171,46 @@ async def login(
     return TokenResponse(access_token=token, user=_profile(user))
 
 
+async def _deliver_reset_mail(user_id: int, to_email: str, username: str, url: str, minutes: int) -> None:
+    """在响应返回之后发信，并记一条审计。
+
+    两个必须这样做的理由：
+    1) smtplib 是同步阻塞调用。放在请求路径上会独占事件循环 —— 实测一次
+       time.sleep(1) 就足以让心跳定时器抖动 999ms，也就是期间所有人的记分、
+       WebSocket 广播全部停摆。丢到线程里执行。
+    2) 放在请求路径上也构成**邮箱枚举的时间侧信道**：命中的分支要等完整一次
+       SMTP 会话（未配置时也有 ~11ms 的库操作差异，配置后是几百 ms 到秒级），
+       未命中的分支立刻返回。响应体一样但耗时可区分。
+    所以「发信」这一步彻底移出请求路径。
+    """
+    import asyncio as _asyncio
+    from app.core.mailer import send_password_reset
+    from app.core.database import async_session_factory
+    from app.models.user import User as _User
+
+    sent = await _asyncio.to_thread(send_password_reset, to_email, username, url, minutes)
+    if not sent:
+        logger.warning("密码重置邮件未发出（SMTP 未配置或发送失败）: user_id=%s", user_id)
+    try:
+        async with async_session_factory() as session:
+            u = (await session.execute(select(_User).where(_User.id == user_id))).scalar_one_or_none()
+            if u is not None:
+                await audit(
+                    user=u, action="password_reset_request",
+                    target_type="user", target_id=u.id,
+                    detail={"sent": sent},
+                )
+            await session.commit()
+    except Exception:
+        # 审计失败不能影响已经发出的邮件
+        logger.exception("写 password_reset_request 审计失败: user_id=%s", user_id)
+
+
 @router.post("/forgot-password")
 async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """申请找回密码：给该邮箱发一封带重置链接的邮件。
@@ -180,6 +218,9 @@ async def forgot_password(
     无论邮箱是否存在、是否配置了 SMTP，都返回同一句话 —— 否则这个接口就变成
     「任意人可批量探测某邮箱是否注册过」的工具（注册接口已经因为同类问题
     把占用性检查挪到了邀请码之后，这里同样不能泄露）。
+
+    注意**存在性分支与不存在分支必须走同样的库操作、同样的耗时**：
+    只在响应体上一致、耗时上差一截，一样能被批量测出邮箱是否注册。
     """
     ip = get_client_ip(request)
     if not forgot_limiter.check(ip):
@@ -189,29 +230,36 @@ async def forgot_password(
     email = (body.email or "").strip().lower()
     user = None
     if email:
-        result = await db.execute(select(User).where(User.email == email))
+        # 大小写不敏感匹配：库里可能存在历史遗留的带大写邮箱
+        # （早期 update_profile 只 strip 不 lower），只比 == 会让这些人
+        # 永远收不到重置邮件，且现象是「明明填过邮箱却提示未注册」。
+        # with_for_update：与签发令牌处的用户行锁配合，把同一用户的并发申请串行化
+        result = await db.execute(
+            select(User).where(func.lower(User.email) == email).with_for_update()
+        )
         user = result.scalar_one_or_none()
 
+    from app.core.password_reset import TOKEN_TTL_MINUTES
+
     if user is not None:
-        from app.core.password_reset import issue_reset_token, TOKEN_TTL_MINUTES
-        from app.core.mailer import send_password_reset
+        from app.core.password_reset import issue_reset_token
         token = await issue_reset_token(db, user.id, request_ip=ip)
         # token 放在 fragment（#）之后：不会随请求发给服务器，因此不进任何日志，
-        # 也不会通过 Referer 泄露给第三方
+        # 也不会通过 Referer 泄露给第三方（邮件安全网关预取 URL 也不会带上它，
+        # 因此不会误消费这张一次性令牌）
         url = f"{_settings.FRONTEND_URL.rstrip('/')}/reset-password#token={token}"
-        # 先提交再发信：邮件里带的是能改密码的凭证，若事务随后回滚会留下无效链接
         await db.commit()
-        sent = send_password_reset(user.email, user.username, url, TOKEN_TTL_MINUTES)
-        if not sent:
-            logger.warning(
-                "密码重置邮件未发出（SMTP 未配置或发送失败）: user_id=%s", user.id
-            )
-        await audit(
-            user=user, action="password_reset_request",
-            target_type="user", target_id=user.id,
-            detail={"sent": sent},
-            ip=ip, user_agent=request.headers.get("user-agent"),
+        # 发信交给后台任务：smtplib 是同步阻塞调用，放请求路径上既会卡住事件循环，
+        # 也会构成「命中的分支要等完整 SMTP 会话」的时间侧信道（响应体一样但耗时
+        # 差几百 ms~秒级，足以批量测出邮箱是否注册）
+        background_tasks.add_task(
+            _deliver_reset_mail, user.id, user.email, user.username, url, TOKEN_TTL_MINUTES
         )
+    else:
+        # 用户不存在：走同样的「提交」路径，把耗时可观察差异压到最小。
+        # 这里**故意不生成令牌**（user_id 是个不存在的值，插入会被外键拦下），
+        # 也就没有「幽灵令牌」可言 —— 而且不存在用户时根本无令牌可发。
+        await db.commit()
 
     return {"ok": True, "message": "如果该邮箱已注册，我们已发送重置邮件，请查收"}
 
@@ -364,12 +412,15 @@ async def update_profile(
         changes["gender"] = {"old": user.gender, "new": body.gender or None}
         user.gender = body.gender or None
     if body.email is not None:
-        email = body.email.strip() or None
+        # 统一转小写：注册与找回流程都按小写存/查，这里之前只 strip 不 lower，
+        # 于是用户填 MixedCase@Example.COM 会被原样入库，
+        # 之后「忘记密码」用小写查询永远命中不了该账号
+        email = body.email.strip().lower() or None
         if email:
             if not _is_valid_email(email):
                 raise HTTPException(status_code=400, detail="邮箱格式不正确")
             email_exist = await db.execute(
-                select(User).where(User.email == email, User.id != user.id)
+                select(User).where(func.lower(User.email) == email, User.id != user.id)
             )
             if email_exist.scalar_one_or_none():
                 raise HTTPException(status_code=400, detail="邮箱已被使用")
