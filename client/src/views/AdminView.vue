@@ -182,6 +182,18 @@ const actionOptions = computed(() => [
   ...Object.entries(ACTION_LABELS).map(([value, name]) => ({ name, value })),
 ])
 
+/**
+ * 按 key 追加去重。
+ *
+ * 两个日志列表都用 offset 分页，而日志是实时写入的：翻页期间有新记录插到
+ * 开头时，后续页会整体下移，同一条记录可能被追加两次 —— 模板用 id 作 key，
+ * Vue 会报重复 key 并渲染异常。
+ */
+function _dedupeBy<T>(existing: T[], incoming: T[], keyOf: (x: T) => string): T[] {
+  const seen = new Set(existing.map(keyOf))
+  return [...existing, ...incoming.filter(x => !seen.has(keyOf(x)))]
+}
+
 const auditLogs = ref<any[]>([])
 const auditPage = ref(1)
 const auditLoading = ref(false)
@@ -228,7 +240,11 @@ async function loadAuditLogs() {
     const res = await api.get('/auth/admin/audit-logs', { params, skipLoading: true } as any)
     if (gen !== auditGen) return   // 筛选已变化：丢弃这次的过期响应
     const data = res.data
-    auditLogs.value = reqPage === 1 ? data.items : [...auditLogs.value, ...data.items]
+    // offset 分页 + 实时写入：翻页期间若有新记录插到开头，后续页会整体下移，
+    // 同一 id 可能被追加两次（模板用 :key="a.id"，Vue 会报重复 key 并渲染异常）。
+    // 追加时按 id 去重。
+    const items = reqPage === 1 ? data.items : _dedupeBy(auditLogs.value, data.items, (x: any) => String(x.id))
+    auditLogs.value = items
     auditTotal.value = data.total
     // 空页也算到底：否则 van-list 会因为内容不满屏而反复发同一页
     auditFinished.value = auditLogs.value.length >= data.total || data.items.length === 0
@@ -324,7 +340,11 @@ async function loadAccessLogs() {
     const res = await api.get('/auth/admin/access-logs', { params, skipLoading: true } as any)
     if (gen !== accessGen) return   // 筛选已变化：丢弃过期响应
     const data = res.data
-    accessLogs.value = reqPage === 1 ? data.items : [...accessLogs.value, ...data.items]
+    // 访问日志没有 id 字段，用「时间+方法+路径+耗时」当自然键
+    accessLogs.value = reqPage === 1
+      ? data.items
+      : _dedupeBy(accessLogs.value, data.items,
+          (x: any) => `${x.time}|${x.method}|${x.path}|${x.duration_ms}`)
     accessTotal.value = data.total
     accessFinished.value = accessLogs.value.length >= data.total || data.items.length === 0
     accessPage.value = reqPage + 1
