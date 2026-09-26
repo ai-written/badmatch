@@ -11,9 +11,20 @@ API 响应 ETag 中间件。
 - 纯 ASGI 实现，不依赖 Starlette/FastAPI 类型，与 AccessLogMiddleware 一致
 """
 import hashlib
+import re
 
 _SKIP_PREFIXES = ("/static", "/ws", "/api/health")
 _CACHE_CONTROL = "private, no-cache"
+
+# 响应体里「每次都变」的字段：算 ETag 前先抹掉，否则 ETag 永不重复、304 永远不命中。
+# 目前只有 MatchOut.now（服务端当前时间，用于前端换算比赛耗时基准）。
+# 注意：只影响 ETag 计算，响应体里仍然带着真实值。
+_VOLATILE_JSON_FIELDS = re.compile(rb'"(now)"\s*:\s*"[^"]*"')
+
+
+def _strip_volatile(body: bytes) -> bytes:
+    """把易变字段替换为定值后再参与哈希，使内容未变的响应能命中 304。"""
+    return _VOLATILE_JSON_FIELDS.sub(rb'"\1":""', body)
 
 
 class ETagMiddleware:
@@ -55,7 +66,7 @@ class ETagMiddleware:
                 await send({"type": "http.response.body", "body": bytes(body), "more_body": False})
             return
 
-        etag = 'W/"' + hashlib.sha1(bytes(body)).hexdigest() + '"'
+        etag = 'W/"' + hashlib.sha1(_strip_volatile(bytes(body))).hexdigest() + '"'
         req_headers = {
             k.decode("latin-1").lower(): v.decode("latin-1")
             for k, v in scope.get("headers", [])
