@@ -18,11 +18,23 @@ export interface TournamentBrief {
 
 export const useTournamentStore = defineStore('tournament', () => {
   const list = ref<TournamentBrief[]>([])
-  const loading = ref(false)
+  // UI 的 loading 状态由 van-list 通过 v-model:loading 自己接管
+  // （它会在 check() 里置 true，并要求 @load 处理函数置回 false，否则不会再触发加载），
+  // 所以这里只用 busy 标记「请求进行中」，不与 v-model 抢同一个状态
+  const busy = ref(false)
   const total = ref(0)
   const hasMore = ref(false)
   const page = ref(0)
   const PAGE_SIZE = 20
+
+  // 请求世代号：丢弃迟到响应，避免并发请求各追加一次同一页
+  let reqSeq = 0
+  // 在途标记：调用方（HomeView）用它忽略请求期间新触发的 @load
+  let inFlight = false
+
+  function isBusy() {
+    return inFlight
+  }
 
   /**
    * 拉取赛事列表。
@@ -33,20 +45,30 @@ export const useTournamentStore = defineStore('tournament', () => {
    * 所以列表其实是一次性全量返回。
    */
   async function fetchList(status?: string, reset = true, skipLoading = false) {
-    loading.value = true
+    const seq = ++reqSeq
+    inFlight = true
+    busy.value = true
     try {
       const target = reset ? 1 : page.value + 1
       const params: Record<string, unknown> = { skip: (target - 1) * PAGE_SIZE, limit: PAGE_SIZE }
       if (status) params.status = status
       const res = await api.get('/tournaments', { params, skipLoading } as any)
+      if (seq !== reqSeq) return   // 已有更新的请求发出：本次结果作废
       const data = res.data || {}
       const items: TournamentBrief[] = Array.isArray(data.items) ? data.items : []
-      list.value = reset ? items : [...list.value, ...items]
+      // 列表按 created_at 倒序，翻页期间若有人在头部插入新赛事，offset 会整体下移，
+      // 导致同一 id 被追加两次（模板用 :key="t.id"，Vue 会报重复 key）。追加时按 id 去重。
+      const merged = reset ? items : [...list.value, ...items]
+      const seen = new Set<number>()
+      list.value = merged.filter(t => (seen.has(t.id) ? false : (seen.add(t.id), true)))
       total.value = typeof data.total === 'number' ? data.total : list.value.length
       hasMore.value = !!data.has_more
       page.value = target
     } finally {
-      loading.value = false
+      if (seq === reqSeq) {
+        inFlight = false
+        busy.value = false
+      }
     }
   }
 
@@ -57,5 +79,5 @@ export const useTournamentStore = defineStore('tournament', () => {
     page.value = 0
   }
 
-  return { list, loading, total, hasMore, page, fetchList, reset }
+  return { list, busy, total, hasMore, page, fetchList, reset, isBusy }
 })

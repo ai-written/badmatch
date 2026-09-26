@@ -61,15 +61,20 @@ import { ref } from 'vue'
 import { useTournamentStore } from '@/stores/tournament'
 
 const store = useTournamentStore()
-// 解构成本地 ref 而不是继续用 store.xxx：解构 Pinia 的 state 会丢响应式，
-// 本地 ref 是同一份引用，赋值后依然能触发视图更新
+// 解构 store 的 state 会丢响应式，因此列表用本地 ref 镜像；
+// loading 则完全由 van-list 通过 v-model:loading 接管：
+// 它在 check() 里置为 true，并要求 @load 处理函数结束时置回 false，
+// 否则内部 loading 一直为 true，之后不会再触发加载（分页失效）。
+// 注意不能用 ref(store.xxx) 去「共享」另一个 ref —— 那只是取值，不是同一个引用。
 const list = ref(store.list)
-const loading = ref(store.loading)
+const loading = ref(false)
 const refreshing = ref(false)
 const finished = ref(false)
 // van-list 的错误态：置位后停止自动加载，点错误文案可重试
 const loadError = ref(false)
 const firstLoadFailed = ref(false)
+// 是否已经发起过首次加载（同步标记，见 onLoad 的说明）
+let firstLoadDone = false
 
 function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
 function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.registration_open_at).getTime() > Date.now() }
@@ -86,9 +91,18 @@ function fmtDateTime(start: string, end: string) {
 }
 
 async function onLoad() {
-  // 首次进入：van-list 在挂载时会自动触发一次 @load，与下拉刷新的初始 check 可能重叠；
-  // 用 store.page 判断，避免同一次进入把第一页拉两遍
-  const reset = store.page === 0
+  // van-list 在挂载阶段会连续触发多次 @load：初始 check 一次，之后每次
+  // loading/finished/error 变化又会重新 check（见 vant 的
+  // watch(() => [props.loading, props.finished, props.error], check)）。
+  // 这些触发都在首个请求完成【之前】，所以不能用「请求完成后的状态」判断首次，
+  // 也不能让它们并发 —— 否则会各自请求一次、page 被重复自增。
+  //
+  // 处理办法：
+  //   1) 用同步标记判断首次（第一次调用进入时立刻置位）
+  //   2) 请求在途时直接返回；van-list 会在 loading 复位后再 check，届时会重新触发
+  const reset = !firstLoadDone
+  if (!reset && store.isBusy()) return
+  firstLoadDone = true
   try {
     await store.fetchList(undefined, reset, !reset)
     list.value = store.list
@@ -103,6 +117,9 @@ async function onLoad() {
     } else {
       loadError.value = true  // 追加失败：保留已加载内容，点错误文案可重试
     }
+  } finally {
+    // 必须置回 false（会通过 v-model:loading 通知 van-list 本次加载结束）
+    loading.value = false
   }
 }
 
@@ -118,6 +135,9 @@ async function onRefresh() {
     finished.value = true
   } finally {
     loadError.value = false
+    // 注意：这里不要再动 loading。它是 van-list 通过 v-model:loading 管理的，
+    // 而 vant 会 watch loading 的变化再次 check()；在刷新请求结束时手动置 false
+    // 会在「追加请求仍在途」时解锁 van-list，导致同一页被追加两次。
     refreshing.value = false
   }
 }
