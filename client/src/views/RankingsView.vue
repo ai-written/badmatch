@@ -47,6 +47,7 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
 
 const route = useRoute()
@@ -78,7 +79,10 @@ async function fetchRankings(skipLoading = false) {
 async function onRefresh() {
   try { await fetchRankings(true) } finally { refreshing.value = false }
 }
-watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRankings() })
+// 后台静默刷新：实时广播触发，不弹全局「加载中...」
+watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRankings(true) })
+// 锁屏/后台返回时补一次刷新（冻结期间 WebSocket 可能已断，不再收得到广播）
+useResumeRefresh(() => fetchRankings(true))
 onMounted(async () => {
   await Promise.all([auth.fetchMe(), fetchRankings()])
 })
