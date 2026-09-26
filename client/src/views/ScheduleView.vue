@@ -9,7 +9,15 @@
     <div class="schedule-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-    <div v-if="rounds.length === 0" class="empty-block">
+    <div v-if="rounds.length === 0 && loadFailed" class="empty-block">
+      <div class="load-failed">
+        <van-icon name="warning-o" size="22" />
+        <span>赛程加载失败</span>
+        <span class="load-failed-sub">赛事可能已被删除，或网络异常</span>
+        <van-button size="small" round plain type="primary" @click="onRefresh">重试</van-button>
+      </div>
+    </div>
+    <div v-else-if="rounds.length === 0" class="empty-block">
       <van-empty description="暂无赛程" />
     </div>
 
@@ -125,6 +133,8 @@ const auth = useAuthStore()
 const { goBack } = useGoBack()
 const refreshing = ref(false)
 const rounds = ref<any[]>([])
+// 加载失败（赛事不存在/网络异常）与「暂无赛程」必须区分开
+const loadFailed = ref(false)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 function isMyMatch(m: any) {
@@ -139,8 +149,16 @@ function fmtDuration(sec: number) {
 }
 
 async function fetchRounds(skipLoading = false) {
-  const res = await api.get(`/tournaments/${route.params.id}/rounds`, { skipLoading } as any)
-  rounds.value = res.data
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/rounds`, { skipLoading } as any)
+    rounds.value = res.data
+    loadFailed.value = false
+  } catch (e) {
+    // 赛事不存在（后端现在返回 404）或网络异常：
+    // 不能让它显示成「暂无赛程」——那是「赛事还没有比赛」的意思，两回事
+    if (rounds.value.length === 0) loadFailed.value = true
+    throw e
+  }
 }
 
 function goScore(m: any) {
@@ -162,11 +180,17 @@ async function claimReferee(m: any) {
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
 // 后台静默刷新：实时广播触发，不弹全局「加载中...」
-watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRounds(true) })
+watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRounds(true).catch(() => {}) })
 // 锁屏/后台返回时补一次刷新（冻结期间 WebSocket 可能已断，不再收得到广播）
-useResumeRefresh(() => fetchRounds(true))
+useResumeRefresh(async () => { await fetchRounds(true) })
 async function onRefresh() {
-  try { await fetchRounds(true) } finally { refreshing.value = false }
+  try {
+    await fetchRounds(true)
+  } catch {
+    // 失败态已由 fetchRounds 置位；拦截器也已提示
+  } finally {
+    refreshing.value = false
+  }
 }
 // --- 隐藏较早的已完成比赛 ---
 // 默认只保留最后 1 场已完成的比赛，其余折叠；点击提示条可全部展开。
@@ -240,7 +264,7 @@ onUnmounted(() => {
   if (highlightTimer) clearTimeout(highlightTimer)
 })
 
-onMounted(() => fetchRounds())
+onMounted(() => { fetchRounds().catch(() => {}) })
 </script>
 
 <style scoped>
@@ -251,6 +275,11 @@ onMounted(() => fetchRounds())
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
 .empty-block { padding-top: 80px; }
+.load-failed {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  color: #969799; font-size: 14px; text-align: center;
+}
+.load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px; }
 .round-section { margin: 0 12px; }
 
 /* 导航栏右侧的积分榜入口 */

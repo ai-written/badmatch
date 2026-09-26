@@ -616,6 +616,11 @@ async def _broadcast_match(m: Match, tournament_id: int) -> None:
         "match_id": m.id,
         "score_a": m.score_a,
         "score_b": m.score_b,
+        # 胜方必须带上：观众端靠它渲染胜方高亮与 🏆。
+        # 缺了它的话，比赛结束的广播里 status 已是 finished，而胜方永远是空的——
+        # 且此后不会再有任何补拉（30 秒校准只在 ongoing 时执行），
+        # 观众只能退出重进才能看到结果。
+        "winner_pairing_id": m.winner_pairing_id,
         "status": m.status.value,
         # 必须带上真实的 started_at：客户端用 (now - started_at) 换算耗时。
         # 只给 now 的话，每次记分都被当成「刚刚开始」，计时器会归零重走。

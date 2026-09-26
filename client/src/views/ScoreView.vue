@@ -10,7 +10,13 @@
       </template>
     </van-nav-bar>
 
-    <van-loading v-if="!match" class="loading" />
+    <van-loading v-if="!match && !loadFailed" class="loading" />
+    <div v-else-if="!match && loadFailed" class="load-failed">
+      <van-icon name="warning-o" size="24" />
+      <p>比赛加载失败</p>
+      <p class="load-failed-sub">比赛可能已被删除，或网络异常</p>
+      <van-button size="small" round plain type="primary" @click="goBack">返回</van-button>
+    </div>
     <template v-else>
       <div v-if="readOnly" class="readonly-banner">
         <van-icon name="lock" />
@@ -152,6 +158,9 @@ const { goBack } = useGoBack()
 const matchNum = computed(() => route.query.num ? `第${route.query.num}场` : '记分')
 const auth = useAuthStore()
 const match = ref<any>(null)
+// 比赛不存在（或直链失效、网络异常）时的失败态：
+// 原先只有 loading 分支，这些情况会永远转圈且没有返回入口
+const loadFailed = ref(false)
 // 左右场地交换改为服务端状态（仅裁判可操作），所有人实时同步。
 // 这里不再保留本地 ref，避免出现「双数据源」导致各端不一致。
 const swapped = computed(() => !!match.value?.is_swapped)
@@ -193,7 +202,8 @@ watch(
 )
 // 每 30s 拉一次校准（服务端有 ETag，内容未变时只回 304，开销很小）
 const calibrateTimer = setInterval(() => {
-  if (match.value?.status === 'ongoing') fetchMatch()
+  // 挂 catch：离线时这个定时器会每 30 秒产生一次未处理的 Promise 拒绝
+  if (match.value?.status === 'ongoing') fetchMatch().catch(() => {})
 }, 30000)
 // --- 时长逻辑结束 ---
 
@@ -263,15 +273,23 @@ function swapTeams() {
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
-  const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
-  // 本地有尚未提交的乐观比分时予以保留：否则响应里还是旧比分，
-  // 会把裁判刚点的那一分覆盖回去（随后 flush 才写回，表现为闪一下）
-  if (pendingScore && match.value) {
-    res.data.score_a = match.value.score_a
-    res.data.score_b = match.value.score_b
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
+    // 本地有尚未提交的乐观比分时予以保留：否则响应里还是旧比分，
+    // 会把裁判刚点的那一分覆盖回去（随后 flush 才写回，表现为闪一下）
+    if (pendingScore && match.value) {
+      res.data.score_a = match.value.score_a
+      res.data.score_b = match.value.score_b
+    }
+    match.value = res.data
+    syncTimerAnchor()
+    loadFailed.value = false
+  } catch (e) {
+    // 比赛不存在/已删除或网络异常：原先页面会永远停在 loading 转圈，
+    // 没有任何返回或重试入口，只能靠浏览器后退
+    if (!match.value) loadFailed.value = true
+    throw e
   }
-  match.value = res.data
-  syncTimerAnchor()
 }
 
 async function doSupport(side: string) {
@@ -370,15 +388,25 @@ async function endMatch() {
 }
 
 async function claimReferee() {
-  await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/claim-referee`)
-  showToast('认领成功')
-  await fetchMatch()
+  try {
+    await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/claim-referee`)
+    showToast('认领成功')
+  } catch {
+    // 并发认领被别人抢先（400）、或赛事已结束：拦截器已提示。
+    // 这里不往外抛，避免未处理的 Promise 拒绝
+  } finally {
+    // 无论成功失败都刷新：失败时界面需要从「可认领」更新为真实状态
+    await fetchMatch().catch(() => {})
+  }
 }
 
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
 watch(lastMessage, (msg) => {
   if (!msg) return
+  // match 还没加载出来（首屏请求未返回或失败）时不要往下走：
+  // 否则下面几处 match.value.x 会抛 TypeError，这次实时更新就丢了
+  if (!match.value) return
   if (msg.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) {
     if (!pendingScore) {
       if (msg.score_a != null) match.value.score_a = msg.score_a
@@ -401,6 +429,8 @@ watch(lastMessage, (msg) => {
       }
       // 比赛结束的广播会带上最终耗时，直接采用，省一次请求
       if (msg.duration_seconds != null) match.value.duration_seconds = msg.duration_seconds
+      // 胜方也要采用，否则观众看不到胜方高亮/🏆（结束之后不会再有任何补拉）
+      if (msg.winner_pairing_id != null) match.value.winner_pairing_id = msg.winner_pairing_id
     }
     // 裁判交换场地后，所有正在看这场的人一起切换
     if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
@@ -408,16 +438,22 @@ watch(lastMessage, (msg) => {
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
     match.value.support_a = msg.support_a
     match.value.support_b = msg.support_b
-    fetchMatch()
+    fetchMatch().catch(() => {})
   }
 })
 
 // 锁屏/后台返回时补一次刷新：冻结期间定时器与 WebSocket 都可能失效，
 // 回来时主动拉取，保证比分、状态与耗时都是最新的
-useResumeRefresh(() => fetchMatch())
+useResumeRefresh(async () => {
+  await fetchMatch()
+})
 
 onMounted(async () => {
-  await Promise.all([auth.fetchMe(), fetchMatch()])
+  try {
+    await Promise.all([auth.fetchMe(), fetchMatch()])
+  } catch {
+    // fetchMatch 已把 loadFailed 置位，界面显示失败态；拦截器也已提示
+  }
 })
 
 onUnmounted(() => {
@@ -435,6 +471,12 @@ onUnmounted(() => {
   background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
 }
 .loading { display: flex; justify-content: center; margin-top: 120px; }
+.load-failed {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 100px 24px 0; color: #969799; font-size: 14px; text-align: center;
+}
+.load-failed p { margin: 0; }
+.load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px !important; }
 /* 导航栏中间：场次（耗时）。用等宽数字，避免计时跳秒时标题左右抖动 */
 .nav-title { font-variant-numeric: tabular-nums; }
 /* 比赛超过最长时长（多半忘记结束）时用醒目色提示 */

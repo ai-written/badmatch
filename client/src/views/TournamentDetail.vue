@@ -62,6 +62,7 @@
             <span class="player-time">{{ formatTime(r.created_at) }}</span>
           </div>
         </div>
+        <p v-else-if="regsFailed" class="empty-hint">报名列表加载失败，请下拉重试</p>
         <p v-else class="empty-hint">暂无报名</p>
       </div>
 
@@ -170,6 +171,8 @@ const submitting = ref(false)
 // 赛事不存在/加载失败：原先只有 loading 分支，404 会永远转圈
 const loadFailed = ref(false)
 const registrations = ref<any[]>([])
+// 报名列表拉取失败（与「暂无报名」区分开）
+const regsFailed = ref(false)
 const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
 const showTransferPicker = ref(false)
@@ -276,8 +279,15 @@ async function fetchDetail(skipLoading = false) {
   }
 }
 async function fetchRegistrations(skipLoading = false) {
-  const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
-  registrations.value = res.data
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
+    registrations.value = res.data
+    regsFailed.value = false
+  } catch (e) {
+    // 不能把「拉取失败」显示成「暂无报名」：那是两回事（与战绩处同一标准）
+    if (registrations.value.length === 0) regsFailed.value = true
+    throw e
+  }
 }
 /** 写操作统一包一层：进行中忽略重复点击，结束后必定复位 */
 async function withSubmitting(fn: () => Promise<void>) {
@@ -366,8 +376,15 @@ function selectMatchStart(total: number) {
 
 async function doStartWithTotal() {
   await withSubmitting(async () => {
-    await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
-    showToast('比赛已开始')
+    const res = await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
+    const actual = res.data?.total_matches ?? res.data?.matches
+    // 服务端在个别组合下排不出请求的场次（贪婪排程的边界），会退到可行的最小场次，
+    // 此时要告知用户实际场次，避免与自己的选择不符却毫无提示
+    if (actual != null && Number(actual) !== Number(matchTotal.value)) {
+      showToast(`所选场次无法排出，已按 ${actual} 场开赛`)
+    } else {
+      showToast('比赛已开始')
+    }
     await fetchDetail()
   })
 }
@@ -386,8 +403,13 @@ async function doStart() {
     return
   }
   await withSubmitting(async () => {
-    await api.post(`/tournaments/${route.params.id}/start`)
-    showToast('比赛已开始')
+    const res = await api.post(`/tournaments/${route.params.id}/start`)
+    const actual = res.data?.total_matches ?? res.data?.matches
+    if (actual != null && Number(actual) !== Number(tournament.value?.total_matches ?? actual)) {
+      showToast(`所选场次无法排出，已按 ${actual} 场开赛`)
+    } else {
+      showToast('比赛已开始')
+    }
     await fetchDetail()
   })
 }
