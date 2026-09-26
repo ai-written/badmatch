@@ -208,12 +208,24 @@ async def withdraw_player(
 
     ps.is_active = False
 
-    from app.models.user import User as UserModel
     # handle creator transfer
     if tournament.creator_id == player_id and body.new_creator_id:
-        new_creator = await db.execute(select(UserModel).where(UserModel.id == body.new_creator_id))
-        if new_creator.scalar_one_or_none():
-            tournament.creator_id = body.new_creator_id
+        # 新房主必须是本赛事「当前在场」的选手，且不能是自己。
+        # 原先只校验「该用户存在」，于是可以传任意用户 id（已退赛的、
+        # 从没报名的、甚至自己），把房主转给一个不在场的人 ——
+        # 前端虽然限制了候选范围，但那是客户端校验，接口必须自己兜住。
+        if body.new_creator_id == player_id:
+            raise HTTPException(status_code=400, detail="不能把房主转让给自己")
+        ok_new = await db.execute(
+            select(PlayerStats).where(
+                PlayerStats.tournament_id == tournament_id,
+                PlayerStats.user_id == body.new_creator_id,
+                PlayerStats.is_active == True,
+            )
+        )
+        if ok_new.scalar_one_or_none() is None:
+            raise HTTPException(status_code=400, detail="新房主必须是本赛事在场选手")
+        tournament.creator_id = body.new_creator_id
     elif tournament.creator_id == player_id:
         remaining_players = await db.execute(
             select(PlayerStats.user_id).where(

@@ -9,7 +9,13 @@
     <div class="detail-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-    <van-loading v-if="!tournament" class="loading" />
+    <van-loading v-if="!tournament && !loadFailed" class="loading" />
+    <div v-else-if="!tournament && loadFailed" class="load-failed">
+      <van-icon name="warning-o" size="24" />
+      <p>赛事加载失败</p>
+      <p class="load-failed-sub">赛事可能已被删除，或网络异常</p>
+      <van-button size="small" round plain type="primary" @click="goBack">返回</van-button>
+    </div>
     <template v-else>
       <div class="info-card">
         <div class="info-head">
@@ -72,7 +78,7 @@
 
       <div class="creator-block" v-if="isCreator && tournament.status === 'open'">
         <van-button type="danger" block round @click="doStart" :disabled="tournament.registered_count < 4">
-          开始比赛（需满 {{ Math.max(4 - tournament.registered_count, 0) }} 人）
+          开始比赛<template v-if="tournament.registered_count < 4">（还需 {{ 4 - tournament.registered_count }} 人）</template>
         </van-button>
       </div>
 
@@ -91,7 +97,7 @@
             </van-cell>
             <van-cell title="参赛次数" :value="String(playerStats.tournaments_played)" />
           </van-cell-group>
-          <van-empty v-else description="暂无比赛记录" />
+          <van-empty v-else :description="statsFailed ? '战绩加载失败，请重试' : '暂无比赛记录'" />
         </div>
       </van-popup>
 
@@ -144,6 +150,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
 import { showToast, showConfirmDialog } from 'vant'
 
@@ -156,6 +163,8 @@ const { lastMessage } = useWebSocket(tid)
 
 const refreshing = ref(false)
 const tournament = ref<any>(null)
+// 赛事不存在/加载失败：原先只有 loading 分支，404 会永远转圈
+const loadFailed = ref(false)
 const registrations = ref<any[]>([])
 const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
@@ -165,6 +174,7 @@ const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const matchTotal = ref(0)
 const playerDetail = ref<any>({})
 const playerStats = ref<any>({})
+const statsFailed = ref(false)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 // --- 定时开放报名倒计时（以服务端时间校准客户端时钟偏差）---
@@ -231,18 +241,29 @@ function formatTime(d: string) { if (!d) return ''; return d.replace('T', ' ').s
 async function viewPlayer(r: any) {
   playerDetail.value = r
   showPlayerStats.value = true
+  statsFailed.value = false
+  playerStats.value = {}
   try {
     const res = await api.get(`/auth/stats/${r.user_id}`)
     playerStats.value = res.data
   } catch {
-    playerStats.value = {}
+    // 不能把「拉取失败」显示成「暂无比赛记录」——那是两回事
+    statsFailed.value = true
   }
 }
 
 async function fetchDetail(skipLoading = false) {
-  const res = await api.get(`/tournaments/${route.params.id}`, { skipLoading } as any)
-  tournament.value = res.data
-  syncServerClock(res.data.server_now)
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}`, { skipLoading } as any)
+    tournament.value = res.data
+    syncServerClock(res.data.server_now)
+    loadFailed.value = false
+  } catch (e: any) {
+    // 赛事被删除或直链失效时，原先页面会永远停在 loading 转圈；
+    // 这里给出明确的失败态（含返回入口）
+    if (!tournament.value) loadFailed.value = true
+    throw e
+  }
 }
 async function fetchRegistrations(skipLoading = false) {
   const res = await api.get(`/tournaments/${route.params.id}/registrations`, { skipLoading } as any)
@@ -336,21 +357,44 @@ async function doEndTournament() {
 async function onRefresh() {
   try {
     await Promise.all([fetchDetail(true), fetchRegistrations(true)])
+  } catch {
+    // 失败时保持现有内容，交给拦截器提示
   } finally {
+    // 幂等重启：即使首屏加载失败导致定时器没建起来，下拉刷新也能救回来
+    startCountdown()
     refreshing.value = false
   }
 }
 
-// 后台静默刷新：实时广播触发，不弹全局「加载中...」
-watch(lastMessage, () => {
-  fetchDetail(true)
-  fetchRegistrations(true)
+// 后台静默刷新：只在「影响本页」的广播上触发。
+// 不能无条件刷新——每记一分都会广播 match_updated，那会让每场记分都空拉两个接口。
+watch(lastMessage, (msg) => {
+  const t = msg?.type
+  if (t === 'registration_updated' || t === 'tournament_started' || t === 'tournament_finished') {
+    fetchDetail(true)
+    fetchRegistrations(true)
+  }
+})
+
+// 锁屏/切后台回到前台时补一次刷新：本页虽订阅了 WebSocket，
+// 但连接被冻结后既收不到 close 也不会立刻恢复（存活判定在 30s 心跳上做，
+// 最坏要一个多心跳周期），期间赛事可能已被别人开始/结束，页面却还是旧状态。
+useResumeRefresh(async () => {
+  await Promise.all([fetchDetail(true), fetchRegistrations(true)])
 })
 
 onMounted(async () => {
-  await Promise.all([auth.fetchMe(), fetchDetail(), fetchRegistrations()])
+  // 定时器与监听必须建在 await 之前：
+  // 如果首次加载失败（网络抖动、5xx、超时），await 会抛出，
+  // 后面的 startCountdown() 就永远不执行 —— 倒计时冻结在初始值、
+  // openLocked 恒为 true，「立即报名」会永久禁用，只能刷新浏览器才恢复。
   startCountdown()
   document.addEventListener('visibilitychange', onVisibilityChange)
+  try {
+    await Promise.all([auth.fetchMe(), fetchDetail(), fetchRegistrations()])
+  } catch {
+    // 拦截器已弹错误提示；下拉刷新可恢复
+  }
 })
 onUnmounted(() => {
   stopCountdown()
@@ -365,6 +409,12 @@ onUnmounted(() => {
 .pull-inner { padding-bottom: 60px; }
 .stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
+.load-failed {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 100px 24px 0; color: #969799; font-size: 14px; text-align: center;
+}
+.load-failed p { margin: 0; }
+.load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px !important; }
 .info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
 .reg-countdown { text-align: center; color: #ff976a; font-size: 14px; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
 .info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
