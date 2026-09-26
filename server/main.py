@@ -101,6 +101,12 @@ async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
     await manager.connect(tournament_id, websocket, user.id)
     try:
         while True:
-            await websocket.receive_text()
+            # 客户端每 30s 发一次应用层 ping 用于保活。
+            # 必须回 pong：否则这条连接对反向代理而言是「只读不写」，
+            # nginx 的 proxy_read_timeout 到点就会把空闲连接掐断，
+            # 表现为前端反复重连。这里回包形成双向流量，连接才能长稳。
+            text = await websocket.receive_text()
+            if text == "ping":
+                await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
         manager.disconnect(tournament_id, websocket)

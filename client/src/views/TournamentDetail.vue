@@ -335,9 +335,10 @@ async function onRefresh() {
   }
 }
 
+// 后台静默刷新：实时广播触发，不弹全局「加载中...」
 watch(lastMessage, () => {
-  fetchDetail()
-  fetchRegistrations()
+  fetchDetail(true)
+  fetchRegistrations(true)
 })
 
 onMounted(async () => {
