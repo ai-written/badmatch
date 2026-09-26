@@ -77,7 +77,12 @@ api.interceptors.response.use(
       toastError(detail || '资源不存在')
     } else if (status === 422) {
       if (Array.isArray(detail)) {
-        const msg = detail.map((d: any) => d.msg).join('；')
+        // Pydantic 会把自定义校验消息包成「Value error, 结束时间必须晚于开始时间」，
+        // 去掉这个前缀，用户看到的才是纯中文提示
+        const msg = detail
+          .map((d: any) => String(d?.msg ?? '').replace(/^Value error,\s*/, ''))
+          .filter(Boolean)
+          .join('；')
         toastError(msg || '请求参数错误')
       } else {
         toastError(detail || '请求参数错误')

@@ -549,16 +549,24 @@ async def list_access_logs(
 
 def _read_access_log_lines(path: str, max_bytes: int = 1024 * 1024) -> list[str]:
     """读取访问日志文件（最多读取末尾 max_bytes 字节，默认 1MB ≈ 数千条记录，
-    控制内存/耗时；更早记录在轮转文件 access.log.1~N 中）。文件不存在返回空。"""
+    控制内存/耗时；更早记录在轮转文件 access.log.1~N 中）。文件不存在返回空。
+
+    必须按二进制读再解码：文本模式下 seek 到任意字节偏移可能恰好落在
+    一个多字节 UTF-8 字符中间（日志里有中文用户名/查询词），解码器会抛
+    UnicodeDecodeError —— 它是 ValueError 的子类，下面只捕获 OSError 是拦不住的，
+    结果管理页的访问日志接口会直接 500。errors="replace" 只影响被截断的那一行，
+    而解析处的 try 本来就会跳过坏行。
+    """
     if not path or not os.path.isfile(path):
         return []
     try:
         size = os.path.getsize(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "rb") as f:
             if size > max_bytes:
                 f.seek(size - max_bytes)
                 f.readline()  # 丢弃可能不完整的首行
-            return f.readlines()
+            data = f.read()
+        return data.decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
 
