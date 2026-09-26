@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import noload
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
 from app.core.security import require_user, get_current_user
@@ -19,6 +20,34 @@ from app.schemas.tournament import (
 
 router = APIRouter(prefix="/api/tournaments", tags=["tournaments"])
 
+_brief_loads_cache: tuple | None = None
+
+
+def _brief_loads() -> tuple:
+    """「只要赛事本身」的加载选项。
+
+    Tournament 上的关联都是 lazy="selectin"，默认会把 registrations / courts /
+    rounds / matches / player_stats 全部查回来（matches 下还有二级 selectin：
+    round_pairings、pairing_a/b、time_slots），而这些接口只用赛事自身的字段，
+    报名数和场地由各自的批量查询给出。
+    实测 3 个赛事的列表：不做处理会执行 14 条 SQL（其中 10 条在拉整张
+    matches / round_pairings / player_stats / time_slots 表），加上后降到 4 条。
+
+    注意必须在调用时构建，不能写成模块级常量：noload() 会立即触发
+    mapper 配置，而 import 阶段各模型尚未全部注册（User 的关系里引用了
+    Match），会直接抛 InvalidRequestError 让整个模块导入失败。
+    """
+    global _brief_loads_cache
+    if _brief_loads_cache is None:
+        _brief_loads_cache = (
+            noload(Tournament.registrations),
+            noload(Tournament.courts),
+            noload(Tournament.rounds),
+            noload(Tournament.matches),
+            noload(Tournament.player_stats),
+        )
+    return _brief_loads_cache
+
 
 @router.get("", response_model=TournamentListOut)
 async def list_tournaments(
@@ -29,7 +58,9 @@ async def list_tournaments(
 ):
     skip = max(0, skip)
     limit = max(1, min(limit, 100))
-    query = select(Tournament)
+    # 列表只需要赛事本身的字段（报名数与首场地由下面两条批量查询给出）。
+    # 关联的懒加载配置见 _brief_loads() 的注释。
+    query = select(Tournament).options(*_brief_loads())
     if status:
         query = query.where(Tournament.status == status)
     total = (await db.execute(
@@ -58,9 +89,11 @@ async def list_tournaments(
     count_map = dict(cnt_result.all())
 
     # 批量首场地：一次查所有场地，Python 侧取每赛事 sort_order 最小者（1 次查询替代 N 次）
+    # 只要场地名，不需要时间段
     court_result = await db.execute(
         select(Court)
         .where(Court.tournament_id.in_(tournament_ids))
+        .options(noload(Court.time_slots))
         .order_by(Court.tournament_id, Court.sort_order)
     )
     first_court_map: dict[int, Court] = {}
@@ -267,7 +300,7 @@ async def get_tournament(
     user: User | None = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id)
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads())
     )
     t = result.scalar_one_or_none()
     if not t:
@@ -282,7 +315,9 @@ async def delete_tournament(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads())
+    )
     t = result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
