@@ -3,10 +3,10 @@
     <van-nav-bar title="重置密码" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="rp-scroll">
-      <div v-if="!token" class="rp-block">
+      <div v-if="!token || tokenDead" class="rp-block">
         <van-icon name="warning-o" size="24" />
-        <p>链接无效</p>
-        <p class="rp-sub">没有找到重置凭证。请回到「找回密码」重新申请一次。</p>
+        <p>{{ tokenDead ? '链接已失效' : '链接无效' }}</p>
+        <p class="rp-sub">{{ deadReason || '没有找到重置凭证。' }}请重新申请一次。</p>
         <van-button size="small" round type="primary" @click="$router.replace('/forgot-password')">
           重新申请
         </van-button>
@@ -20,7 +20,8 @@
               v-model="password"
               label="新密码"
               type="password"
-              placeholder="至少 6 位"
+              placeholder="6 位以上"
+              maxlength="30"
               required
               :rules="[{ required: true, message: '请输入新密码' }, { pattern: /^.{6,}$/, message: '密码至少 6 位' }]"
             />
@@ -29,6 +30,7 @@
               label="确认密码"
               type="password"
               placeholder="再次输入新密码"
+              maxlength="30"
               required
               :rules="[{ required: true, message: '请再次输入新密码' }, { validator: sameAsPassword, message: '两次输入的密码不一致' }]"
             />
@@ -61,6 +63,10 @@ const password = ref('')
 const confirm = ref('')
 const submitting = ref(false)
 const done = ref(false)
+// 令牌被服务端判为无效/过期：此时留在表单上没有意义（再点还是失败），
+// 直接切到「重新申请」出口
+const tokenDead = ref(false)
+const deadReason = ref('')
 
 function sameAsPassword(v: string) {
   return v === password.value
@@ -70,11 +76,21 @@ onMounted(() => {
   // 令牌放在 URL 的 # 之后（fragment）：浏览器不会把它发给服务器，
   // 因此不会进入 nginx/应用访问日志，也不会通过 Referer 泄露出去。
   const m = /(?:^|[#&])token=([^&]+)/.exec(location.hash || '')
-  if (m) token.value = decodeURIComponent(m[1])
-  // 读到就立刻从地址栏清掉：否则它会留在浏览器历史、截图、以及用户随后
-  // 复制分享出去的链接里
+  if (m) {
+    try {
+      token.value = decodeURIComponent(m[1])
+    } catch {
+      // 邮件网关改写链接等导致的畸形百分号转义：原样用，让服务端去判无效，
+      // 不要在这里抛 URIError（会跳过后面的地址栏清理）
+      token.value = m[1]
+    }
+  }
   if (location.hash) {
-    history.replaceState(null, '', location.pathname + location.search)
+    // 读到就立刻从地址栏清掉：否则它会留在浏览器历史、截图、以及用户随后
+    // 复制分享出去的链接里。
+    // 传 history.state 而不是 null：vue-router 依赖它记录 back/forward 位置，
+    // 传 null 会让本页的「返回」退化成回首页。
+    history.replaceState(history.state, '', location.pathname + location.search)
   }
 })
 
@@ -82,13 +98,26 @@ async function onSubmit() {
   if (submitting.value) return
   submitting.value = true
   try {
-    await api.post('/auth/reset-password', { token: token.value, new_password: password.value })
+    // skipGlobalError：错误文案由本页决定（拦截器再弹一次会重复提示）
+    await api.post(
+      '/auth/reset-password',
+      { token: token.value, new_password: password.value },
+      { skipGlobalError: true } as any,
+    )
     done.value = true
   } catch (e: any) {
+    const status = e?.response?.status
     const detail = e?.response?.data?.detail
-    // 令牌无效/过期时给出可操作的下一步，而不是只有一句报错
-    if (e?.response?.status === 400) {
-      showToast(detail || '重置链接无效或已过期')
+    if (status === 400) {
+      // 令牌无效/过期：切到可恢复的状态，而不是让用户对着死表单反复点
+      tokenDead.value = true
+      deadReason.value = (typeof detail === 'string' && detail) || ''
+    } else if (status === 429) {
+      showToast('操作过于频繁，请稍后再试')
+    } else if (status === 422) {
+      showToast('密码格式不符合要求')
+    } else {
+      showToast('网络异常，请稍后重试')
     }
   } finally {
     submitting.value = false
