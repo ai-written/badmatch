@@ -23,14 +23,18 @@ a { text-decoration: none; color: inherit; }
 }
 
 /* 页面根容器：占满可见高度。
- * 四层写法逐级增强——老内核用 100vh，有 var 的用 --vh，有 env 的再让出顶部安全区，
- * 有 dvh 的内核用最优解。任何一层不被支持都会被前一层接住，而不是塌成 auto。 */
+ * 三层写法逐级增强——老内核用 100vh；有 var 的用 JS 同步来的 --vh；
+ * 有 env 的再让出顶部安全区。任何一层不被支持都会被前一层接住，而不是塌成 auto。
+ *
+ * 这里**故意不用 100dvh**：dvh 是"跟随浏览器 UI 动态变化"的单位，在 iOS 上键盘弹缩时
+ * 它也会跟着变，而且可能停在键盘态。它排在最后会静默覆盖 --vh，让 JS 侧的同步
+ * （含 innerHeight、pageshow、touch 时的重算）全部失效——线上实测就是这么被架空的。
+ * 高度只留一个来源：JS 写入的 --vh。 */
 .vh-page,
 .vh-page-scroll {
   height: 100vh;
   height: calc(var(--vh, 1vh) * 100);
   height: calc(var(--vh, 1vh) * 100 - env(safe-area-inset-top));
-  height: calc(100dvh - env(safe-area-inset-top));
 }
 
 /* 内容会超过一屏、又没有内层滚动容器的页面（记分页、创建赛事页）：让根容器自己滚。
@@ -58,10 +62,11 @@ a { text-decoration: none; color: inherit; }
 }
 .vh-sheet-body { flex: 1 1 0; min-height: 0; overflow-y: auto; }
 
-/* 弹层高度档位：各底部弹层挑一档，替代原来的内联百分比（百分比在移动端同样按大视口算） */
-.vh-40 { height: 40vh; height: calc(var(--vh, 1vh) * 40); height: 40dvh; }
-.vh-45 { height: 45vh; height: calc(var(--vh, 1vh) * 45); height: 45dvh; }
-.vh-50 { height: 50vh; height: calc(var(--vh, 1vh) * 50); height: 50dvh; }
-.vh-55 { height: 55vh; height: calc(var(--vh, 1vh) * 55); height: 55dvh; }
-.vh-60 { height: 60vh; height: calc(var(--vh, 1vh) * 60); height: 60dvh; }
-.vh-65 { height: 65vh; height: calc(var(--vh, 1vh) * 65); height: 65dvh; }
+/* 弹层高度档位：各底部弹层挑一档，替代原来的内联百分比（百分比在移动端同样按大视口算）。
+ * 同样不用 dvh，理由见 .vh-page 上面那段注释。 */
+.vh-40 { height: 40vh; height: calc(var(--vh, 1vh) * 40); }
+.vh-45 { height: 45vh; height: calc(var(--vh, 1vh) * 45); }
+.vh-50 { height: 50vh; height: calc(var(--vh, 1vh) * 50); }
+.vh-55 { height: 55vh; height: calc(var(--vh, 1vh) * 55); }
+.vh-60 { height: 60vh; height: calc(var(--vh, 1vh) * 60); }
+.vh-65 { height: 65vh; height: calc(var(--vh, 1vh) * 65); }

@@ -50,11 +50,15 @@
         <img :src="shareUrl" class="share-img" alt="积分榜分享图" />
         <p class="share-tip">{{ shareTip }}</p>
         <div class="share-actions">
-          <!-- 能用系统分享时，"分享"是主按钮；用不了（微信内 / http 访问）时，
-               主按钮应该是"保存图片"，否则看着没有可点的主动作 -->
-          <van-button v-if="canShareFile" type="primary" round block @click="shareToApp">分享到微信 / 其他应用</van-button>
-          <van-button v-else type="primary" round block @click="downloadImage">保存图片</van-button>
-          <van-button v-if="canShareFile" plain round block @click="downloadImage">保存图片</van-button>
+          <!-- 按钮主次按环境排：
+               - 微信内：主按钮给「保存图片」。iOS 微信虽然实现了 Web Share API（canShare
+                 返回 true），但把文件交给微信自己的分享扩展时会被直接取消（面板闪一下就
+                 消失，且抛的是 AbortError，前端无法区分），所以微信里不能把「分享到微信」
+                 当主路径；分享按钮降级保留，因为发给 QQ/邮件等是正常的。
+               - 其他环境：能用系统分享就主推分享，否则主推保存。 -->
+          <van-button v-if="isWeChat || !canShareFile" type="primary" round block @click="downloadImage">保存图片</van-button>
+          <van-button v-if="canShareFile" :type="isWeChat ? 'default' : 'primary'" :plain="isWeChat" round block @click="shareToApp">{{ shareButtonText }}</van-button>
+          <van-button v-if="canShareFile && !isWeChat" plain round block @click="downloadImage">保存图片</van-button>
           <van-button plain round block @click="closeShare">关闭</van-button>
         </div>
       </div>
@@ -67,7 +71,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
-import { showFailToast, showLoadingToast } from 'vant'
+import { showFailToast, showLoadingToast, showToast } from 'vant'
 import { renderRankingCard, SHARE_CARD_FILE, type ShareCardPlayer } from '@/utils/shareCard'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
@@ -114,10 +118,14 @@ onMounted(async () => {
  * 微信的现实约束（决定了这里的交互）：
  * - 网页无法直接把图片"发"进微信聊天。能调起系统分享面板的浏览器（Chrome/Android、
  *   iOS Safari）里可以选微信，走的是 navigator.share 的 files 能力；
- * - 微信内置浏览器不支持 Web Share API，只能长按图片保存到相册，再回聊天窗口发；
+ * - 微信内置浏览器（安卓 X5）没有 Web Share API，只能长按图片保存到相册再回聊天窗口发；
+ * - iOS 微信是另一回事：WKWebView 实现了 Web Share API，canShare({files}) 返回 true，
+ *   但把文件交给「微信」这个分享目标时会被直接取消——面板闪一下就没了，而且抛的是
+ *   AbortError（与用户主动取消无法区分）。所以微信内不能把"分享到微信"当主路径，
+ *   判断顺序必须 isWeChat 在前（曾经写在 canShareFile 之后，导致微信里提示
+ *   "可直接选微信发送"，把人引到必然失败的路径上）。
  * - 还要注意 Web Share API 只在「安全上下文」里存在：https 或 localhost 才有，
- *   用 http://192.168.x.x 这种局域网地址测试时，连系统浏览器都不会有分享按钮
- *   （本地调试最容易踩这个坑）。所以提示文案要把这个原因说清楚，而不是让按钮凭空消失；
+ *   用 http://192.168.x.x 这种局域网地址测试时，连系统浏览器都不会有分享按钮；
  * - 要让"微信内一键分享成卡片"必须接公众号 JS-SDK（需要 appId/secret + 后端签名），
  *   而且那分享出去的是链接卡片，不是这张图片本身。
  */
@@ -126,9 +134,19 @@ const shareUrl = ref('')
 const shareFile = ref<File | null>(null)
 const canShareFile = ref(false)
 
+// 微信内只承诺"其他应用"：发给微信自己会失败
+const shareButtonText = computed(() =>
+  isWeChat ? '分享到其他应用（QQ/邮件等）' : '分享到微信 / 其他应用'
+)
+
 const shareTip = computed(() => {
+  // 先判微信：iOS 微信里 canShare 是 true，但选「微信」必然失败
+  if (isWeChat) {
+    return canShareFile.value
+      ? '微信内不能一键分享给好友：长按图片 → 存储图像，再回聊天窗口发送；发给其他应用可用下方按钮'
+      : '微信内不能一键分享：长按图片 → 存储图像，再回聊天窗口发送'
+  }
   if (canShareFile.value) return '点下方按钮可直接选微信发送；也可以长按图片保存后再发'
-  if (isWeChat) return '微信内不支持一键分享：长按图片 → 保存图片，再返回聊天窗口发送'
   // 按钮消失得给个理由，否则用户只会觉得"功能坏了"
   if (!window.isSecureContext) return 'http 访问下浏览器不开放系统分享（线上 https 才有分享按钮）：长按图片保存后再发送'
   return '长按图片保存到相册，或点「保存图片」'
@@ -195,6 +213,9 @@ function downloadImage() {
   document.body.appendChild(a)
   a.click()
   a.remove()
+  // 微信内置浏览器对 <a download> 的支持不一致（iOS 上可能毫无反应），
+  // 所以给一句兜底提示——「点了没反应」比「提示你去长按」糟糕得多
+  showToast(isWeChat ? '已发起保存；若相册里没有，请长按图片选择「存储图像」' : '已保存图片')
 }
 
 // 组件销毁时释放 object URL，否则长列表图片会一直占着内存
