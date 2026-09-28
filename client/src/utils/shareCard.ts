@@ -45,6 +45,9 @@ export const SHARE_CARD_FILE = '积分榜.png'
 
 const W = 750            // 逻辑宽度
 const SCALE = 2          // 导出倍率：实际 1500px 宽，够清晰、体积也可接受
+// canvas 总像素上限（保守取 14M；iOS 上的实际限制约 16M）。64 人时 2 倍图约 15.9M，
+// 已经贴到上限，所以超过这个值就退成 1 倍图。
+const MAX_CANVAS_PIXELS = 14_000_000
 const PAD = 36
 const HEADER_H = 172
 const TABLE_HEAD_H = 56
@@ -171,11 +174,15 @@ export async function renderRankingCard(opt: ShareCardOptions): Promise<ShareCar
   const height = HEADER_H + TABLE_HEAD_H + players.length * ROW_H + FOOTER_H
 
   const canvas = document.createElement('canvas')
-  canvas.width = W * SCALE
-  canvas.height = height * SCALE
+  // 人数多时图会很高（赛事人数上限 64），而 canvas 的总像素有上限——iOS 尤其保守，
+  // 超过约 16M 像素时 toBlob 会直接失败。宁可降到 1 倍图出一张略糊的，
+  // 也不要让用户看到「生成图片失败」。
+  const scale = W * height * SCALE * SCALE > MAX_CANVAS_PIXELS ? 1 : SCALE
+  canvas.width = W * scale
+  canvas.height = height * scale
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('当前浏览器不支持 canvas')
-  ctx.scale(SCALE, SCALE)
+  ctx.scale(scale, scale)
   ctx.textBaseline = 'middle'
 
   /* ---- 头部：渐变底 + 品牌 + 赛事名 ---- */

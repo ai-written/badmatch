@@ -29,7 +29,10 @@ function measureBrowserGap(visibleHeight: number): number {
   const probe = document.createElement('div')
   probe.style.cssText =
     'position:fixed;bottom:0;left:0;width:1px;height:1px;pointer-events:none;visibility:hidden'
-  document.body.appendChild(probe)
+  // body 通常已存在（模块脚本在文档解析完成后才执行）；退一步挂到 documentElement，
+  // 这样调用时机不受「先 mount 还是先同步」的顺序影响
+  const host = document.body || document.documentElement
+  host.appendChild(probe)
   const bottom = probe.getBoundingClientRect().bottom
   probe.remove()
 

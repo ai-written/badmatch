@@ -14,15 +14,16 @@ import 'vant/es/calendar/style'
 import 'vant/es/lazyload/style'
 import './assets/main.css'
 
+// 先把「真实可见高度」同步到 CSS 变量，再挂载。
+// 顺序反过来的话（mount 之后才同步）首帧一定按 100vh 排版，在地址栏展开的浏览器上
+// 会先按大视口画一帧、随后高度跳一下——首屏就能看出抖动。
+installViewportSync()
+
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 app.use(Lazyload)
 app.mount('#app')
-
-// 同步「真实可见高度」到 CSS 变量（须在 body 存在之后，探针要挂到 body 上）。
-// 页面与弹层高度依赖它，所以放在 mount 之后紧接着执行，避免首帧用错高度。
-installViewportSync()
 
 // 生产环境注册 Service Worker：静态资源缓存优先 + 离线兜底（需 HTTPS 或 localhost）
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
