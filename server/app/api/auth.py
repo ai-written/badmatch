@@ -592,7 +592,11 @@ async def user_stats(user: User = Depends(get_current_user), db: AsyncSession = 
 
 
 @router.get("/stats/{user_id}", response_model=UserStats)
-async def user_stats_by_id(user_id: int, db: AsyncSession = Depends(get_db)):
+async def user_stats_by_id(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
+):
     u = await db.execute(select(User).where(User.id == user_id))
     if not u.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="用户不存在")

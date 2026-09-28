@@ -11,9 +11,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
-const showTabbar = computed(() => route.path === '/' || route.path === '/profile')
+const auth = useAuthStore()
+// 未登录时不显示 tabbar：现在除积分榜外都要登录，匿名访客只可能停在 /profile
+// （登录页）——此时「赛事」这个 tab 点下去会被守卫弹回来，看着像坏了。
+// 用 store 里的 token（响应式，登出后立即消失）而不是直接读 localStorage。
+const showTabbar = computed(
+  () => (route.path === '/' || route.path === '/profile') && !!auth.token
+)
 </script>
 
 <style>

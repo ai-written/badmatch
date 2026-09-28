@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
-from app.core.security import require_user, get_current_user
+from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.models.user import User
 from app.models.tournament import (
@@ -49,12 +49,16 @@ def _brief_loads() -> tuple:
     return _brief_loads_cache
 
 
+# 访问策略：本站是邀请制的封闭群，除积分榜（唯一对外的只读展示面）外，
+# 赛事列表/详情/报名名单/战绩/比分这些读取接口都要求登录。
+# 前端路由守卫只是把人引到登录页，真正的边界在这里——直接调接口的人绕不过去。
 @router.get("", response_model=TournamentListOut)
 async def list_tournaments(
     status: str | None = None,
     skip: int = 0,
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
 ):
     skip = max(0, skip)
     limit = max(1, min(limit, 100))
@@ -266,6 +270,7 @@ async def _create_tournament(
 async def default_title(
     date: str | None = None,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
 ):
     from datetime import date as date_cls
 
@@ -297,7 +302,7 @@ async def default_title(
 async def get_tournament(
     tournament_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User = Depends(require_user),
 ):
     result = await db.execute(
         select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads())
@@ -453,6 +458,7 @@ async def cancel_register(
 async def list_registrations(
     tournament_id: int,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
 ):
     from app.models.user import User as UserModel
     result = await db.execute(
@@ -537,7 +543,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
 
 
 @router.get("/match-options/{num_players}")
-async def match_options(num_players: int):
+async def match_options(num_players: int, user: User = Depends(require_user)):
     """Return valid match counts for given number of players."""
     import math
     if num_players < 4:

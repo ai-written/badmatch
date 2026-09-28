@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
-from app.core.security import require_user, get_current_user
+from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
 from app.models.user import User
@@ -37,11 +37,13 @@ async def load_writable_tournament(db: AsyncSession, tournament_id: int) -> Tour
     return tournament
 
 
+# 读取接口统一要求登录：对阵/单场/应援票数都不再匿名可读
+# （唯一例外的公开读取是积分榜，见 rankings.py）。写操作的边界不受影响。
 @router.get("/rounds", response_model=list[RoundOut])
 async def list_rounds(
     tournament_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User = Depends(require_user),
 ):
     result = await db.execute(
         select(Round).where(Round.tournament_id == tournament_id).order_by(Round.round_number)
@@ -87,7 +89,7 @@ async def get_match(
     tournament_id: int,
     match_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User = Depends(require_user),
 ):
     result = await db.execute(
         select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id)
@@ -334,7 +336,7 @@ async def support_match(
 async def get_support(
     tournament_id: int,
     match_id: int,
-    user: User | None = Depends(get_current_user),
+    user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
     counts = await _count_supports(match_id, db)
