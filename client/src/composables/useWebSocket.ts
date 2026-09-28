@@ -18,6 +18,16 @@ const HEARTBEAT_MS = 30000
 // 服务端收到应用层 ping 会回 pong，因此「静默」本身就是死亡信号。
 const ALIVE_TIMEOUT_MS = HEARTBEAT_MS * 2 + 5000
 
+/** 登录态存在才值得建连：没有 token 时任何 WS 都会被服务端拒掉（4401） */
+function hasToken() {
+  try {
+    return !!localStorage.getItem('token')
+  } catch {
+    // 隐私模式下 localStorage 可能直接抛异常，按未登录处理
+    return false
+  }
+}
+
 export function useWebSocket(tournamentId: number | null) {
   const ws = ref<WebSocket | null>(null)
   const lastMessage = ref<any>(null)
@@ -26,6 +36,9 @@ export function useWebSocket(tournamentId: number | null) {
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let lastAliveAt = 0
   let disposed = false
+  // 票据接口回过 401/403：说明登录态已失效，本次页面驻留期间不再尝试
+  // （实例级标志，重新登录后重进页面自然会重建）
+  let authFailed = false
 
   function clearConnectTimer() {
     if (connectTimer) { clearTimeout(connectTimer); connectTimer = null }
@@ -58,6 +71,9 @@ export function useWebSocket(tournamentId: number | null) {
 
   async function connect() {
     if (!tournamentId || disposed) return
+    // 未登录就别连了：实时推送本来就要鉴权（服务端 4401），匿名访问公开页面
+    // （积分榜/对阵表/赛事详情都是可匿名读的）时反复去换票据只会一直收 401。
+    if (!hasToken() || authFailed) return
     // 已有一个正在连接或已连接的实例时不要重复创建
     if (ws.value && (ws.value.readyState === WebSocket.CONNECTING || ws.value.readyState === WebSocket.OPEN)) {
       return
@@ -72,8 +88,16 @@ export function useWebSocket(tournamentId: number | null) {
       const res = await api.post('/auth/ws-ticket', null, { skipLoading: true, skipGlobalError: true } as any)
       ticket = res.data?.ticket
       if (!ticket) throw new Error('empty ticket')
-    } catch {
-      // 网络异常或登录态失效：稍后重连（401 已由拦截器统一处理）
+    } catch (e: any) {
+      const status = e?.response?.status
+      // 401/403 = 登录态已失效。此时继续每 3 秒重试没有任何意义：后端每次都只会回
+      // 401，而访问日志是全量落盘的、每条 401 都会写一行（实测能刷满控制台）。
+      // 与下面 onclose 里 4401 的策略保持一致：等用户重新登录，重进页面时再连。
+      if (status === 401 || status === 403) {
+        authFailed = true
+        return
+      }
+      // 其余（网络抖动、5xx、空票据）才值得重试
       scheduleReconnect()
       return
     }
@@ -144,6 +168,8 @@ export function useWebSocket(tournamentId: number | null) {
 
   function sendHeartbeat() {
     if (disposed) return
+    // 未登录 / 登录态已失效：心跳也不该去触发重连（否则又变成一条 401 循环）
+    if (!hasToken() || authFailed) return
     const socket = ws.value
     if (!socket) {
       // 正常路径 onclose 已安排重连，这里只做幂等兜底
