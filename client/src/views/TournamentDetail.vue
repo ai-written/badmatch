@@ -1,5 +1,5 @@
 <template>
-  <div class="detail-page">
+  <div class="detail-page vh-page">
     <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
@@ -83,8 +83,8 @@
         </van-button>
       </div>
 
-    <van-popup v-model:show="showPlayerStats" round position="bottom" :style="{ height: '65%' }" class="stats-popup" lock-scroll>
-       <div class="popup-content" @touchmove.stop>
+    <van-popup v-model:show="showPlayerStats" round position="bottom" class="stats-popup vh-sheet vh-65" lock-scroll>
+       <div class="popup-content vh-sheet-body" @touchmove.stop>
           <div class="popup-player-head">
             <van-image lazy-load round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
             <h3>{{ playerDetail.username }}</h3>
@@ -108,11 +108,13 @@
     </div>
   </div>
       <!-- 场次重选弹窗 -->
-      <van-popup v-model:show="showMatchPicker" position="bottom" round :style="{ height: '45%' }">
+      <van-popup v-model:show="showMatchPicker" position="bottom" round class="vh-sheet vh-45">
         <div class="picker-toolbar">
           <span @click="showMatchPicker = false">取消</span>
           <span class="picker-title">当前报名 {{ tournament.registered_count }} 人，请选择总场次</span>
         </div>
+        <!-- 弹层外壳固定，只有这一层滚动（.vh-sheet-body） -->
+        <div class="vh-sheet-body">
         <van-cell-group inset style="margin-top:10px">
           <van-cell
             v-for="opt in matchOptions" :key="opt.total"
@@ -120,10 +122,11 @@
             @click="selectMatchStart(opt.total)" :class="{ active: matchTotal === opt.total }"
           />
         </van-cell-group>
+        </div>
       </van-popup>
 
-    <van-popup v-model:show="showTransferPicker" round position="bottom" :style="{ height: '50%' }" lock-scroll>
-      <div class="popup-content" @touchmove.stop>
+    <van-popup v-model:show="showTransferPicker" round position="bottom" class="vh-sheet vh-50" lock-scroll>
+      <div class="popup-content vh-sheet-body" @touchmove.stop>
         <h3>选择新房主</h3>
         <div class="popup-grid">
           <div
@@ -494,7 +497,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.detail-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.detail-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .detail-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
@@ -532,7 +535,8 @@ onUnmounted(() => {
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
 .nav-block { margin: 8px 12px; }
 .creator-block { padding: 10px 12px; }
-.popup-content { padding: 20px; overflow-y: auto; max-height: 100%; }
+/* 滚动交给 .vh-sheet-body（main.css）：外壳 flex 列固定，内部只滚一次 */
+.popup-content { padding: 20px; }
 .popup-content h3 { margin-bottom: 14px; font-size: 16px; }
 .popup-grid { display: flex; flex-wrap: wrap; gap: 10px; }
 .popup-player { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 68px; cursor: pointer; }

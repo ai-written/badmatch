@@ -1,5 +1,5 @@
 <template>
-  <div class="fp-page">
+  <div class="fp-page vh-page">
     <van-nav-bar title="找回密码" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="fp-scroll">
@@ -71,7 +71,7 @@ async function onSubmit() {
 </script>
 
 <style scoped>
-.fp-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.fp-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .fp-scroll { flex: 1; overflow-y: auto; }
 .fp-form { padding-top: 12px; }
 .fp-hint { margin: 0 16px 12px; font-size: 13px; color: #969799; line-height: 1.6; }

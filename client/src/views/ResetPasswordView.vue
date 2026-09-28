@@ -1,5 +1,5 @@
 <template>
-  <div class="rp-page">
+  <div class="rp-page vh-page">
     <van-nav-bar title="重置密码" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="rp-scroll">
@@ -126,7 +126,7 @@ async function onSubmit() {
 </script>
 
 <style scoped>
-.rp-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.rp-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .rp-scroll { flex: 1; overflow-y: auto; }
 .rp-form { padding-top: 12px; }
 .rp-hint { margin: 0 16px 12px; font-size: 13px; color: #969799; line-height: 1.6; }

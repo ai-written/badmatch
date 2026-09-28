@@ -1,5 +1,5 @@
 <template>
-  <div class="score-root">
+  <div class="score-root vh-page-scroll">
     <van-nav-bar left-text="返回" left-arrow @click-left="goBack">
       <!-- 中间：场次 + 耗时；右侧：积分榜入口 -->
       <template #title>
@@ -518,7 +518,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.score-root { min-height: 100vh; background: #f0f2f5; padding-bottom: 40px; }
+.score-root { background: #f0f2f5; padding-bottom: 40px; }
 .readonly-banner {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   margin: 10px 12px 0; padding: 10px 12px;

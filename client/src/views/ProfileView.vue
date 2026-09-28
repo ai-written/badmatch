@@ -1,5 +1,5 @@
 <template>
-  <div class="profile-page">
+  <div class="profile-page vh-page">
     <template v-if="!auth.user">
       <div class="form-scroll">
       <van-tabs v-model:active="loginTab" class="auth-tabs" color="#1989fa">
@@ -269,11 +269,12 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.profile-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.profile-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .profile-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 80px; }
-.form-scroll { flex: 1; overflow-y: auto; padding-bottom: 80px; }
+/* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
+.pull-inner { padding-bottom: var(--tabbar-reserve); }
+.form-scroll { flex: 1; overflow-y: auto; padding-bottom: var(--tabbar-reserve); }
 .auth-tabs { margin-top: 0; }
 .auth-form { margin-top: 16px; }
 .form-submit { margin: 16px; }

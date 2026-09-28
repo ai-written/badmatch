@@ -2,7 +2,9 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- viewport-fit=cover：让 env(safe-area-inset-*) 生效（否则恒为 0，tabbar 的
+         safe-area-inset-bottom 属性等于没写，在带手势条的机型上会压住底部内容） -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>爱玩羽社</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
   </head>

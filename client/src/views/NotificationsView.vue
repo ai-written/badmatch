@@ -1,5 +1,5 @@
 <template>
-  <div class="notify-page">
+  <div class="notify-page vh-page">
     <van-nav-bar title="站内消息" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <span v-if="showReadAll" class="read-all" @click="markAllRead">全部已读</span>
@@ -116,7 +116,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.notify-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.notify-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .notify-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }

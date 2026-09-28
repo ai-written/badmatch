@@ -1,5 +1,5 @@
 <template>
-  <div class="rank-page">
+  <div class="rank-page vh-page">
     <van-nav-bar title="积分榜" left-text="返回" left-arrow @click-left="goBack" />
 
     <div class="rank-scroll">
@@ -89,7 +89,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.rank-page { height: 100vh; display: flex; flex-direction: column; background: #f0f2f5; }
+.rank-page { display: flex; flex-direction: column; background: #f0f2f5; }
 .rank-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }

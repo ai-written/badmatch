@@ -1,5 +1,5 @@
 <template>
-  <div class="admin-page">
+  <div class="admin-page vh-page">
     <van-nav-bar title="管理面板" left-text="返回" left-arrow @click-left="goBack" />
 
     <van-tabs v-model:active="adminTab" color="#1989fa" class="admin-tabs" :show-header="isSuper">
@@ -400,7 +400,7 @@ useResumeRefresh(() => fetchUsers(true))
 </script>
 
 <style scoped>
-.admin-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.admin-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .admin-tabs { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .admin-tabs :deep(.van-tabs__content) { flex: 1; overflow: hidden; }
 .admin-tabs :deep(.van-tab__panel) { height: 100%; }

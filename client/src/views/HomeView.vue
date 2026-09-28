@@ -1,5 +1,5 @@
 <template>
-  <div class="home-page">
+  <div class="home-page vh-page">
     <!-- Header -->
     <div class="top-header">
       <div class="header-title">
@@ -145,10 +145,11 @@ async function onRefresh() {
 </script>
 
 <style scoped>
-.home-page { height: 100vh; display: flex; flex-direction: column; background: #f5f6f8; }
+.home-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .home-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; }
+/* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
+.pull-inner { padding-bottom: var(--tabbar-reserve); }
 
 .header-logo { width: 20px; height: 20px; border-radius: 4px; }
 .top-header {

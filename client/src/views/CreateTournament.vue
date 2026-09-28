@@ -1,5 +1,5 @@
 <template>
-  <div class="page-container">
+  <div class="page-container vh-page-scroll">
     <van-nav-bar title="创建赛事" left-text="取消" left-arrow @click-left="goBack" />
 
     <van-form @submit="onSubmit" class="create-form">
@@ -68,13 +68,13 @@
     <van-calendar v-model:show="showOpenCalendar" :min-date="minDate" :default-date="openDate" @confirm="onOpenDateConfirm" />
 
     <!-- 时间段选择 -->
-    <van-popup v-model:show="showTimePicker" position="bottom" round :style="{ height: '55%' }">
+    <van-popup v-model:show="showTimePicker" position="bottom" round class="vh-sheet vh-55">
       <div class="picker-toolbar">
         <span @click="showTimePicker = false">取消</span>
         <span class="picker-title">选择时间段</span>
         <span @click="onTimeConfirm" style="color:#1989fa">确定</span>
       </div>
-      <div class="time-picker-body">
+      <div class="time-picker-body vh-sheet-body">
         <div class="time-block">
           <div class="time-label">开始</div>
           <div class="time-pickers">
@@ -95,13 +95,13 @@
     </van-popup>
 
     <!-- 报名开放时间：时间 -->
-    <van-popup v-model:show="showOpenTimePicker" position="bottom" round :style="{ height: '45%' }">
+    <van-popup v-model:show="showOpenTimePicker" position="bottom" round class="vh-sheet vh-45">
       <div class="picker-toolbar">
         <span @click="showOpenTimePicker = false">取消</span>
         <span class="picker-title">选择开放时间</span>
         <span @click="onOpenTimeConfirm" style="color:#1989fa">确定</span>
       </div>
-      <div class="time-picker-body">
+      <div class="time-picker-body vh-sheet-body">
         <div class="time-block">
           <div class="time-pickers">
             <van-picker :columns="hourColumns" v-model="openHourIdx" :show-toolbar="false" />
@@ -113,11 +113,13 @@
     </van-popup>
 
     <!-- 场次选择 -->
-    <van-popup v-model:show="showMatchPicker" position="bottom" round :style="{ height: '40%' }">
+    <van-popup v-model:show="showMatchPicker" position="bottom" round class="vh-sheet vh-40">
       <div class="picker-toolbar">
         <span @click="showMatchPicker = false">取消</span>
         <span class="picker-title">选择总场次</span>
       </div>
+      <!-- 弹层外壳固定，只有这一层滚动（.vh-sheet-body），避免父子双滚动把末行裁掉 -->
+      <div class="vh-sheet-body">
       <van-cell-group inset style="margin-top:10px">
         <van-cell title="自动" :label="closestMatch ? `${closestMatch.total} 场 · 每人 ${closestMatch.per_person} 场` : ''" @click="selectMatch(null)" :class="{ active: form.total_matches === closestMatch?.total }" />
         <van-cell
@@ -126,16 +128,17 @@
           @click="selectMatch(opt.total)" :class="{ active: form.total_matches === opt.total }"
         />
       </van-cell-group>
+      </div>
     </van-popup>
 
     <!-- 默认参赛人员选择 -->
-    <van-popup v-model:show="showUserPicker" position="bottom" round :style="{ height: '60%' }">
+    <van-popup v-model:show="showUserPicker" position="bottom" round class="vh-sheet vh-60">
       <div class="picker-toolbar">
         <span @click="showUserPicker = false">取消</span>
         <span class="picker-title">选择默认参赛人员</span>
         <span @click="showUserPicker = false" style="color:#1989fa">完成</span>
       </div>
-      <div class="user-picker-body">
+      <div class="user-picker-body vh-sheet-body">
         <van-cell
           v-for="u in selectableUsers"
           :key="u.id"
@@ -460,5 +463,7 @@ onMounted(async () => {
 .time-pickers { display: flex; align-items: center; justify-content: center; }
 .time-pickers .van-picker { flex: 1; }
 .time-colon { font-size: 20px; font-weight: 700; color: #333; margin: 0 4px; }
-.user-picker-body { max-height: calc(60vh - 44px); overflow-y: auto; }
+/* 人员的滚动交给 .vh-sheet-body（main.css）。原先这里用 max-height: calc(60vh - 44px)
+   限制高度，而父弹层用的是百分比高度：两者在「ICB 高度 ≠ vh」的浏览器里必然错位，
+   会撑破弹层并触发父层滚动，导致末行被裁且滚不到。 */
 </style>

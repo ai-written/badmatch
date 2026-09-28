@@ -1,5 +1,5 @@
 <template>
-  <div class="schedule-page">
+  <div class="schedule-page vh-page">
     <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <span class="nav-link" @click="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
@@ -268,7 +268,7 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 </script>
 
 <style scoped>
-.schedule-page { height: 100vh; display: flex; flex-direction: column; background: #f0f2f5; }
+.schedule-page { display: flex; flex-direction: column; background: #f0f2f5; }
 /* position: relative 让本容器成为卡片的 offsetParent，
    这样卡片的 offsetTop 才稳定等于「相对列表内容顶部」的偏移（自动定位依赖它） */
 .schedule-scroll { flex: 1; overflow-y: auto; padding-top: 12px; position: relative; }
