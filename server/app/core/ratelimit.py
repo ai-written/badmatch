@@ -51,3 +51,13 @@ class RateLimiter:
     def reset(self, key: str) -> None:
         with self._lock:
             self._data.pop(key, None)
+
+    def reset_all(self) -> None:
+        """清空所有 key 的计数。
+
+        给「管理员主动解锁」这类场景用（见 admin_reset_password）：按用户名那把可以精确
+        reset，但按 IP 的兜底是共享的，谁被它拦住、从哪个 IP 失败过都不好一一对应，
+        所以整体归零最可靠。
+        """
+        with self._lock:
+            self._data.clear()

@@ -979,6 +979,13 @@ async def admin_reset_password(
     # 重置密码后旧 token 失效，需重新登录
     user.token_version += 1
     login_limiter.reset(user.username)
+    # 同时清掉按 IP 的登录兜底计数：管理员重置密码的目的就是「让这个人能立刻登进来」，
+    # 而卡住他的往往正是 IP 那把（它不随任何自助重置清零）。
+    # 这里整体清空而不是「只清他失败过的 IP」：管理员本来就能重置任意用户的密码
+    # （比这强得多），而按用户名的 5 次/10 分钟那把仍独立生效，兜底临时归零不放水。
+    # 注意：邮件链接重置（reset_password）刻意**不**动这把 —— 否则任何拿到有效重置令牌的
+    # 人都能把按 IP 的兜底刷回零，这层防护就形同虚设。
+    login_ip_limiter.reset_all()
     await db.flush()
     from app.core.websocket import manager
     from app.core.ws_ticket import revoke_user
