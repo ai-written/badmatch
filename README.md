@@ -65,7 +65,7 @@ docker compose -f docker-compose.prod.yml up -d
   - 重置成功后 `token_version` 自增：所有已登录设备立即失效并断开 WebSocket，
     需要重新登录
   - 新密码上限 30 位（bcrypt 只取前 72 字节，前端输入框已按此限制）
-  - 限流：申请 5 次 / 15 分钟（按来源 IP），提交 10 次 / 15 分钟（按来源 IP）
+  - 限流：申请 10 次 / 15 分钟（按来源 IP），提交 10 次 / 15 分钟（按来源 IP）
 - 邮件发送使用系统 CA 校验证书（`ssl.create_default_context()`）。注意 Python 的
   `SMTP_SSL`/`starttls` 在未显式传 context 时**默认不校验证书**，而这条链路上跑的
   是可改密码的凭证，因此必须显式校验。若你的 SMTP 用的是自签证书，请改为把该证书

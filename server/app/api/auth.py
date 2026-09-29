@@ -38,7 +38,7 @@ avatar_limiter = RateLimiter(20, 600)
 # 正常用量很低（一次连接一张），60 次/分钟足够，仅用于挡住高频滥用
 ws_ticket_limiter = RateLimiter(60, 60)
 # 找回密码：按来源 IP 限制申请次数，避免被用来给他人邮箱灌邮件
-forgot_limiter = RateLimiter(5, 900)
+forgot_limiter = RateLimiter(_settings.FORGOT_MAX_ATTEMPTS, _settings.FORGOT_WINDOW_SECONDS)
 # 提交新密码：按来源 IP 限制，避免拿令牌反复试探
 reset_limiter = RateLimiter(10, 900)
 # 用户不存在时也要跑一次 bcrypt，才能让「查无此人」与「密码错误」的耗时接近，
@@ -243,7 +243,7 @@ async def forgot_password(
     """
     ip = get_client_ip(request)
     if not forgot_limiter.check(ip):
-        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+        raise HTTPException(status_code=429, detail=f"操作过于频繁，请 {_settings.FORGOT_WINDOW_SECONDS // 60} 分钟后再试")
     forgot_limiter.record_failure(ip)
 
     email = (body.email or "").strip().lower()

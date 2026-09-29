@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     LOGIN_IP_WINDOW_SECONDS: int = 600
     INVITE_MAX_ATTEMPTS: int = 3
     INVITE_WINDOW_SECONDS: int = 300
+    # 找回密码：按来源 IP 限制申请次数（避免被用来给他人邮箱灌邮件）。
+    # 15 分钟 10 次：给得比登录宽松，因为「同一出口 IP」后面常常是一整片人
+    # （公司/学校网络、运营商 NAT；走 Cloudflare 时多个访客还可能共用同一个边缘 IP），
+    # 太紧会出现「别人申请过几次，我这边就被拦」。
+    FORGOT_MAX_ATTEMPTS: int = 10
+    FORGOT_WINDOW_SECONDS: int = 900
 
     # ---- 反向代理 ----
     # 是否信任 X-Real-IP / X-Forwarded-For 等转发头。
