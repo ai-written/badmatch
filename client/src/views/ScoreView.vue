@@ -208,7 +208,11 @@ const calibrateTimer = setInterval(() => {
 // --- 时长逻辑结束 ---
 
 // 只有在任裁判才有记分/交换场地权限；referee 可能只是历史记录（已卸任）
-const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
+const isSuperadmin = computed(() => auth.user?.role === 'superadmin')
+// 能操作本场的人：本场在任裁判，或超级管理员。
+// 超管兜底是为了「裁判手机没电/临时找不到人」时还能记分、结束比赛、交换场地；
+// 判据与后端 update_score / swap_sides 的校验保持一致。
+const isReferee = computed(() => isSuperadmin.value || match.value?.active_referee?.id === auth.user?.id)
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
 const readOnly = computed(() => match.value?.tournament_status === 'finished')
 

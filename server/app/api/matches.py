@@ -121,8 +121,10 @@ async def update_score(
     # 赛事已结束则该场只读，不允许再记分
     await load_writable_tournament(db, tournament_id)
     # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
-    if m.referee_id != user.id or not m.has_active_referee:
-        raise HTTPException(status_code=403, detail="只有本场裁判可以记分")
+    # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，超管可以直接代记分
+    # （记第一分就会把比赛从 pending 变 ongoing，也就是"开始比赛"）
+    if not (user.role == "superadmin" or (m.referee_id == user.id and m.has_active_referee)):
+        raise HTTPException(status_code=403, detail="只有本场裁判或超级管理员可以记分")
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
     if score.score_a < 0 or score.score_b < 0:
@@ -197,8 +199,9 @@ async def swap_sides(
     # 赛事已结束则该场只读，不允许再交换场地
     await load_writable_tournament(db, tournament_id)
     # 同上：已卸任的裁判不能再交换场地
-    if m.referee_id != user.id or not m.has_active_referee:
-        raise HTTPException(status_code=403, detail="只有本场裁判可以交换场地")
+    # 同 update_score：超级管理员也可交换场地
+    if not (user.role == "superadmin" or (m.referee_id == user.id and m.has_active_referee)):
+        raise HTTPException(status_code=403, detail="只有本场裁判或超级管理员可以交换场地")
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
 
