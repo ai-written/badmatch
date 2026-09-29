@@ -405,9 +405,9 @@ useResumeRefresh(() => fetchUsers(true))
 .admin-tabs { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .admin-tabs :deep(.van-tabs__content) { flex: 1; overflow: hidden; }
 .admin-tabs :deep(.van-tab__panel) { height: 100%; }
-/* 顶部余量交给 main.css 里统一的 .pull-inner（放在这里会与它叠加，而且位于
-   Vant 刷新容器的裁剪框之外） */
-.admin-scroll { height: 100%; overflow-y: auto; }
+/* 12px 同样是 main.css 里 .van-pull-refresh「padding + 负 margin」的落点
+   （操作日志/访问日志两个 tab 不在刷新容器里，由 .audit-scroll 覆盖成 0） */
+.admin-scroll { height: 100%; overflow-y: auto; padding-top: 12px; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
 .user-avatar { margin-right: 10px; flex-shrink: 0; }

@@ -293,10 +293,13 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 .schedule-page { display: flex; flex-direction: column; background: #f0f2f5; }
 /* position: relative 让本容器成为卡片的 offsetParent，
    这样卡片的 offsetTop 才稳定等于「相对列表内容顶部」的偏移（自动定位依赖它） */
-.schedule-scroll { flex: 1; overflow-y: auto; position: relative; }
+/* 这 12px 是 main.css 里 .van-pull-refresh 那套「padding + 负 margin」的落点：
+   刷新容器的盒子会整体上移，滚动容器得留出同样的空间，否则上移的那截会被滚动容器
+   自己裁掉。12px 同时覆盖了首条高亮上方所需的 11px（描边 2px + 光晕 14-3）。 */
+.schedule-scroll { flex: 1; overflow-y: auto; position: relative; padding-top: 12px; }
 .pull-fill { min-height: 100%; }
-/* 顶部余量已统一放到 main.css 的 .pull-inner（必须留在 Vant 的裁剪框里面，
-   放在这个滚动容器上无效 —— 详见 main.css 里的说明） */
+/* 顶部余量由 main.css 的 .van-pull-refresh（裁剪框）+ 上面那个滚动容器的 padding 负责，
+   内容本身不动 —— 详见 main.css 里的说明 */
 .pull-inner { padding-bottom: 60px; }
 .empty-block { padding-top: 80px; }
 .load-failed {

@@ -77,13 +77,18 @@ a { text-decoration: none; color: inherit; }
  * 只作用于圆形头像，普通长方形图片不受影响。 */
 .van-image--round .van-image__img { object-fit: cover; }
 
-/* 下拉刷新列表的顶部余量（统一，别再写在各页的滚动容器上）。
+/* 把下拉刷新容器的「裁剪框」单独撑大，内容位置完全不变：
+ *   padding-top: 14px   → 裁剪边界（padding box 顶）上移 14px
+ *   margin-top: -14px   → 盒子整体上移 14px，抵消 padding 对内容的影响
+ * 页面看起来一点没变，但元素画在盒子上方的那部分不再被裁掉。
  *
- * 各页的首个元素常把描边/阴影画在盒子外面，而 Vant 的 .van-pull-refresh 自带
- * overflow: hidden —— 裁剪边界就在它的 padding box 上，元素贴着顶边时，
- * 画在盒子上方的那部分会被裁掉。实测对阵表首条高亮就是这样被裁了 11px：
- *   box-shadow: 0 0 0 2px …（描边 2px） + 0 3px 14px …（光晕 14-3 = 11px）
- * 而当时那 12px 余量写在 .schedule-scroll 上 —— 位于裁剪框**外面**，救不了。
- * 所以要留在 .pull-inner 上（裁剪框里面）。14px 覆盖各页现有的最大外扩（11px）。
- * 各页若另有 scroll 容器的 padding-top，记得一并去掉，避免叠加。 */
-.pull-inner { padding-top: 14px; }
+ * 为什么必须这么做：各页首个元素常把描边/阴影画在盒子外面（对阵表首条高亮最明显：
+ * 0 0 0 2px 描边 + 0 3px 14px 光晕，上方共需约 11px）。而 Vant 的 .van-pull-refresh
+ * 自带 overflow: hidden，裁剪边界就在它的 padding box 上 —— 元素贴着顶边时那部分就被裁。
+ * 直接给 .pull-inner 加 padding 会把所有页面内容顶下去（视觉会变），所以改用
+ * 「padding + 等量负 margin」只撑裁剪框。
+ *
+ * 前提：外层滚动容器要有同样多的 padding-top 作为落点（对阵表/管理面板各 12px 就是
+ * 为此保留的）。否则上移后的盒子会被滚动容器自己（overflow: auto）裁掉。
+ * 首个元素没有外扩的页面无需额外留白：内容位置不变，被裁的只是容器自己的空白区。 */
+.van-pull-refresh { padding-top: 14px; margin-top: -14px; }
