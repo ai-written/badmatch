@@ -53,7 +53,7 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
-          <div class="swap-hint">{{ match.status === 'finished' ? '比赛已结束' : (locked ? '赛事已结束，本场已锁定' : (isReferee ? '点击交换场地' : '仅裁判可交换场地')) }}</div>
+          <div class="swap-hint">{{ canOperate ? '点击交换场地' : (locked ? '赛事已结束，本场已锁定' : (match.status === 'finished' ? '比赛已结束' : '仅裁判可交换场地')) }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -90,10 +90,10 @@
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
-      <div v-if="isReferee && !locked" class="controls">
+      <div v-if="canOperate" class="controls">
         <div class="wheel-board">
           <div class="wheel-side">
-            <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('a'))">+</button>
+            <button class="wheel-btn plus" :disabled="!canOperate" @click="addScore(swapSide('a'))">+</button>
             <div
               class="wheel"
               :class="{ dragging: wheelSide === 'a' }"
@@ -106,13 +106,13 @@
               <span class="wheel-item mid">{{ leftScore }}</span>
               <span class="wheel-item bot">{{ leftScore + 1 }}</span>
             </div>
-            <button class="wheel-btn minus" :disabled="match.status === 'finished' || leftScore <= 0" @click="subScore(swapSide('a'))">-</button>
+            <button class="wheel-btn minus" :disabled="!canOperate || leftScore <= 0" @click="subScore(swapSide('a'))">-</button>
           </div>
 
           <div class="wheel-colon">:</div>
 
           <div class="wheel-side">
-            <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('b'))">+</button>
+            <button class="wheel-btn plus" :disabled="!canOperate" @click="addScore(swapSide('b'))">+</button>
             <div
               class="wheel"
               :class="{ dragging: wheelSide === 'b' }"
@@ -125,10 +125,10 @@
               <span class="wheel-item mid">{{ rightScore }}</span>
               <span class="wheel-item bot">{{ rightScore + 1 }}</span>
             </div>
-            <button class="wheel-btn minus" :disabled="match.status === 'finished' || rightScore <= 0" @click="subScore(swapSide('b'))">-</button>
+            <button class="wheel-btn minus" :disabled="!canOperate || rightScore <= 0" @click="subScore(swapSide('b'))">-</button>
           </div>
         </div>
-        <van-button type="danger" block round size="large" style="margin-top:20px" @click="endMatch" :disabled="match.status === 'finished'">结束比赛</van-button>
+        <van-button type="danger" block round size="large" style="margin-top:20px" @click="endMatch" :disabled="!canOperate">结束比赛</van-button>
       </div>
 
       <div v-else-if="locked" class="no-role">
@@ -213,15 +213,22 @@ const calibrateTimer = setInterval(() => {
 
 // 只有在任裁判才有记分/交换场地权限；referee 可能只是历史记录（已卸任）
 const isSuperadmin = computed(() => auth.user?.role === 'superadmin')
-// 能操作本场的人：本场在任裁判，或超级管理员。
-// 超管兜底是为了「裁判手机没电/临时找不到人」时还能记分、结束比赛、交换场地；
-// 判据与后端 update_score / swap_sides 的校验保持一致。
-const isReferee = computed(() => isSuperadmin.value || match.value?.active_referee?.id === auth.user?.id)
+// 本场在任裁判（严格是谁在任，不含超管）
+const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
+// 只读锁定：赛事已结束、且不是超级管理员（超管赛后仍可修正比分）
+const locked = computed(() => readOnly.value && !isSuperadmin.value)
+// 能否操作本场（记分 / 结束比赛 / 交换场地）—— 注意按钮的 disabled 与操作函数里的
+// 守卫都要用它，否则会出现「按钮是灰的/点了没反应」但界面又提示可以修改的矛盾：
+//   · 超级管理员：任何时候都行（含赛事结束后、比赛结束后的修正与重算胜负）
+//   · 其他人：必须是本场在任裁判，且赛事未结束、比赛未结束
+// 与后端 update_score / swap_sides 的判据保持一致。
+const canOperate = computed(() => {
+  if (!match.value) return false
+  if (isSuperadmin.value) return true
+  return isReferee.value && !readOnly.value && match.value.status !== 'finished'
+})
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
 const readOnly = computed(() => match.value?.tournament_status === 'finished')
-// 超级管理员在赛事结束后仍可修正比分（记错了要能改回来），所以「只读锁定」对超管不生效；
-// 应援等普通操作仍按 readOnly 判断（那边连超管也不该越过）
-const locked = computed(() => readOnly.value && !isSuperadmin.value)
 
 function pp(path: string) {
   const parts = path.split('.')
@@ -293,7 +300,7 @@ const rightWin = computed(() => {
 
 async function swapTeams() {
   // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
-  if (!isReferee.value || locked.value || match.value?.status === 'finished') return
+  if (!canOperate.value) return
   try {
     const res = await api.post(
       `/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`,
@@ -411,7 +418,7 @@ async function subScore(side: string) {
 }
 
 function wheelDown(e: PointerEvent, side: string) {
-  if (match.value?.status === 'finished') return
+  if (!canOperate.value) return
   ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
   wheelGesture = { id: e.pointerId, y: e.clientY, acc: 0, side }
   wheelSide.value = side
