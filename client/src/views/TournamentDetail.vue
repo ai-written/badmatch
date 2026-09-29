@@ -270,8 +270,10 @@ const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
 const canManage = computed(() => isCreator.value || auth.user?.role === 'admin' || auth.user?.role === 'superadmin')
 const canDelete = computed(() => {
   if (!auth.user || !tournament.value) return false
+  // 与后端一致：只有报名中的赛事能删（已开赛/已结束的不能删，管理员/超管也一样）
+  if (tournament.value.status !== 'open') return false
   if (auth.user.role === 'admin' || auth.user.role === 'superadmin') return true
-  return auth.user.id === tournament.value.creator_id && tournament.value.status === 'open'
+  return auth.user.id === tournament.value.creator_id
 })
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
 /** 总场次：开赛前 total_matches 为空（由后端在开赛时按人数自动算），此时如实说明 */

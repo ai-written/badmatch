@@ -329,9 +329,10 @@ async def delete_tournament(
     if t.creator_id != user.id:
         if user.role not in ("admin", "superadmin"):
             raise HTTPException(status_code=403, detail="只有创建者可以删除")
+    # 只有报名中（open）的赛事可删：已开赛/已结束的赛事连同全部轮次、比赛、战绩都不能删，
+    # 管理员/超管也不例外 —— 与「赛事结束 = 完全只读」的规则保持一致
     if t.status != TournamentStatus.OPEN:
-        if user.role not in ("admin", "superadmin"):
-            raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
+        raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
 
     # delete related courts and time slots
     # delete match supports, matches, pairings, rounds

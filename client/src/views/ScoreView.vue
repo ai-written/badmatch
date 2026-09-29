@@ -49,7 +49,7 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
-          <div class="swap-hint">{{ canOperate ? '点击交换场地' : (locked ? '赛事已结束，本场已锁定' : (match.status === 'finished' ? '比赛已结束' : '仅裁判可交换场地')) }}</div>
+          <div class="swap-hint">{{ canOperateLive ? '点击交换场地' : (locked ? '赛事已结束，本场已锁定' : (isFinishedMatch ? '比赛已结束' : '仅裁判可交换场地')) }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -86,11 +86,12 @@
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
-      <!-- 已结束的比赛：默认只读。要改必须先点「修正比赛」并确认，进入修正模式后
-           加减只改本地数字，点「确认修正」才真正提交 —— 避免误触直接改掉成绩 -->
-      <div v-if="canOperate && isFinishedMatch && !fixMode" class="no-role">
+      <!-- 已结束的比赛：默认只读。管理员/超管可点「修正比赛」进确认式修正；
+           普通用户（含本场裁判）只看到"本场已结束"，不再落到「暂无裁判权限」 -->
+      <div v-if="isFinishedMatch && !readOnly && !fixMode" class="no-role">
         <p>本场已结束</p>
-        <van-button type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
+        <van-button v-if="isPrivileged" type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
+        <p v-else style="margin-top:8px;color:#969799">如需修改结果，请联系管理员</p>
       </div>
 
       <div v-else-if="canOperate && fixMode" class="controls">
@@ -240,10 +241,19 @@ const isPrivileged = computed(() => auth.user?.role === 'admin' || auth.user?.ro
 const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
 // 只读锁定：赛事一结束就完全只读 —— 连超级管理员也不能再改（产品规则）
 const locked = computed(() => readOnly.value)
-// 能否操作本场（记分 / 结束比赛 / 交换场地）—— 注意按钮的 disabled 与操作函数里的
-// 守卫都要用它，否则会出现「按钮是灰的/点了没反应」但界面又提示可以修改的矛盾：
-//   · 超级管理员：任何时候都行（含赛事结束后、比赛结束后的修正与重算胜负）
-//   · 其他人：必须是本场在任裁判，且赛事未结束、比赛未结束
+// 赛事被别处结束时立刻退出修正模式：否则会停在一个永远不可能成功的面板里
+// （后端 load_writable_tournament 会 400），界面也会和只读横幅自相矛盾
+watch(() => readOnly.value, (v) => {
+  if (v && fixMode.value) {
+    fixMode.value = false
+    showToast('赛事已结束，已退出修正模式')
+  }
+})
+// 能否操作本场（记分 / 结束比赛 / 交换场地 / 修正）—— 按钮 disabled 与函数守卫都用它，
+// 否则会出现「按钮是灰的/点了没反应」但界面又提示可以修改的矛盾。
+//   · 赛事已结束：谁都不行（完全只读，管理员/超管也一样）
+//   · 赛事进行中：管理员/超管任何时候都行（含比赛结束后的修正与重算胜负）；
+//     其他人必须是本场在任裁判，且比赛未结束
 // 与后端 update_score / swap_sides 的判据保持一致。
 const canOperate = computed(() => {
   if (!match.value) return false
@@ -252,6 +262,8 @@ const canOperate = computed(() => {
   return isReferee.value && match.value.status !== 'finished'
 })
 const isFinishedMatch = computed(() => match.value?.status === 'finished')
+// 实时操作（记分/结束/交换场地）与「修正已结束的比赛」是两码事：前者只适用于未结束的比赛
+const canOperateLive = computed(() => canOperate.value && !isFinishedMatch.value)
 // 修正模式：已结束的比赛默认只读，必须点「修正比赛」→ 确认 → 改本地数字 → 「确认修正」
 // 才提交，避免误触一下加号就把成绩改掉
 const fixMode = ref(false)
@@ -294,7 +306,8 @@ async function confirmFix() {
   }
   fixSubmitting.value = true
   try {
-    // force_end：改完比分顺便重算胜负（后端对超管允许对已结束的比赛再结束一次）
+    // force_end：改完比分顺便重算胜负（后端对管理员/超管允许对已结束的比赛再结束一次，
+  // 且只按差额调整统计，不重复记账）
     await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
       // 提交时映射回真实的 a/b（修正面板里 fixA/fixB 存的是左右顺序）
       score_a: swapped.value ? fixB.value : fixA.value,
@@ -385,7 +398,7 @@ const rightWin = computed(() => {
 
 async function swapTeams() {
   // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
-  if (!canOperate.value) return
+  if (!canOperate.value || isFinishedMatch.value) return
   try {
     const res = await api.post(
       `/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`,
@@ -503,7 +516,7 @@ async function subScore(side: string) {
 }
 
 function wheelDown(e: PointerEvent, side: string) {
-  if (!canOperate.value) return
+  if (!canOperate.value || isFinishedMatch.value) return
   ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
   wheelGesture = { id: e.pointerId, y: e.clientY, acc: 0, side }
   wheelSide.value = side
@@ -619,6 +632,11 @@ watch(lastMessage, (msg) => {
     (msg.type === 'referee_claimed' || msg.type === 'referee_released')
     && msg.match_id === Number(route.params.matchId)
   ) {
+    fetchMatch().catch(() => {})
+  }
+  // 赛事被别处结束：立刻刷新切成只读（配合 readOnly 的 watch 退出修正模式）。
+  // 本页常停在"已结束的比赛"上，而 30 秒校准只在比赛进行中才跑，不接这个广播可能长期不刷新。
+  if (msg.type === 'tournament_finished') {
     fetchMatch().catch(() => {})
   }
 })
