@@ -120,14 +120,17 @@ async def update_score(
         raise HTTPException(status_code=404, detail="比赛不存在")
     # 赛事已结束 = 整场只读，谁都不能再改（超级管理员也不行）
     await load_writable_tournament(db, tournament_id)
-    # 比赛已结束是另一回事：赛事进行中时，管理员/超级管理员仍可修正该场比分并重算胜负
+    # 比赛已结束是另一回事：赛事进行中时，管理员/超管、或**本场记录的裁判**（谁记的分谁能改）
+    # 仍可修正该场比分并重算胜负
     is_privileged = user.role in ("admin", "superadmin")
+    is_match_referee = m.referee_id == user.id
+    can_fix_finished = is_privileged or is_match_referee
     # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
     # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，管理员/超管可以直接代记分
     # （记第一分就会把比赛从 pending 变 ongoing，也就是"开始比赛"）
     if not (user.role in ("admin", "superadmin") or (m.referee_id == user.id and m.has_active_referee)):
         raise HTTPException(status_code=403, detail="只有本场裁判、管理员或超级管理员可以记分")
-    if m.status == MatchStatus.FINISHED and not is_privileged:
+    if m.status == MatchStatus.FINISHED and not can_fix_finished:
         raise HTTPException(status_code=400, detail="比赛已结束")
     if m.status == MatchStatus.FINISHED and not score.force_end:
         # 已结束的比赛只允许"连胜负一起重算"的修正，否则会出现"比分 11:3 但胜方是拿 3 分那队"
@@ -153,7 +156,7 @@ async def update_score(
     if score.force_end:
         # 已结束的比赛：管理员/超管可以再结束一次，用来在修正比分后重算胜负
         # （previous 非空 → _finalize_match 只做增量调整，不重复记账）
-        if m.status == MatchStatus.FINISHED and not is_privileged:
+        if m.status == MatchStatus.FINISHED and not can_fix_finished:
             raise HTTPException(status_code=400, detail="比赛已结束")
         sa, sb = score.score_a, score.score_b
         if sa == sb:

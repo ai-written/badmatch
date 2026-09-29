@@ -284,6 +284,26 @@ async function scenarioFixFlow(page) {
   assert('提交后回到只读', !(await page.ev(`!!document.querySelector('.controls')`)))
 }
 
+/** 场景 2b：本场记录的裁判也能修正已结束的比赛（默认依然只读） */
+async function scenarioMatchRefereeCanFix(page) {
+  console.log('2b) 记分页：本场裁判 + 该场已结束（谁记的分谁能改）')
+  await page.enableMock(scoreMock({
+    role: 'user',
+    match: matchPayload({ status: 'finished', winner_pairing_id: 1011, referee: P(1, '李祥') }),
+  }))
+  await page.setToken()
+  await page.goto('/tournament/2/score/101?num=1')
+
+  assert('默认仍只读（没有记分控件）', !(await page.ev(`!!document.querySelector('.controls')`)))
+  assert('本场裁判能看到「修正比赛」',
+    await page.ev(`[...document.querySelectorAll('.van-button')].some(b => (b.textContent||'').includes('修正比赛'))`))
+  await page.clickText('修正比赛')
+  const d = await page.dialog()
+  assert('点「修正比赛」同样先弹确认框', d?.标题 === '修正比赛结果', d?.标题)
+  await page.confirmDialog()
+  assert('能进入修正模式', await page.ev(`!!document.querySelector('.controls')`))
+}
+
 /** 场景 3：各页首屏顶部留白基线 + 对阵表高亮不被裁剪 */
 async function scenarioLayout(page) {
   console.log('3) 布局：各页首元素位置基线 + 对阵表首条高亮')
@@ -398,7 +418,7 @@ async function scenarioInviteLabel(page) {
 }
 
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioLayout, scenarioInviteLabel]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

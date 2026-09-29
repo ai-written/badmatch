@@ -90,8 +90,8 @@
            普通用户（含本场裁判）只看到"本场已结束"，不再落到「暂无裁判权限」 -->
       <div v-if="isFinishedMatch && !readOnly && !fixMode" class="no-role">
         <p>本场已结束</p>
-        <van-button v-if="isPrivileged" type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
-        <p v-else style="margin-top:8px;color:#969799">如需修改结果，请联系管理员</p>
+        <van-button v-if="canFixScore" type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
+        <p v-else style="margin-top:8px;color:#969799">如需修改结果，请联系裁判或管理员</p>
       </div>
 
       <div v-else-if="canOperate && fixMode" class="controls">
@@ -248,15 +248,17 @@ const locked = computed(() => readOnly.value)
 //   · 赛事进行中：管理员/超管任何时候都行（含比赛结束后的修正与重算胜负）；
 //     其他人必须是本场在任裁判，且比赛未结束
 // 与后端 update_score / swap_sides 的判据保持一致。
-const canOperate = computed(() => {
-  if (!match.value) return false
-  if (readOnly.value) return false        // 赛事已结束：完全只读，超管也不行
-  if (isPrivileged.value) return true     // 赛事进行中：比赛结束后也能修正结果
-  return isReferee.value && match.value.status !== 'finished'
-})
+// 本场「记录的裁判」（含已卸任的那位）——修正已结束的比赛时他也算数（谁记的分谁能改）
+const isMatchReferee = computed(() => !!match.value?.referee && match.value.referee.id === auth.user?.id)
+// 实时操作（记分/结束比赛/交换场地）：赛事未结束 + 比赛未结束，且是本场在任裁判或管理员/超管
+const canOperateLive = computed(() =>
+  !readOnly.value && !isFinishedMatch.value && (isReferee.value || isPrivileged.value))
+// 修正已结束的比赛：赛事未结束 + 比赛已结束，且是管理员/超管或本场记录的裁判
+const canFixScore = computed(() =>
+  !readOnly.value && isFinishedMatch.value && (isPrivileged.value || isMatchReferee.value))
+// 两者合起来＝"这一页能不能操作"，按钮 disabled 与函数守卫都用它
+const canOperate = computed(() => canOperateLive.value || canFixScore.value)
 const isFinishedMatch = computed(() => match.value?.status === 'finished')
-// 实时操作（记分/结束/交换场地）与「修正已结束的比赛」是两码事：前者只适用于未结束的比赛
-const canOperateLive = computed(() => canOperate.value && !isFinishedMatch.value)
 // 修正模式：已结束的比赛默认只读，必须点「修正比赛」→ 确认 → 改本地数字 → 「确认修正」
 // 才提交，避免误触一下加号就把成绩改掉
 const fixMode = ref(false)
