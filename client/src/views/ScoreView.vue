@@ -93,7 +93,7 @@
         <van-button type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
       </div>
 
-      <div v-else-if="fixMode" class="controls">
+      <div v-else-if="canOperate && fixMode" class="controls">
         <div class="swap-hint">修正模式：下面的加减只改本地数字，点「确认修正」才会提交并重算胜负</div>
         <div class="wheel-board">
           <div class="wheel-side">
@@ -270,12 +270,14 @@ async function startFix() {
   } catch {
     return // 取消
   }
-  fixA.value = match.value?.score_a ?? 0
-  fixB.value = match.value?.score_b ?? 0
+  // 按记分牌的左右顺序取值（记分牌左右是 swapSide 映射过的，直接取 score_a/b 会改错队）
+  fixA.value = leftScore.value
+  fixB.value = rightScore.value
   fixMode.value = true
 }
 
 async function confirmFix() {
+  if (fixSubmitting.value) return // 弹确认框期间连点会叠出多个弹窗，残留那个再确认就是第二次提交
   if (fixA.value === fixB.value) {
     showToast('比分不能相同')
     return
@@ -294,8 +296,9 @@ async function confirmFix() {
   try {
     // force_end：改完比分顺便重算胜负（后端对超管允许对已结束的比赛再结束一次）
     await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
-      score_a: fixA.value,
-      score_b: fixB.value,
+      // 提交时映射回真实的 a/b（修正面板里 fixA/fixB 存的是左右顺序）
+      score_a: swapped.value ? fixB.value : fixA.value,
+      score_b: swapped.value ? fixA.value : fixB.value,
       force_end: true,
     })
     showToast('已修正')
@@ -308,7 +311,9 @@ async function confirmFix() {
   }
 }
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
-const readOnly = computed(() => match.value?.tournament_status === 'finished')
+// 只读锁定：后端要求赛事**恰好进行中**才允许写（load_writable_tournament），
+// 所以这里用 !== 'ongoing' 保持等价，避免出现"界面给操作但后端 400"
+const readOnly = computed(() => match.value?.tournament_status !== 'ongoing')
 
 function pp(path: string) {
   const parts = path.split('.')

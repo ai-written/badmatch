@@ -129,6 +129,15 @@ async def update_score(
         raise HTTPException(status_code=403, detail="只有本场裁判、管理员或超级管理员可以记分")
     if m.status == MatchStatus.FINISHED and not is_privileged:
         raise HTTPException(status_code=400, detail="比赛已结束")
+    if m.status == MatchStatus.FINISHED and not score.force_end:
+        # 已结束的比赛只允许"连胜负一起重算"的修正，否则会出现"比分 11:3 但胜方是拿 3 分那队"
+        raise HTTPException(status_code=400, detail="修正已结束的比赛必须同时提交胜负")
+
+    # 修正已结束的比赛时，要用旧比分/旧胜负撤回上一次结算（见 _finalize_match）
+    previous = (
+        (m.score_a or 0, m.score_b or 0, m.winner_pairing_id)
+        if m.status == MatchStatus.FINISHED else None
+    )
     if score.score_a < 0 or score.score_b < 0:
         raise HTTPException(status_code=400, detail="比分不能为负数")
 
@@ -142,14 +151,15 @@ async def update_score(
 
     # Only end via explicit force_end
     if score.force_end:
-        # 已结束的比赛：超管可以再结束一次，用来在修正比分后重算胜负（_finalize_match 幂等）
+        # 已结束的比赛：管理员/超管可以再结束一次，用来在修正比分后重算胜负
+        # （previous 非空 → _finalize_match 只做增量调整，不重复记账）
         if m.status == MatchStatus.FINISHED and not is_privileged:
             raise HTTPException(status_code=400, detail="比赛已结束")
         sa, sb = score.score_a, score.score_b
         if sa == sb:
             raise HTTPException(status_code=400, detail="比分相同，无法结束")
         winner = m.pairing_a_id if sa > sb else m.pairing_b_id
-        await _finalize_match(m, winner, db)
+        await _finalize_match(m, winner, db, previous=previous)
         await _maybe_finish_tournament(tournament_id, db)
         await audit(
             user=user, action="match_force_end",
@@ -582,10 +592,21 @@ def _match_duration(m: Match) -> int | None:
     return secs
 
 
-async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
+async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession,
+                          previous: tuple[int, int, int | None] | None = None):
+    """结算一场比赛。
+
+    previous=(旧 score_a, 旧 score_b, 旧 winner_pairing_id)：**修正已结束的比赛**时传入。
+    这时本场已经结算过一次，所以只按新旧差额调整 PlayerStats，绝不重复累加
+    matches_played，也不覆盖 ended_at —— 否则「修正成绩」这个功能会把成绩单本身改坏
+    （积分榜/个人战绩直接读 player_stats，重复累加后无法自愈）。
+    """
+    was_finished = previous is not None
     m.status = MatchStatus.FINISHED
     m.winner_pairing_id = winner_pairing_id
-    m.ended_at = datetime.now()
+    # 只在首次结束时记录结束时间；修正不改写比赛耗时
+    if m.ended_at is None:
+        m.ended_at = datetime.now()
 
     # update PlayerStats for 4 participants
     pa = await db.execute(select(RoundPairing).where(RoundPairing.id == m.pairing_a_id))
@@ -601,6 +622,14 @@ async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
 
     all_ids = [pairing_a.player_a_id, pairing_a.player_b_id, pairing_b.player_a_id, pairing_b.player_b_id]
 
+    old_a, old_b, old_winner = previous if previous else (None, None, None)
+    old_winner_ids: set[int] = set()
+    if old_winner is not None:
+        if old_winner == m.pairing_a_id:
+            old_winner_ids = {pairing_a.player_a_id, pairing_a.player_b_id}
+        else:
+            old_winner_ids = {pairing_b.player_a_id, pairing_b.player_b_id}
+
     for uid in all_ids:
         stat_result = await db.execute(
             select(PlayerStats).where(
@@ -610,13 +639,23 @@ async def _finalize_match(m: Match, winner_pairing_id: int, db: AsyncSession):
         )
         stat = stat_result.scalar_one_or_none()
         if stat:
-            stat.matches_played += 1
+            in_a = uid in (pairing_a.player_a_id, pairing_a.player_b_id)
+            if not was_finished:
+                stat.matches_played += 1
+            elif old_a is not None and old_b is not None:
+                # 撤回上一次的结算：与本轮相加后等价于"只按差值调整"
+                stat.points_for -= old_a if in_a else old_b
+                stat.points_against -= old_b if in_a else old_a
+                if uid in old_winner_ids:
+                    stat.matches_won -= 1
+                else:
+                    stat.matches_lost -= 1
+            stat.points_for += m.score_a if in_a else m.score_b
+            stat.points_against += m.score_b if in_a else m.score_a
             if uid in winner_ids:
                 stat.matches_won += 1
             else:
                 stat.matches_lost += 1
-            stat.points_for += m.score_a if uid in {pairing_a.player_a_id, pairing_a.player_b_id} else m.score_b
-            stat.points_against += m.score_b if uid in {pairing_a.player_a_id, pairing_a.player_b_id} else m.score_a
 
 
 async def _broadcast_match(m: Match, tournament_id: int) -> None:
