@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 只在落后时 setval，正常情况下这条语句不做任何改动。
 _SYNC_SEQUENCES_SQL = """
 do $$
-declare r record; mx bigint; lv bigint;
+declare r record; mx bigint; lv bigint; ic boolean;
 begin
   for r in
     select c.relname as tbl, a.attname as col,
@@ -32,9 +32,13 @@ begin
       and pg_get_serial_sequence(quote_ident(c.relname), a.attname) is not null
   loop
     execute format('select coalesce(max(%I), 0) from %I', r.col, r.tbl) into mx;
-    execute format('select last_value from %s', r.seq) into lv;
-    if lv < mx then
-      -- is_called=false：让下一个 nextval 正好是 max+1
+    execute format('select last_value, is_called from %s', r.seq) into lv, ic;
+    -- 判断「下一次 nextval 会不会撞上已有的 id」：is_called=false 时下一个 nextval
+    -- 就是 last_value 本身（不是 last_value+1）。只看 last_value 会漏掉
+    -- setval(seq, (select max(id) from t), false) 这种很常见的手工修法：
+    -- 那时 last_value = max(id)、is_called = false，下一次 nextval 必然撞主键，
+    -- 而 lv < mx 为假 → 不会被修正。
+    if (case when ic then lv else lv - 1 end) < mx then
       execute format('select setval(%L, %s, false)', r.seq, mx + 1);
       raise notice 'migration: sequence % realigned to %', r.seq, mx + 1;
     end if;
@@ -114,7 +118,22 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
     if not await _column_exists(conn, "users", "email"):
         logger.info("migration: adding users.email column")
         await conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(255)"))
-    if not await _constraint_exists(conn, "uq_users_email"):
+    # 判断依据是「是否已有覆盖 email 的唯一索引」，而不是约束名：
+    # create_all 建的新库里 PG 会自动命名成 users_email_key，而迁移加的叫 uq_users_email。
+    # 只按名字查 → 新库第二次启动会再加一条完全重复的唯一约束，
+    # 且 register 的 IntegrityError 分支也匹配不到（已让 auth.py 两个名字都认）。
+    has_email_unique = (
+        await conn.execute(
+            text(
+                "SELECT 1 FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indrelid "
+                "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) "
+                "WHERE c.relname = 'users' AND i.indisunique AND a.attname = 'email' "
+                "GROUP BY i.indexrelid HAVING count(*) = 1"
+            )
+        )
+    ).scalar_one_or_none() is not None
+    if not has_email_unique:
         logger.info("migration: adding uq_users_email constraint")
         await conn.execute(
             text("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email)")

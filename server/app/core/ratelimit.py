@@ -3,7 +3,12 @@ from threading import Lock
 
 
 class RateLimiter:
-    """简单内存滑动窗口限流：同一 key 在窗口内最多允许 max_attempts 次失败。"""
+    """简单内存**固定窗口**限流：同一 key 在窗口内最多允许 max_attempts 次失败。
+
+    注意是固定窗口不是滑动窗口：窗口起点锚在该 key 第一次 check 的时刻，
+    过期整体清零。因此跨窗口边界时，短时间内最多可能放行 2×max_attempts
+    （窗口末尾用满一批 + 新窗口再放行一批）——设置阈值时按这个最坏情况留余量。
+    """
 
     def __init__(self, max_attempts: int, window_seconds: int):
         self.max_attempts = max_attempts

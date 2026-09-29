@@ -25,9 +25,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 _settings = get_settings()
 login_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
 # 兜底那把按 IP，阈值独立且宽松得多（理由见 config.py 里的注释）：
-# 5 次/10 分钟是「单个账号」的额度，拿它卡整个出口 IP 会误伤同网络的其他人，
-# 而且这份计数**任何重置都不会清**（重置密码只清按用户名的那把），
-# 于是「改完密码还是登不上」——只能等窗口过期或重启进程。
+# 5 次/10 分钟是「单个账号」的额度，拿它卡整个出口 IP 会误伤同网络的其他人。
+# 这份计数只在「管理员重置密码」时被清（reset_all），邮件链接重置刻意不动它 ——
+# 否则被锁住的人只要走一次邮件重置，就能把整个出口 IP 的额度也刷掉。
+# 注意：按用户名那把可以被**别人**触发（key 来自请求体、先于凭证校验），
+# 知道用户名的人每窗口打 5 次错密码就能让该账号登不上；自救路径是邮件重置或管理员重置。
 login_ip_limiter = RateLimiter(_settings.LOGIN_IP_MAX_ATTEMPTS, _settings.LOGIN_IP_WINDOW_SECONDS)
 invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 # 初始管理员注册码防爆破（按 IP 限流）
@@ -123,7 +125,10 @@ async def register(
         detail = str(getattr(e, "orig", e))
         if "ix_users_username" in detail:
             raise HTTPException(status_code=400, detail="用户名已被使用")
-        if "uq_users_email" in detail:
+        if "uq_users_email" in detail or "users_email_key" in detail:
+            # 两个名字都要认：迁移加的叫 uq_users_email，而 create_all 建的新库
+            # PG 自动命名成 users_email_key（模型里 unique=True 没有命名约定）。
+            # 只认一个的话，新库上「邮箱重复」会被报成 500「注册失败，请稍后重试」。
             raise HTTPException(status_code=400, detail="邮箱已被使用")
         logger.exception("register failed with unexpected IntegrityError")
         raise HTTPException(status_code=500, detail="注册失败，请稍后重试")
@@ -449,6 +454,10 @@ async def update_profile(
         await db.flush()
     except IntegrityError:
         raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
+    # 先提交再写审计：audit() 用独立会话插入 audit_logs，而这里刚更新了 users 行
+    # （username/email 都带唯一索引）。写在提交之前，审计记录的是一次还没落库的改动 ——
+    # 提交失败就会留下一条假日志。register / upload_avatar 都是这个顺序。
+    await db.commit()
     await audit(
         user=user, action="update_profile",
         target_type="user", target_id=user.id,
@@ -594,6 +603,8 @@ async def generate_invite(
         raise HTTPException(status_code=500, detail="邀请码生成失败，请重试")
     user.invite_code = code
     await db.flush()
+    # 同 update_profile：先提交再审计，避免审计记录一次未落库的改动
+    await db.commit()
     await audit(
         user=user, action="generate_invite",
         target_type="user", target_id=user.id,
