@@ -120,14 +120,14 @@ async def update_score(
         raise HTTPException(status_code=404, detail="比赛不存在")
     # 赛事已结束 = 整场只读，谁都不能再改（超级管理员也不行）
     await load_writable_tournament(db, tournament_id)
-    # 比赛已结束是另一回事：赛事进行中时，超级管理员仍可修正该场比分并重算胜负
-    is_superadmin = user.role == "superadmin"
+    # 比赛已结束是另一回事：赛事进行中时，管理员/超级管理员仍可修正该场比分并重算胜负
+    is_privileged = user.role in ("admin", "superadmin")
     # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
-    # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，超管可以直接代记分
+    # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，管理员/超管可以直接代记分
     # （记第一分就会把比赛从 pending 变 ongoing，也就是"开始比赛"）
-    if not (user.role == "superadmin" or (m.referee_id == user.id and m.has_active_referee)):
-        raise HTTPException(status_code=403, detail="只有本场裁判或超级管理员可以记分")
-    if m.status == MatchStatus.FINISHED and not is_superadmin:
+    if not (user.role in ("admin", "superadmin") or (m.referee_id == user.id and m.has_active_referee)):
+        raise HTTPException(status_code=403, detail="只有本场裁判、管理员或超级管理员可以记分")
+    if m.status == MatchStatus.FINISHED and not is_privileged:
         raise HTTPException(status_code=400, detail="比赛已结束")
     if score.score_a < 0 or score.score_b < 0:
         raise HTTPException(status_code=400, detail="比分不能为负数")
@@ -143,7 +143,7 @@ async def update_score(
     # Only end via explicit force_end
     if score.force_end:
         # 已结束的比赛：超管可以再结束一次，用来在修正比分后重算胜负（_finalize_match 幂等）
-        if m.status == MatchStatus.FINISHED and not is_superadmin:
+        if m.status == MatchStatus.FINISHED and not is_privileged:
             raise HTTPException(status_code=400, detail="比赛已结束")
         sa, sb = score.score_a, score.score_b
         if sa == sb:
@@ -202,9 +202,9 @@ async def swap_sides(
     # 赛事已结束则该场只读，不允许再交换场地
     await load_writable_tournament(db, tournament_id)
     # 同上：已卸任的裁判不能再交换场地
-    # 同 update_score：超级管理员也可交换场地
-    if not (user.role == "superadmin" or (m.referee_id == user.id and m.has_active_referee)):
-        raise HTTPException(status_code=403, detail="只有本场裁判或超级管理员可以交换场地")
+    # 同 update_score：管理员/超级管理员也可交换场地
+    if not (user.role in ("admin", "superadmin") or (m.referee_id == user.id and m.has_active_referee)):
+        raise HTTPException(status_code=403, detail="只有本场裁判、管理员或超级管理员可以交换场地")
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
 

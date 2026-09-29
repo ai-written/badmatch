@@ -266,8 +266,8 @@ function onVisibilityChange() {
 }
 
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
-// 开赛 / 提前结束赛事：创建者或超级管理员（超管兜底，房主临时不在也能推进流程）
-const canManage = computed(() => isCreator.value || auth.user?.role === 'superadmin')
+// 开赛 / 提前结束赛事：创建者、管理员或超级管理员（兜底，房主临时不在也能推进流程）
+const canManage = computed(() => isCreator.value || auth.user?.role === 'admin' || auth.user?.role === 'superadmin')
 const canDelete = computed(() => {
   if (!auth.user || !tournament.value) return false
   if (auth.user.role === 'admin' || auth.user.role === 'superadmin') return true

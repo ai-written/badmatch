@@ -38,8 +38,8 @@ async def start_tournament(
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404, detail="赛事不存在")
-    if tournament.creator_id != user.id and user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="只有赛事创建者或超级管理员可以开始比赛")
+    if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有赛事创建者、管理员或超级管理员可以开始比赛")
     if tournament.status != TournamentStatus.OPEN:
         raise HTTPException(status_code=400, detail="赛事不是报名中状态")
 
@@ -412,9 +412,9 @@ async def end_tournament(
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404)
-    # 提前结束赛事：创建者或超级管理员（超管兜底，房主临时不在也能收尾）
-    if tournament.creator_id != user.id and user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="只有赛事创建者或超级管理员可以结束赛事")
+    # 提前结束赛事：创建者、管理员或超级管理员（兜底：房主临时不在也能收尾）
+    if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有赛事创建者、管理员或超级管理员可以结束赛事")
     if tournament.status != TournamentStatus.ONGOING:
         raise HTTPException(status_code=400, detail="只能结束进行中的赛事")
     tournament.status = TournamentStatus.FINISHED

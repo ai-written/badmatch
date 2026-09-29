@@ -234,7 +234,8 @@ const calibrateTimer = setInterval(() => {
 // --- 时长逻辑结束 ---
 
 // 只有在任裁判才有记分/交换场地权限；referee 可能只是历史记录（已卸任）
-const isSuperadmin = computed(() => auth.user?.role === 'superadmin')
+// 管理员 / 超级管理员：与裁判权限的兜底关系（见下面的 canOperate）
+const isPrivileged = computed(() => auth.user?.role === 'admin' || auth.user?.role === 'superadmin')
 // 本场在任裁判（严格是谁在任，不含超管）
 const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
 // 只读锁定：赛事一结束就完全只读 —— 连超级管理员也不能再改（产品规则）
@@ -247,7 +248,7 @@ const locked = computed(() => readOnly.value)
 const canOperate = computed(() => {
   if (!match.value) return false
   if (readOnly.value) return false        // 赛事已结束：完全只读，超管也不行
-  if (isSuperadmin.value) return true     // 赛事进行中：比赛结束后也能修正结果
+  if (isPrivileged.value) return true     // 赛事进行中：比赛结束后也能修正结果
   return isReferee.value && match.value.status !== 'finished'
 })
 const isFinishedMatch = computed(() => match.value?.status === 'finished')
