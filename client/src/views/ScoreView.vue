@@ -443,11 +443,25 @@ async function endMatch() {
 }
 
 async function claimReferee() {
+  // 本场已有在任裁判时先确认：认领会**顶替**对方（裁判转让 / 借手机代认领的场景）
+  const cur = match.value?.active_referee
+  if (cur && cur.id !== auth.user?.id) {
+    try {
+      await showConfirmDialog({
+        title: '顶替本场裁判',
+        message: `本场裁判是「${cur.username}」。确认后改由你执裁，对方将失去记分权限（会收到站内消息）。`,
+        confirmButtonText: '顶替',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return // 取消
+    }
+  }
   try {
     await api.post(`/tournaments/${route.params.id}/matches/${route.params.matchId}/claim-referee`)
     showToast('认领成功')
   } catch {
-    // 并发认领被别人抢先（400）、或赛事已结束：拦截器已提示。
+    // 赛事已结束等异常路径：拦截器已提示。
     // 这里不往外抛，避免未处理的 Promise 拒绝
   } finally {
     // 无论成功失败都刷新：失败时界面需要从「可认领」更新为真实状态

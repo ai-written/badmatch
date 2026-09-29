@@ -125,7 +125,7 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
 import { hiddenFinishedIds, visibleRounds as buildVisibleRounds, focusMatchId, focusScrollTop } from '@/utils/schedule'
-import { showToast } from 'vant'
+import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
 const router = useRouter()
@@ -171,6 +171,21 @@ function goScore(m: any) {
 }
 
 async function claimReferee(m: any) {
+  // 本场已有在任裁判时先确认：认领会**顶替**对方（用于裁判临时有事要转让，
+  // 或原裁判手机没电了借别人的手机代认领）。后端允许顶替，这里只做提醒。
+  const cur = m.active_referee
+  if (cur && cur.id !== auth.user?.id) {
+    try {
+      await showConfirmDialog({
+        title: '顶替本场裁判',
+        message: `本场裁判是「${cur.username}」。确认后改由你执裁，对方将失去记分权限（会收到站内消息）。`,
+        confirmButtonText: '顶替',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return // 取消
+    }
+  }
   await api.post(`/tournaments/${route.params.id}/matches/${m.id}/claim-referee`)
   showToast('认领成功')
   // 认领后立即进入该场记分页，省掉用户再点一次

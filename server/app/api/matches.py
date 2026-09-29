@@ -515,18 +515,17 @@ async def _build_matches_out(
         #   3) 无人执裁过（referee_id 为空）——任何人可认领；
         #      或者已有历史裁判但已卸任，且当前用户就是那位原裁判（可收回）
         #   4) 自己不是本场参赛者
+        # 可认领的条件：赛事进行中 + 比赛未结束 + 自己不是「当前在任裁判」。
+        # 认领本身允许顶替在任裁判、也允许参赛选手（理由见 referee.py），所以这里
+        # 不再限制「无人执裁过」或「非参赛者」；只把自己已经是裁判的情况排掉，
+        # 免得按钮写着「申请成为裁判」而其实已经是自己的场次。
         if (
             user
             and tournament_status == TournamentStatus.ONGOING.value
             and m.status in (MatchStatus.PENDING, MatchStatus.ONGOING)
-            and (m.referee_id is None or (m.referee_id == user.id and not m.has_active_referee))
+            and not (m.referee_id == user.id and m.has_active_referee)
         ):
-            match_player_ids = {
-                pairing_a.player_a_id, pairing_a.player_b_id,
-                pairing_b.player_a_id, pairing_b.player_b_id,
-            }
-            if user.id not in match_player_ids:
-                can_referee = True
+            can_referee = True
 
         support_a = support_counts.get(m.id, {}).get("a", 0)
         support_b = support_counts.get(m.id, {}).get("b", 0)

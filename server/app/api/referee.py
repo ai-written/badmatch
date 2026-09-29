@@ -7,7 +7,7 @@ from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.api.matches import load_writable_tournament
 from app.models.user import User
-from app.models.round import Match, MatchStatus, RoundPairing
+from app.models.round import Match, MatchStatus, Notification
 from app.schemas.match import ClaimRefereeRequest
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["referee"])
@@ -35,32 +35,32 @@ async def claim_referee(
     await load_writable_tournament(db, tournament_id)
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
-    if m.referee_id is not None:
-        # referee_id 会作为执裁历史长期保留：
-        # - 他人不可覆盖，避免历史记录人数与实际认领规则混乱
-        # - 原裁判曾卸任（referee_released_at 非空）时，允许自己收回该场
-        if m.has_active_referee:
-            raise HTTPException(status_code=400, detail="已有裁判认领本场比赛")
-        if m.referee_id != user.id:
-            raise HTTPException(status_code=400, detail="该场已有裁判记录，不能再认领")
-
-    # check user is not a player in this match
-    pa = await db.execute(select(RoundPairing).where(RoundPairing.id == m.pairing_a_id))
-    pb = await db.execute(select(RoundPairing).where(RoundPairing.id == m.pairing_b_id))
-    pairing_a = pa.scalar_one()
-    pairing_b = pb.scalar_one()
-    match_player_ids = {
-        pairing_a.player_a_id, pairing_a.player_b_id,
-        pairing_b.player_a_id, pairing_b.player_b_id,
-    }
-    if user.id in match_player_ids:
-        raise HTTPException(status_code=400, detail="参赛选手不能担任本场比赛裁判")
+    # 认领规则（按真实使用场景放宽，前端会先弹确认框再发请求）：
+    # - 已有在任裁判时也允许认领，等于「顶替」：裁判临时有事要转让、或原裁判手机
+    #   没电了让别人代为执裁，都会发生；被顶替的人会收到站内消息，不至于白跑一场。
+    # - 参赛选手也允许认领：同样是为了「借别人的手机代认领」这种场景 ——
+    #   接口层无法区分手机后面坐着的是谁，加限制只会挡住正常使用。
+    # - 原裁判曾卸任（referee_released_at 非空）的场次同样任何人都能接手；
+    #   原来「他人不可覆盖历史记录」会导致这种场次只有原裁判能收回。
+    replaced_referee_id = None
+    if m.referee_id is not None and m.referee_id != user.id and m.has_active_referee:
+        replaced_referee_id = m.referee_id
 
     m.referee_id = user.id
-    # 自己收回曾卸任的场次时清空卸任时间，恢复在任状态
+    # 接手 / 收回都清空卸任时间，恢复在任状态
     m.referee_released_at = None
+    if replaced_referee_id:
+        # 被顶替的人要能知道：否则他会按约定去执裁，到场才发现已不是自己的场次
+        db.add(Notification(
+            user_id=replaced_referee_id,
+            tournament_id=tournament_id,
+            type="referee_replaced",
+            message="您认领的裁判场次已由他人接手，如仍需执裁请重新认领。",
+        ))
+
     await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
-                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+                detail={"tournament_id": tournament_id, "replaced_referee_id": replaced_referee_id},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     # 先提交再广播：订阅者收到 referee_claimed 后回查比赛详情时，
     # 未提交的话看到的仍是无裁判状态，这一次实时更新就被吞掉
     await db.commit()
