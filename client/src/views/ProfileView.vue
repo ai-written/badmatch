@@ -70,7 +70,9 @@
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px" v-if="canInvite">
-        <van-cell title="邀请码" :label="inviteCode ? '点击重新生成，旧码会立即失效' : ''" :value="inviteCode || '点击生成'" @click="generateInvite" clickable />
+        <!-- label 会被右侧的邀请码挤窄，所以文案要短（具体后果由确认弹窗说明）；
+             另加 nowrap + 省略号兜底：窄屏上宁可截断也不折行 -->
+        <van-cell class="invite-code-cell" title="邀请码" :label="inviteCode ? '点击重新生成' : ''" :value="inviteCode || '点击生成'" @click="generateInvite" clickable />
         <van-cell v-if="inviteCode" title="邀请链接" label="点击复制" :value="inviteLink" @click="copyInviteLink" clickable />
       </van-cell-group>
 
@@ -294,6 +296,13 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 邀请码那行的副标题只占一行：右侧的值是 8 位码/长链接，会把 label 挤得很窄，
+   文字一长就折行（两行很难看）。文案已精简，这里再兜一层，窄屏宁可省略号截断 */
+.invite-code-cell :deep(.van-cell__label) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .profile-page { display: flex; flex-direction: column; background: #f5f6f8; }
 .profile-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
