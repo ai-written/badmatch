@@ -116,6 +116,13 @@ async def register(
     except IntegrityError:
         raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
 
+    # 必须在这里先提交，再写注册审计。
+    # audit() 用的是**独立会话并立即提交**（这样异常路径的审计也能落库），
+    # 而 audit_logs.user_id 有指向 users 的外键：用户行若还在本事务里没提交，
+    # 那条审计会因外键不满足而写入失败，又被 audit() 的 except 静默吞掉 ——
+    # 表现就是「注册在操作日志里根本查不到」，且日志里没有任何报错。
+    await db.commit()
+
     token = create_access_token(
         {"sub": str(user.id), "username": user.username},
         token_version=user.token_version,
