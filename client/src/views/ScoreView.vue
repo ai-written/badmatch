@@ -22,10 +22,6 @@
         <van-icon name="lock" />
         <span>赛事已结束，本场为只读状态，不能再记分或改动数据</span>
       </div>
-      <div v-else-if="readOnly" class="readonly-banner">
-        <van-icon name="edit" />
-        <span>赛事已结束，你是超级管理员 —— 仍可修正比分；改完请再点一次「结束比赛」以重算胜负</span>
-      </div>
       <div class="scoreboard">
         <div class="sb-team" :class="{ win: leftWin }" @click="swapTeams">
           <div class="sb-player">
@@ -90,6 +86,9 @@
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
+      <div v-if="canOperate && isSuperadmin && match.status === 'finished'" class="swap-hint">
+        本场已结束，你是超级管理员 —— 可修正比分，改完再点一次「结束比赛」重算胜负
+      </div>
       <div v-if="canOperate" class="controls">
         <div class="wheel-board">
           <div class="wheel-side">
@@ -215,8 +214,8 @@ const calibrateTimer = setInterval(() => {
 const isSuperadmin = computed(() => auth.user?.role === 'superadmin')
 // 本场在任裁判（严格是谁在任，不含超管）
 const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
-// 只读锁定：赛事已结束、且不是超级管理员（超管赛后仍可修正比分）
-const locked = computed(() => readOnly.value && !isSuperadmin.value)
+// 只读锁定：赛事一结束就完全只读 —— 连超级管理员也不能再改（产品规则）
+const locked = computed(() => readOnly.value)
 // 能否操作本场（记分 / 结束比赛 / 交换场地）—— 注意按钮的 disabled 与操作函数里的
 // 守卫都要用它，否则会出现「按钮是灰的/点了没反应」但界面又提示可以修改的矛盾：
 //   · 超级管理员：任何时候都行（含赛事结束后、比赛结束后的修正与重算胜负）
@@ -224,8 +223,9 @@ const locked = computed(() => readOnly.value && !isSuperadmin.value)
 // 与后端 update_score / swap_sides 的判据保持一致。
 const canOperate = computed(() => {
   if (!match.value) return false
-  if (isSuperadmin.value) return true
-  return isReferee.value && !readOnly.value && match.value.status !== 'finished'
+  if (readOnly.value) return false        // 赛事已结束：完全只读，超管也不行
+  if (isSuperadmin.value) return true     // 赛事进行中：比赛结束后也能修正结果
+  return isReferee.value && match.value.status !== 'finished'
 })
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
 const readOnly = computed(() => match.value?.tournament_status === 'finished')

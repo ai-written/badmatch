@@ -118,10 +118,10 @@ async def update_score(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 赛事已结束则该场只读；超级管理员例外 —— 赛后比分记错了要能改回来
+    # 赛事已结束 = 整场只读，谁都不能再改（超级管理员也不行）
+    await load_writable_tournament(db, tournament_id)
+    # 比赛已结束是另一回事：赛事进行中时，超级管理员仍可修正该场比分并重算胜负
     is_superadmin = user.role == "superadmin"
-    if not is_superadmin:
-        await load_writable_tournament(db, tournament_id)
     # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
     # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，超管可以直接代记分
     # （记第一分就会把比赛从 pending 变 ongoing，也就是"开始比赛"）
