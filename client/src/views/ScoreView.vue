@@ -172,6 +172,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { onBeforeRouteLeave } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
@@ -640,6 +641,22 @@ watch(lastMessage, (msg) => {
   // 本页常停在"已结束的比赛"上，而 30 秒校准只在比赛进行中才跑，不接这个广播可能长期不刷新。
   if (msg.type === 'tournament_finished') {
     fetchMatch().catch(() => {})
+  }
+})
+
+// 修正模式下离开会丢掉草稿，先确认（点「返回」和系统返回键都会走到这里）
+onBeforeRouteLeave(async () => {
+  if (!fixMode.value) return true
+  try {
+    await showConfirmDialog({
+      title: '放弃修正？',
+      message: '修正还没提交，离开会丢掉刚才的修改。',
+      confirmButtonText: '放弃修改',
+      cancelButtonText: '继续修正',
+    })
+    return true
+  } catch {
+    return false
   }
 })
 
