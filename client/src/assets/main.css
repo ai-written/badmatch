@@ -70,3 +70,9 @@ a { text-decoration: none; color: inherit; }
 .vh-55 { height: 55vh; height: calc(var(--vh, 1vh) * 55); }
 .vh-60 { height: 60vh; height: calc(var(--vh, 1vh) * 60); }
 .vh-65 { height: 65vh; height: calc(var(--vh, 1vh) * 65); }
+
+/* 圆形头像（Vant 的 round 会加 .van-image--round）一律按「裁切填充」渲染。
+ * 默认是 object-fit: fill：上传的头像若不是正方形，脸会被拉宽变形。
+ * 用 cover 只裁不拉，而且对改造前就已经存下的非正方形头像同样生效（不需要重新上传）。
+ * 只作用于圆形头像，普通长方形图片不受影响。 */
+.van-image--round .van-image__img { object-fit: cover; }

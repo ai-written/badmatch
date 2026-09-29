@@ -533,14 +533,27 @@ async def upload_avatar(
 
 
 def _process_avatar(content: bytes, max_size: int = 100, quality: int = 75) -> bytes:
-    """压缩头像：修正 EXIF 方向、等比缩放至 max_size、透明背景白底合成、JPEG 输出。"""
+    """压缩头像：修正 EXIF 方向、按短边中心裁成正方形、等比缩小、透明背景白底合成、JPEG 输出。
+
+    为什么要裁成正方形：头像在界面里一律画成圆形（object-fit 只会裁不会拉），
+    非正方形存下来要么被拉变形、要么在圆形里留边。裁掉比留白好——留白是永久留在
+    图像里的，任何展示都救不回来。
+    """
     from io import BytesIO
     from PIL import Image, ImageOps, UnidentifiedImageError
 
     try:
         img = Image.open(BytesIO(content))
         img = ImageOps.exif_transpose(img)  # 修正手机拍照方向
-        img.thumbnail((max_size, max_size))  # 保持宽高比缩放
+        # 先按短边中心裁成正方形（保留原始分辨率），再用 thumbnail 缩小：
+        # thumbnail 不会放大，所以小图仍保持原尺寸，只是变成正方形
+        side = min(img.size)
+        if side <= 0:
+            raise ValueError("图片尺寸非法")
+        left = (img.width - side) // 2
+        top = (img.height - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+        img.thumbnail((max_size, max_size))  # 保持宽高比缩放（此时宽高已相等）
         if img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGBA")
             bg = Image.new("RGB", img.size, (255, 255, 255))

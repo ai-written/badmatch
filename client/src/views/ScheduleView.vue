@@ -350,6 +350,8 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 .match-info .van-button { font-size: 10px; height: 22px; padding: 0 6px; }
 
 .avatar-badge { position: relative; display: inline-block; }
+/* 同 TournamentDetail：消除 inline-block 头像的基线间隙，角标定位才准 */
+.avatar-badge :deep(.van-image) { display: block; }
 .badge-icon {
   position: absolute; top: -4px; right: -4px;
   font-size: 14px; line-height: 1;

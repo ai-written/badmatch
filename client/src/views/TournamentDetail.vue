@@ -589,6 +589,9 @@ onUnmounted(() => {
 .player-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 70px; cursor: pointer; }
 .player-name { font-size: 12px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
 .avatar-badge-sm { position: relative; display: inline-block; }
+/* inline-block 的头像下方会留出基线间隙（实测 4px），外层盒子因此比头像高，
+   角标（top/left 负值）的定位就整体偏了；块级化即可消除（不动行高，避免影响角标文字） */
+.avatar-badge-sm :deep(.van-image) { display: block; }
 .host-badge {
   position: absolute; top: -2px; left: -2px;
   font-size: 8px; color: #fff; background: #e74c3c;

@@ -315,6 +315,11 @@ onMounted(async () => {
 .forgot-link { text-align: center; font-size: 13px; color: #1989fa; padding: 4px 0 20px; }
 .profile-header { display: flex; flex-direction: column; align-items: center; padding: 30px 0 20px; }
 .avatar-wrapper { position: relative; cursor: pointer; }
+/* 头像块级化：.van-image 默认是 inline-block，行框会在图片下方留出基线间隙（实测 4px），
+   于是外层容器比头像高 4px；而遮罩是 inset:0 + border-radius:50%，就跟着变成
+   72×76 的椭圆 —— 圆形下缘那 4px 没有头像覆盖，看起来就是一条空白。
+   用块级化而不是给容器设 line-height:0，是为了不影响容器内其它文字（如角标）的行高 */
+.avatar-wrapper :deep(.van-image) { display: block; }
 .avatar-overlay { position: absolute; inset: 0; border-radius: 50%; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .2s; }
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
 .profile-header h3 { margin-top: 10px; font-size: 18px; }
