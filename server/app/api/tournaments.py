@@ -411,6 +411,9 @@ async def register(
         reg.is_active = True
         # 又回来了就不算「取消记录」，清掉取消时间（否则记录页会留着一条已失效的取消）
         reg.cancelled_at = None
+        # created_at 当作「这一次报名的时间」：重新报名要刷新，否则名单里会显示几天前
+        # 的旧时间、排序也停在第一次报名的位置，与「按报名时间排」的语义相反
+        reg.created_at = func.now()
     else:
         db.add(Registration(tournament_id=tournament_id, user_id=user.id))
 
@@ -494,16 +497,28 @@ async def list_cancellations(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    """谁取消过报名。
+    """谁取消过报名 / 谁开赛后退出。
 
-    取消是「标记 is_active=False」而不是删记录，所以这里能查到人。
+    两条路径都会把 Registration.is_active 置 False（报名阶段取消 + 赛中退赛），
+    所以这里用「有没有失效的 PlayerStats」区分：有 = 赛中退赛（开赛后才会建
+    PlayerStats），没有 = 报名阶段取消（含 cancelled_at 为空的老数据）。
     可见性与报名名单一致（登录用户都能看）——名单本身对登录用户就是公开的，
     单独给取消记录加限制反而会造成「看得见名单、看不见谁退出」的怪状态。
     """
     from app.models.user import User as UserModel
+    from app.models.tournament import PlayerStats as PlayerStatsModel
+    # 与 /rounds 一致：赛事不存在给 404，否则前端会把「赛事已删除」显示成「暂无记录」
+    exists = await db.execute(select(Tournament.id).where(Tournament.id == tournament_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="赛事不存在")
     result = await db.execute(
-        select(Registration, UserModel.username, UserModel.avatar)
+        select(Registration, UserModel.username, UserModel.avatar, PlayerStatsModel.is_active)
         .join(UserModel, Registration.user_id == UserModel.id)
+        .outerjoin(
+            PlayerStatsModel,
+            (PlayerStatsModel.tournament_id == Registration.tournament_id)
+            & (PlayerStatsModel.user_id == Registration.user_id),
+        )
         .where(Registration.tournament_id == tournament_id, Registration.is_active == False)
         # 老数据的 cancelled_at 为 NULL，排到最后但不要丢掉
         .order_by(Registration.cancelled_at.desc().nulls_last(), Registration.id.desc())
@@ -515,6 +530,7 @@ async def list_cancellations(
             username=row[1],
             avatar=row[2],
             cancelled_at=row[0].cancelled_at.isoformat() if row[0].cancelled_at else None,
+            kind="withdraw" if row[3] is False else "cancel",
         )
         for row in rows
     ]

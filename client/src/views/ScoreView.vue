@@ -509,6 +509,15 @@ watch(lastMessage, (msg) => {
     match.value.support_b = msg.support_b
     fetchMatch().catch(() => {})
   }
+  // 认领 / 卸任 / 被顶替：裁判身份变了，权限与页面状态要立刻跟上。
+  // 尤其「自己认领的场次被别人顶替」时，不刷新的话按钮还停在记分态，
+  // 下一次记分才报 403 —— 那时用户只会觉得「点了没反应」。
+  if (
+    (msg.type === 'referee_claimed' || msg.type === 'referee_released')
+    && msg.match_id === Number(route.params.matchId)
+  ) {
+    fetchMatch().catch(() => {})
+  }
 })
 
 // 锁屏/后台返回时补一次刷新：冻结期间定时器与 WebSocket 都可能失效，

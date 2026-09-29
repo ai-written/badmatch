@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
@@ -184,6 +184,9 @@ async def withdraw_player(
         if not r:
             raise HTTPException(status_code=400, detail="未报名")
         r.is_active = False
+        # 与 cancel-register 同一口径：取消/退赛都要记时间，否则「取消报名记录」里
+        # 这条只能显示「时间未知」，和「老数据缺列」的兜底语义混淆
+        r.cancelled_at = func.now()
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                     detail={"player_id": player_id, "self": True, "phase": "open"},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -218,6 +221,9 @@ async def withdraw_player(
     reg_record = reg.scalar_one_or_none()
     if reg_record:
         reg_record.is_active = False
+        # 同上：开赛后退出也要记时间（取消报名记录接口按「有没有失效的 PlayerStats」
+        # 区分它是「报名阶段取消」还是「赛中退赛」）
+        reg_record.cancelled_at = func.now()
 
     if not ps.is_active:
         # 已退赛（如旧版本残留状态）：若本人仍是房主，先把房主转给剩余活跃选手，

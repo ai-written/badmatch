@@ -16,6 +16,10 @@
 
 /** 浏览器工具栏（含底部工具条）一般不超过这个高度；键盘会缩几百像素，属于另一回事 */
 const MAX_BROWSER_GAP = 160
+// 探针结果的缓存（见 measureBrowserGap 里的说明）。声明放在函数之前，
+// 避免将来有人在模块初始化阶段就调用它而踩到 let 的暂时性死区
+let gapCacheKey = ''
+let gapCacheValue = 0
 
 /**
  * 是否需要「贴底 fixed 补偿」。
@@ -46,6 +50,12 @@ function needsBottomGapCompensation(): boolean {
 function measureBrowserGap(visibleHeight: number): number {
   if (!needsBottomGapCompensation()) return 0
 
+  // 探针是「写 DOM 再读几何」，每次都会强制一次同步布局。而这个函数会被 1 秒心跳
+  // 反复调用（Android/X5 上 needsBottomGapCompensation 为 true），视口没变时纯属白跑。
+  // 两个输入高度不变 → 锚定关系不可能变，缓存结果即可（变化时 key 变，会自动重测）。
+  const key = `${window.innerHeight}|${visibleHeight}`
+  if (key === gapCacheKey) return gapCacheValue
+
   const probe = document.createElement('div')
   probe.style.cssText =
     'position:fixed;bottom:0;left:0;width:1px;height:1px;pointer-events:none;visibility:hidden'
@@ -59,8 +69,11 @@ function measureBrowserGap(visibleHeight: number): number {
   // 键盘弹出时 visualViewport 会大幅缩小，那不是浏览器工具栏：
   // 不设上限的话弹层会被顶到屏幕中间。超过上限就认为当前是键盘态，不做偏移。
   const gap = bottom - visibleHeight
-  if (!Number.isFinite(gap) || gap <= 0.5 || gap > MAX_BROWSER_GAP) return 0
-  return Math.round(gap)
+  gapCacheKey = key
+  gapCacheValue = (!Number.isFinite(gap) || gap <= 0.5 || gap > MAX_BROWSER_GAP)
+    ? 0
+    : Math.round(gap)
+  return gapCacheValue
 }
 
 let lastVh = ''

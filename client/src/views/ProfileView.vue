@@ -297,7 +297,11 @@ onMounted(async () => {
 
 <style scoped>
 /* 邀请码那行的副标题只占一行：右侧的值是 8 位码/长链接，会把 label 挤得很窄，
-   文字一长就折行（两行很难看）。文案已精简，这里再兜一层，窄屏宁可省略号截断 */
+   文字一长就折行（两行很难看）。文案已精简，这里再兜一层，窄屏宁可省略号截断。
+   注意 min-width:0 不能省：Vant 的 .van-cell__title 是 flex 项，默认 min-width:auto，
+   nowrap 会把它的最小宽度顶成整行文字宽度 —— 少了这条，省略号永远不触发，
+   被挤的反而是右侧的值（与本意相反）。 */
+.invite-code-cell :deep(.van-cell__title) { min-width: 0; }
 .invite-code-cell :deep(.van-cell__label) {
   white-space: nowrap;
   overflow: hidden;

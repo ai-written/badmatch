@@ -194,8 +194,15 @@ async function claimReferee(m: any) {
 
 const tid = Number(route.params.id)
 const { lastMessage } = useWebSocket(tid)
-// 后台静默刷新：实时广播触发，不弹全局「加载中...」
-watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRounds(true).catch(() => {}) })
+// 后台静默刷新：实时广播触发，不弹全局「加载中...」。
+// referee_claimed / referee_released 同样要跟：认领、卸任、以及「被顶替」都会改变
+// 卡片上的「裁 X」与「裁判」按钮状态，不接的话别人认领完你这边还是旧样子。
+watch(lastMessage, (msg) => {
+  const t = msg?.type
+  if (t === 'match_updated' || t === 'referee_claimed' || t === 'referee_released') {
+    fetchRounds(true).catch(() => {})
+  }
+})
 // 锁屏/后台返回时补一次刷新（冻结期间 WebSocket 可能已断，不再收得到广播）
 useResumeRefresh(async () => { await fetchRounds(true) })
 async function onRefresh() {
@@ -367,7 +374,8 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 .match-info .van-button { font-size: 10px; height: 22px; padding: 0 6px; }
 
 .avatar-badge { position: relative; display: inline-block; }
-/* 同 TournamentDetail：消除 inline-block 头像的基线间隙，角标定位才准 */
+/* 同 TournamentDetail：消除 inline-block 头像下方那 4px 基线间隙
+   （角标锚在上边、不受影响，收益是头像与下方名字之间不再多一段空隙） */
 .avatar-badge :deep(.van-image) { display: block; }
 .badge-icon {
   position: absolute; top: -4px; right: -4px;

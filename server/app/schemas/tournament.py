@@ -132,12 +132,14 @@ class RegistrationOut(BaseModel):
 
 
 class CancellationOut(BaseModel):
-    """取消报名记录（取消是标记失效、不删行，所以查得到是谁）"""
+    """取消报名 / 赛中退赛记录（两者都是标记失效、不删行，所以查得到是谁）"""
     user_id: int
     username: str
     avatar: str
     # 老数据没有这个时间（该列是后来补的），前端按「未知时间」展示
     cancelled_at: str | None = None
+    # cancel = 报名阶段取消；withdraw = 开赛后退出（该场已建过 PlayerStats）
+    kind: str = "cancel"
 
     class Config:
         from_attributes = True

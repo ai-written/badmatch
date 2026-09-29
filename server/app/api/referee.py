@@ -8,7 +8,6 @@ from app.core.audit import audit, get_client_ip
 from app.api.matches import load_writable_tournament
 from app.models.user import User
 from app.models.round import Match, MatchStatus, Notification
-from app.schemas.match import ClaimRefereeRequest
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["referee"])
 
@@ -81,8 +80,13 @@ async def release_referee(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 行锁：与 claim_referee 用同一把锁串行化。否则「A 点卸任」与「B 顶替」并发时，
+    # B 先提交成为新裁判、A 的事务随后仍会把 referee_released_at 写上，
+    # 最终变成「referee_id=B 但已卸任」——B 收到认领成功却没有记分权限。
     result = await db.execute(
-        select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id)
+        select(Match)
+        .where(Match.id == match_id, Match.tournament_id == tournament_id)
+        .with_for_update()
     )
     m = result.scalar_one_or_none()
     if not m:

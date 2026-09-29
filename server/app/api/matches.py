@@ -424,7 +424,10 @@ async def _build_matches_out(
             support_counts.setdefault(mid, {})[side] = cnt
 
         rn = func.row_number().over(
-            partition_by=MatchSupport.match_id,
+            # 必须按 match_id + side 分区：只按 match_id 分区时 rn<=20 取的是「该场最新
+            # 20 票（两侧混排）」，票少的一侧头像会被整批丢掉（而 support_a/support_b
+            # 票数照旧），出现「一边 20 个头像、另一边 0 个但显示有票」的矛盾。
+            partition_by=[MatchSupport.match_id, MatchSupport.side],
             # id 兜底：同一秒内的多次投票 created_at 可能完全相同，
             # 只按时间排的话「第几个点赞」本身就不确定
             order_by=[MatchSupport.created_at.desc(), MatchSupport.id.desc()],
@@ -508,17 +511,11 @@ async def _build_matches_out(
         active_referee = referee if m.has_active_referee else None
 
         can_referee = False
-        # 必须与 POST /claim-referee 的实际校验完全等价，否则会出现
-        # 「显示按钮但点了报错」或「该给按钮却没给」：
-        #   1) 赛事进行中（赛事结束后该场只读）
-        #   2) 比赛未结束
-        #   3) 无人执裁过（referee_id 为空）——任何人可认领；
-        #      或者已有历史裁判但已卸任，且当前用户就是那位原裁判（可收回）
-        #   4) 自己不是本场参赛者
         # 可认领的条件：赛事进行中 + 比赛未结束 + 自己不是「当前在任裁判」。
         # 认领本身允许顶替在任裁判、也允许参赛选手（理由见 referee.py），所以这里
         # 不再限制「无人执裁过」或「非参赛者」；只把自己已经是裁判的情况排掉，
         # 免得按钮写着「申请成为裁判」而其实已经是自己的场次。
+        # 这段必须与 POST /claim-referee 的实际校验等价，否则会出现「显示按钮但点了报错」。
         if (
             user
             and tournament_status == TournamentStatus.ONGOING.value
@@ -693,6 +690,8 @@ async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, P
             # 取最小 user_id 而不是 set.pop()：pop 返回的是「任意一个」，
             # 多人轮空时（例如 6 人赛每轮 2 人轮空）显示谁取决于 set 的内部布局，
             # 属于未定义行为，也会让同一份数据在不同环境/版本下显示不同的人。
+            # 注意：多人轮空时这里**只展示其中一位**（取 id 最小者），
+            # 因此结果虽稳定，但会固定偏向最早注册的账号 —— 要全部列出得改成列表字段。
             uid = min(bye_ids)
             u = users_map.get(uid)
             if u:

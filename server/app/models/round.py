@@ -73,9 +73,10 @@ class Match(Base):
         ForeignKey("round_pairings.id"), nullable=True
     )
     referee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    # 裁判卸任时间。referee_id 一旦写入就作为「谁执裁过」的历史保留，不再清空；
-    # 是否仍在任由本字段判断：referee_id 有值且 referee_released_at 为空 = 当前裁判。
-    # 这样卸任者的名字仍可展示，同时不会再拥有记分/交换场地等权限。
+    # 裁判卸任时间。referee_id = 当前/最后一位执裁者（**允许被顶替**：裁判临时有事转让、
+    # 或借别人的手机代认领，顶替时直接覆盖，被顶替者会收到站内消息，历史留在审计日志的
+    # replaced_referee_id 里）；referee_released_at 为空 = 这人还在任。
+    # 卸任者的名字仍可展示（「裁 X（已卸任）」），但不再拥有记分/交换场地等权限。
     referee_released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[MatchStatus] = mapped_column(
         SAEnum(MatchStatus), default=MatchStatus.PENDING

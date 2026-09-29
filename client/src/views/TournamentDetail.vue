@@ -57,7 +57,7 @@
               <van-icon name="link-o" /> 复制链接
             </span>
             <span v-if="tournament.cancelled_count > 0" class="ph-action" @click="openCancellations">
-              <van-icon name="records" /> 取消记录 {{ tournament.cancelled_count }}
+              <van-icon name="records" /> 取消/退赛 {{ tournament.cancelled_count }}
             </span>
           </span>
         </div>
@@ -111,20 +111,24 @@
         </div>
       </van-popup>
 
-      <!-- 取消报名记录：取消只是标记失效、不删记录，所以谁取消过查得到 -->
+      <!-- 取消报名 / 赛中退赛记录：两者都是标记失效、不删记录，所以谁退出过查得到 -->
       <van-popup v-model:show="showCancellations" round position="bottom" class="vh-sheet vh-50" lock-scroll>
         <div class="picker-toolbar">
           <span @click="showCancellations = false">关闭</span>
-          <span class="picker-title">取消报名记录（{{ cancellations.length }}）</span>
+          <span class="picker-title">取消报名 / 退赛记录（{{ cancellations.length }}）</span>
         </div>
         <div class="vh-sheet-body cancel-body">
           <div v-for="c in cancellations" :key="c.user_id" class="cancel-row">
             <van-image lazy-load round width="32" height="32" :src="c.avatar || defaultAvatar" />
             <span class="cancel-name">{{ c.username }}</span>
+            <!-- 区分两种离场方式：报名阶段取消 vs 开赛后退出（后者一般已经打过比赛） -->
+            <span class="cancel-kind" :class="{ withdraw: c.kind === 'withdraw' }">
+              {{ c.kind === 'withdraw' ? '退赛' : '取消' }}
+            </span>
             <span class="cancel-time">{{ c.cancelled_at ? formatTime(c.cancelled_at) : '时间未知' }}</span>
           </div>
           <van-empty v-if="cancellationsFailed" description="加载失败，请重试" />
-          <van-empty v-else-if="cancellations.length === 0" description="暂无取消记录" />
+          <van-empty v-else-if="cancellations.length === 0" description="暂无取消 / 退赛记录" />
         </div>
       </van-popup>
 
@@ -595,8 +599,9 @@ onUnmounted(() => {
 .player-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 70px; cursor: pointer; }
 .player-name { font-size: 12px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
 .avatar-badge-sm { position: relative; display: inline-block; }
-/* inline-block 的头像下方会留出基线间隙（实测 4px），外层盒子因此比头像高，
-   角标（top/left 负值）的定位就整体偏了；块级化即可消除（不动行高，避免影响角标文字） */
+/* inline-block 的头像下方会留出基线间隙（实测 4px），外层盒子因此比头像高 4px：
+   角标锚的是上边（top 负值）**不受影响**，收益是头像与下方昵称之间不再多这段空隙。
+   块级化即可消除，且不动行高（避免影响容器内其它文字） */
 .avatar-badge-sm :deep(.van-image) { display: block; }
 .host-badge {
   position: absolute; top: -2px; left: -2px;
@@ -621,6 +626,11 @@ onUnmounted(() => {
 .cancel-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f5f5f5; }
 .cancel-row:last-child { border-bottom: none; }
 .cancel-name { flex: 1; font-size: 14px; color: #333; }
+.cancel-kind {
+  font-size: 11px; padding: 1px 6px; border-radius: 8px;
+  color: #969799; background: #f2f3f5;
+}
+.cancel-kind.withdraw { color: #ed6a0c; background: #fff7e8; }
 .cancel-time { font-size: 12px; color: #999; }
 .transfer-player {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
