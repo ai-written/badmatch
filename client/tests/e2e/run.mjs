@@ -299,7 +299,10 @@ async function scenarioLayout(page) {
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/notifications/.test(path)) return { items: [], total: 0, has_more: false }
-    if (/admin\/users/.test(path)) return []
+    // 管理面板：必须是**非空**用户列表，否则页面渲染空态、没有刷新容器（这里曾误用 []）
+    if (/admin\/users/.test(path)) {
+      return [{ id: 1, username: '李祥', avatar: '', gender: 'M', role: 'superadmin', email: '', invited_by: null }]
+    }
     if (/has-users/.test(path)) return { exists: true }
     if (/\/tournaments\?|\/tournaments$/.test(path)) return { items: [], total: 0, has_more: false }
     if (/\/tournaments\/\d+$/.test(path)) {
