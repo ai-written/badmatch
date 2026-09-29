@@ -27,8 +27,12 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    # 开发模式覆盖镜像默认 CMD：保留后端热重载
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    # 开发模式覆盖镜像默认 CMD：保留后端热重载。
+    # --timeout-graceful-shutdown 3 是必需的：uvicorn 关闭时会等已建立的连接结束
+    # （包含 WebSocket），而只要浏览器或手机开着 App 就有长连接，于是改后端文件后
+    # reload 会永远停在「Waiting for connections to close」，8000 端口不再响应
+    # （表现为「改完代码后端就挂了」，实测踩到过）。给 3 秒上限即可正常重载。
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 3
     environment:
       DATABASE_URL: postgresql+asyncpg://badminton:badminton@db:5432/badminton
       DEBUG: "true"
