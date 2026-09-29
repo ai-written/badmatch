@@ -11,6 +11,37 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 logger = logging.getLogger(__name__)
 
+# 把每张表的自增序列对齐到 max(id)。
+# 序列一旦落后于表里的最大 id，之后所有 INSERT 都会撞主键并报
+# "duplicate key value violates unique constraint ..._pkey"；
+# 常见成因是用显式 id 导过数据、或从 dump 恢复后没有重设序列。
+# 这不是理论问题：本机 dev 库的 users 就落后过（last_value=6 / max(id)=8），
+# 表现为注册一律失败，而接口把它报成「用户名或邮箱已被使用」，排查时会被完全带偏。
+# 只在落后时 setval，正常情况下这条语句不做任何改动。
+_SYNC_SEQUENCES_SQL = """
+do $$
+declare r record; mx bigint; lv bigint;
+begin
+  for r in
+    select c.relname as tbl, a.attname as col,
+           pg_get_serial_sequence(quote_ident(c.relname), a.attname) as seq
+    from pg_class c
+    join pg_attribute a on a.attrelid = c.oid
+    where c.relkind = 'r' and a.attnum > 0 and not a.attisdropped
+      and c.relnamespace = 'public'::regnamespace
+      and pg_get_serial_sequence(quote_ident(c.relname), a.attname) is not null
+  loop
+    execute format('select coalesce(max(%I), 0) from %I', r.col, r.tbl) into mx;
+    execute format('select last_value from %s', r.seq) into lv;
+    if lv < mx then
+      -- is_called=false：让下一个 nextval 正好是 max+1
+      execute format('select setval(%L, %s, false)', r.seq, mx + 1);
+      raise notice 'migration: sequence % realigned to %', r.seq, mx + 1;
+    end if;
+  end loop;
+end $$;
+"""
+
 
 async def _table_exists(conn: AsyncConnection, table: str) -> bool:
     result = await conn.execute(
@@ -183,3 +214,7 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
         await conn.execute(
             text("ALTER TABLE tournaments ADD COLUMN registration_open_at TIMESTAMP")
         )
+
+    # 自增序列对齐（幂等）：修一次就够，但每次启动都检查一遍，
+    # 这样「用 dump 恢复过数据库」之后也不用记得手工执行 setval。
+    await conn.execute(text(_SYNC_SEQUENCES_SQL))

@@ -113,8 +113,16 @@ async def register(
     db.add(user)
     try:
         await db.flush()
-    except IntegrityError:
-        raise HTTPException(status_code=400, detail="用户名或邮箱已被使用")
+    except IntegrityError as e:
+        # 以前不管什么完整性错误都报「用户名或邮箱已被使用」，排查时会被完全带偏：
+        # 例如自增序列落后于 users 的最大 id 时会撞 users_pkey，报错却指向用户名/邮箱。
+        detail = str(getattr(e, "orig", e))
+        if "ix_users_username" in detail:
+            raise HTTPException(status_code=400, detail="用户名已被使用")
+        if "uq_users_email" in detail:
+            raise HTTPException(status_code=400, detail="邮箱已被使用")
+        logger.exception("register failed with unexpected IntegrityError")
+        raise HTTPException(status_code=500, detail="注册失败，请稍后重试")
 
     # 必须在这里先提交，再写注册审计。
     # audit() 用的是**独立会话并立即提交**（这样异常路径的审计也能落库），
@@ -635,7 +643,7 @@ async def list_audit_logs(
     if page < 1 or page_size < 1 or page_size > 100:
         raise HTTPException(status_code=400, detail="分页参数不合法")
 
-    query = select(AuditLog).order_by(AuditLog.created_at.desc())
+    query = select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
     if action:
         query = query.where(AuditLog.action == action)
     if username:
