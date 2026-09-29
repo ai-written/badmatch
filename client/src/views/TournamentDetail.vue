@@ -75,7 +75,7 @@
         <p v-else class="empty-hint">暂无报名</p>
       </div>
 
-      <div class="creator-block" v-if="isCreator && tournament.status === 'ongoing'">
+      <div class="creator-block" v-if="canManage && tournament.status === 'ongoing'">
         <van-button type="danger" block round :loading="submitting" :disabled="submitting" @click="doEndTournament">提前结束赛事</van-button>
       </div>
 
@@ -86,7 +86,7 @@
         </van-grid>
       </div>
 
-      <div class="creator-block" v-if="isCreator && tournament.status === 'open'">
+      <div class="creator-block" v-if="canManage && tournament.status === 'open'">
         <van-button type="danger" block round :loading="submitting" :disabled="submitting || tournament.registered_count < 4" @click="doStart">
           开始比赛<template v-if="tournament.registered_count < 4">（还需 {{ 4 - tournament.registered_count }} 人）</template>
         </van-button>
@@ -266,6 +266,8 @@ function onVisibilityChange() {
 }
 
 const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
+// 开赛 / 提前结束赛事：创建者或超级管理员（超管兜底，房主临时不在也能推进流程）
+const canManage = computed(() => isCreator.value || auth.user?.role === 'superadmin')
 const canDelete = computed(() => {
   if (!auth.user || !tournament.value) return false
   if (auth.user.role === 'admin' || auth.user.role === 'superadmin') return true

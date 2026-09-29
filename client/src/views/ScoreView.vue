@@ -18,9 +18,13 @@
       <van-button size="small" round plain type="primary" @click="goBack">返回</van-button>
     </div>
     <template v-else>
-      <div v-if="readOnly" class="readonly-banner">
+      <div v-if="locked" class="readonly-banner">
         <van-icon name="lock" />
         <span>赛事已结束，本场为只读状态，不能再记分或改动数据</span>
+      </div>
+      <div v-else-if="readOnly" class="readonly-banner">
+        <van-icon name="edit" />
+        <span>赛事已结束，你是超级管理员 —— 仍可修正比分；改完请再点一次「结束比赛」以重算胜负</span>
       </div>
       <div class="scoreboard">
         <div class="sb-team" :class="{ win: leftWin }" @click="swapTeams">
@@ -49,7 +53,7 @@
             <span v-if="match.court_name">{{ match.court_name }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
-          <div class="swap-hint">{{ match.status === 'finished' ? '比赛已结束' : (readOnly ? '赛事已结束，本场已锁定' : (isReferee ? '点击交换场地' : '仅裁判可交换场地')) }}</div>
+          <div class="swap-hint">{{ match.status === 'finished' ? '比赛已结束' : (locked ? '赛事已结束，本场已锁定' : (isReferee ? '点击交换场地' : '仅裁判可交换场地')) }}</div>
         </div>
 
         <div class="sb-team" :class="{ win: rightWin }" @click="swapTeams">
@@ -86,7 +90,7 @@
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
-      <div v-if="isReferee && !readOnly" class="controls">
+      <div v-if="isReferee && !locked" class="controls">
         <div class="wheel-board">
           <div class="wheel-side">
             <button class="wheel-btn plus" :disabled="match.status === 'finished'" @click="addScore(swapSide('a'))">+</button>
@@ -127,7 +131,7 @@
         <van-button type="danger" block round size="large" style="margin-top:20px" @click="endMatch" :disabled="match.status === 'finished'">结束比赛</van-button>
       </div>
 
-      <div v-else-if="readOnly" class="no-role">
+      <div v-else-if="locked" class="no-role">
         <p>赛事已结束，本场已锁定</p>
       </div>
 
@@ -215,6 +219,9 @@ const isSuperadmin = computed(() => auth.user?.role === 'superadmin')
 const isReferee = computed(() => isSuperadmin.value || match.value?.active_referee?.id === auth.user?.id)
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
 const readOnly = computed(() => match.value?.tournament_status === 'finished')
+// 超级管理员在赛事结束后仍可修正比分（记错了要能改回来），所以「只读锁定」对超管不生效；
+// 应援等普通操作仍按 readOnly 判断（那边连超管也不该越过）
+const locked = computed(() => readOnly.value && !isSuperadmin.value)
 
 function pp(path: string) {
   const parts = path.split('.')
@@ -286,7 +293,7 @@ const rightWin = computed(() => {
 
 async function swapTeams() {
   // 只有本场裁判可以交换场地；其他人在自己屏幕上点无效（服务端也会拒绝）
-  if (!isReferee.value || readOnly.value || match.value?.status === 'finished') return
+  if (!isReferee.value || locked.value || match.value?.status === 'finished') return
   try {
     const res = await api.post(
       `/tournaments/${route.params.id}/matches/${route.params.matchId}/swap-sides`,

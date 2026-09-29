@@ -118,14 +118,16 @@ async def update_score(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 赛事已结束则该场只读，不允许再记分
-    await load_writable_tournament(db, tournament_id)
+    # 赛事已结束则该场只读；超级管理员例外 —— 赛后比分记错了要能改回来
+    is_superadmin = user.role == "superadmin"
+    if not is_superadmin:
+        await load_writable_tournament(db, tournament_id)
     # 只有在任裁判能记分：已卸任的裁判（referee_id 仍保留作历史）不再有权限
     # 超级管理员兜底：裁判临时不在、手机没电、或根本没人认领时，超管可以直接代记分
     # （记第一分就会把比赛从 pending 变 ongoing，也就是"开始比赛"）
     if not (user.role == "superadmin" or (m.referee_id == user.id and m.has_active_referee)):
         raise HTTPException(status_code=403, detail="只有本场裁判或超级管理员可以记分")
-    if m.status == MatchStatus.FINISHED:
+    if m.status == MatchStatus.FINISHED and not is_superadmin:
         raise HTTPException(status_code=400, detail="比赛已结束")
     if score.score_a < 0 or score.score_b < 0:
         raise HTTPException(status_code=400, detail="比分不能为负数")
@@ -140,7 +142,8 @@ async def update_score(
 
     # Only end via explicit force_end
     if score.force_end:
-        if m.status == MatchStatus.FINISHED:
+        # 已结束的比赛：超管可以再结束一次，用来在修正比分后重算胜负（_finalize_match 幂等）
+        if m.status == MatchStatus.FINISHED and not is_superadmin:
             raise HTTPException(status_code=400, detail="比赛已结束")
         sa, sb = score.score_a, score.score_b
         if sa == sb:
