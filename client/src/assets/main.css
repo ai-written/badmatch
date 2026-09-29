@@ -76,3 +76,14 @@ a { text-decoration: none; color: inherit; }
  * 用 cover 只裁不拉，而且对改造前就已经存下的非正方形头像同样生效（不需要重新上传）。
  * 只作用于圆形头像，普通长方形图片不受影响。 */
 .van-image--round .van-image__img { object-fit: cover; }
+
+/* 下拉刷新列表的顶部余量（统一，别再写在各页的滚动容器上）。
+ *
+ * 各页的首个元素常把描边/阴影画在盒子外面，而 Vant 的 .van-pull-refresh 自带
+ * overflow: hidden —— 裁剪边界就在它的 padding box 上，元素贴着顶边时，
+ * 画在盒子上方的那部分会被裁掉。实测对阵表首条高亮就是这样被裁了 11px：
+ *   box-shadow: 0 0 0 2px …（描边 2px） + 0 3px 14px …（光晕 14-3 = 11px）
+ * 而当时那 12px 余量写在 .schedule-scroll 上 —— 位于裁剪框**外面**，救不了。
+ * 所以要留在 .pull-inner 上（裁剪框里面）。14px 覆盖各页现有的最大外扩（11px）。
+ * 各页若另有 scroll 容器的 padding-top，记得一并去掉，避免叠加。 */
+.pull-inner { padding-top: 14px; }
