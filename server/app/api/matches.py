@@ -425,7 +425,9 @@ async def _build_matches_out(
 
         rn = func.row_number().over(
             partition_by=MatchSupport.match_id,
-            order_by=MatchSupport.created_at.desc(),
+            # id 兜底：同一秒内的多次投票 created_at 可能完全相同，
+            # 只按时间排的话「第几个点赞」本身就不确定
+            order_by=[MatchSupport.created_at.desc(), MatchSupport.id.desc()],
         ).label("rn")
         av_subq = (
             select(MatchSupport.match_id, MatchSupport.side, User.avatar, rn)
@@ -436,6 +438,9 @@ async def _build_matches_out(
         av_rows = await db.execute(
             select(av_subq.c.match_id, av_subq.c.side, av_subq.c.avatar)
             .where(av_subq.c.rn <= 20)
+            # 必须按 rn 排：窗口函数算出了「第几个点赞」，但外层查询不排序的话
+            # 返回顺序仍是任意的，头像顺序会在刷新之间跳变（rn 也就白算了）
+            .order_by(av_subq.c.match_id, av_subq.c.side, av_subq.c.rn)
         )
         for mid, side, av in av_rows.all():
             bucket = support_avatars.setdefault(mid, {"a": [], "b": []})
@@ -686,7 +691,10 @@ async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, P
         bye_ids = all_player_ids - paired_by_round.get(r.id, set())
         bye_player = None
         if bye_ids:
-            uid = bye_ids.pop()
+            # 取最小 user_id 而不是 set.pop()：pop 返回的是「任意一个」，
+            # 多人轮空时（例如 6 人赛每轮 2 人轮空）显示谁取决于 set 的内部布局，
+            # 属于未定义行为，也会让同一份数据在不同环境/版本下显示不同的人。
+            uid = min(bye_ids)
             u = users_map.get(uid)
             if u:
                 bye_player = PlayerInfo(

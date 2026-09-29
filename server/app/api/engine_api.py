@@ -316,6 +316,10 @@ async def withdraw_player(
             PlayerStats.tournament_id == tournament_id,
             PlayerStats.is_active == True,
         )
+        # 与 start_tournament 同一口径：remaining 会直接喂给排程算法，
+        # 顺序不同重排出来的对阵也不同。PlayerStats 没有 created_at，
+        # 用 id 即等于「开赛时的报名顺序」（那时就是按报名时间建的这些行）。
+        .order_by(PlayerStats.id)
     )
     for s in stats.scalars().all():
         remaining.append(s.user_id)
