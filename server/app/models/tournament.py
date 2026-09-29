@@ -55,6 +55,9 @@ class Registration(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # 取消报名的时间：取消是「标记 is_active=False」而不是删记录，所以行还在、这里补一个时间，
+    # 用于「取消报名记录」展示。重新报名时清空（又回来了就不算取消记录）。
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
     tournament: Mapped["Tournament"] = relationship(back_populates="registrations")
     user: Mapped["User"] = relationship(back_populates="registrations")

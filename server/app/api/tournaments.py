@@ -15,7 +15,7 @@ from app.core.mailer import send_tournament_invite
 from app.core.config import get_settings
 from app.schemas.tournament import (
     TournamentCreate, TournamentBrief, TournamentListOut, TournamentDetail,
-    RegistrationOut, CourtOut, TimeSlotOut,
+    RegistrationOut, CourtOut, TimeSlotOut, CancellationOut,
 )
 
 router = APIRouter(prefix="/api/tournaments", tags=["tournaments"])
@@ -409,6 +409,8 @@ async def register(
     if reg:
         # 曾取消过的记录重新激活，不新增行（有 (tournament_id, user_id) 唯一约束）
         reg.is_active = True
+        # 又回来了就不算「取消记录」，清掉取消时间（否则记录页会留着一条已失效的取消）
+        reg.cancelled_at = None
     else:
         db.add(Registration(tournament_id=tournament_id, user_id=user.id))
 
@@ -447,6 +449,8 @@ async def cancel_register(
     if not reg or not reg.is_active:
         raise HTTPException(status_code=400, detail="未报名")
     reg.is_active = False
+    # 时间交给数据库生成（now()），与 created_at 的 server_default=func.now() 同一时区口径
+    reg.cancelled_at = func.now()
     await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
     # 先提交再广播，避免订阅者回查时报名人数还是旧值
     await db.commit()
@@ -479,6 +483,38 @@ async def list_registrations(
     ]
 
 
+@router.get("/{tournament_id}/cancellations", response_model=list[CancellationOut])
+async def list_cancellations(
+    tournament_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """谁取消过报名。
+
+    取消是「标记 is_active=False」而不是删记录，所以这里能查到人。
+    可见性与报名名单一致（登录用户都能看）——名单本身对登录用户就是公开的，
+    单独给取消记录加限制反而会造成「看得见名单、看不见谁退出」的怪状态。
+    """
+    from app.models.user import User as UserModel
+    result = await db.execute(
+        select(Registration, UserModel.username, UserModel.avatar)
+        .join(UserModel, Registration.user_id == UserModel.id)
+        .where(Registration.tournament_id == tournament_id, Registration.is_active == False)
+        # 老数据的 cancelled_at 为 NULL，排到最后但不要丢掉
+        .order_by(Registration.cancelled_at.desc().nulls_last(), Registration.id.desc())
+    )
+    rows = result.all()
+    return [
+        CancellationOut(
+            user_id=row[0].user_id,
+            username=row[1],
+            avatar=row[2],
+            cancelled_at=row[0].cancelled_at.isoformat() if row[0].cancelled_at else None,
+        )
+        for row in rows
+    ]
+
+
 async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None = None) -> TournamentDetail:
     cnt_result = await db.execute(
         select(func.count(Registration.id)).where(
@@ -486,6 +522,13 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         )
     )
     registered_count = cnt_result.scalar() or 0
+
+    cancelled_result = await db.execute(
+        select(func.count(Registration.id)).where(
+            Registration.tournament_id == t.id, Registration.is_active == False
+        )
+    )
+    cancelled_count = cancelled_result.scalar() or 0
 
     courts_result = await db.execute(
         select(Court).where(Court.tournament_id == t.id).order_by(Court.sort_order)
@@ -537,6 +580,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         server_now=datetime.now(),
         courts=court_outs,
         registered_count=registered_count,
+        cancelled_count=cancelled_count,
         is_registered=is_registered,
         created_at=t.created_at.isoformat() if t.created_at else "",
     )

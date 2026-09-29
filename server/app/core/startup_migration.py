@@ -126,6 +126,11 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
         )
 
     if await _table_exists(conn, "registrations"):
+        if not await _column_exists(conn, "registrations", "cancelled_at"):
+            logger.info("migration: adding registrations.cancelled_at column")
+            await conn.execute(
+                text("ALTER TABLE registrations ADD COLUMN cancelled_at TIMESTAMP")
+            )
         if not await _constraint_exists(conn, "uq_registrations_tournament_user"):
             logger.info("migration: dedupe registrations + add unique constraint")
             await conn.execute(

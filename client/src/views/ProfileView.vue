@@ -111,6 +111,7 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { showToast, showFailToast } from 'vant'
 import { compressAvatar } from '@/utils/avatar'
+import { copyText } from '@/utils/clipboard'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -205,7 +206,11 @@ async function generateInvite() {
 }
 
 async function copyInviteLink() {
-  if (!inviteLink.value) return; await navigator.clipboard.writeText(inviteLink.value); showToast('已复制')
+  if (!inviteLink.value) return
+  // 用统一的 copyText：navigator.clipboard 在非安全上下文（http://局域网IP）里不存在，
+  // 直接调会抛 TypeError，表现为「点了没反应」
+  const ok = await copyText(inviteLink.value)
+  showToast(ok ? '已复制' : '复制失败，请长按选中后复制')
 }
 
 function saveGender() {

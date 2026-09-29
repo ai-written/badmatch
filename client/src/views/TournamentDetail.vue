@@ -51,6 +51,14 @@
       <div class="player-section">
         <div class="player-head">
           <span class="ph-title">已报名 ({{ tournament.registered_count }})</span>
+          <span class="ph-actions">
+            <span class="ph-action" @click="copyTournamentLink">
+              <van-icon name="link-o" /> 复制链接
+            </span>
+            <span v-if="tournament.cancelled_count > 0" class="ph-action" @click="openCancellations">
+              <van-icon name="records" /> 取消记录 {{ tournament.cancelled_count }}
+            </span>
+          </span>
         </div>
         <div class="player-grid" v-if="registrations.length > 0">
           <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
@@ -99,6 +107,23 @@
             <van-cell title="参赛次数" :value="String(playerStats.tournaments_played)" />
           </van-cell-group>
           <van-empty v-else :description="statsFailed ? '战绩加载失败，请重试' : '暂无比赛记录'" />
+        </div>
+      </van-popup>
+
+      <!-- 取消报名记录：取消只是标记失效、不删记录，所以谁取消过查得到 -->
+      <van-popup v-model:show="showCancellations" round position="bottom" class="vh-sheet vh-50" lock-scroll>
+        <div class="picker-toolbar">
+          <span @click="showCancellations = false">关闭</span>
+          <span class="picker-title">取消报名记录（{{ cancellations.length }}）</span>
+        </div>
+        <div class="vh-sheet-body cancel-body">
+          <div v-for="c in cancellations" :key="c.user_id" class="cancel-row">
+            <van-image lazy-load round width="32" height="32" :src="c.avatar || defaultAvatar" />
+            <span class="cancel-name">{{ c.username }}</span>
+            <span class="cancel-time">{{ c.cancelled_at ? formatTime(c.cancelled_at) : '时间未知' }}</span>
+          </div>
+          <van-empty v-if="cancellationsFailed" description="加载失败，请重试" />
+          <van-empty v-else-if="cancellations.length === 0" description="暂无取消记录" />
         </div>
       </van-popup>
 
@@ -157,6 +182,7 @@ import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
+import { copyText } from '@/utils/clipboard'
 import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
@@ -290,6 +316,38 @@ async function fetchRegistrations(skipLoading = false) {
     // 不能把「拉取失败」显示成「暂无报名」：那是两回事（与战绩处同一标准）
     if (registrations.value.length === 0) regsFailed.value = true
     throw e
+  }
+}
+
+/* ---------------- 报名链接分享 / 取消报名记录 ---------------- */
+const showCancellations = ref(false)
+const cancellations = ref<any[]>([])
+const cancellationsFailed = ref(false)
+
+/** 复制当前页面链接（赛事详情就是报名页），发给球友来报名 */
+async function copyTournamentLink() {
+  const ok = await copyText(location.href)
+  showToast(ok ? '链接已复制，发给要报名的球友' : '复制失败，请长按地址栏复制')
+}
+
+async function fetchCancellations() {
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/cancellations`, { skipLoading: true } as any)
+    cancellations.value = res.data || []
+    cancellationsFailed.value = false
+  } catch (e) {
+    cancellationsFailed.value = true
+    throw e
+  }
+}
+
+/** 懒加载：只有点了才请求，平时不额外打接口（入口也只在有取消记录时才出现） */
+async function openCancellations() {
+  showCancellations.value = true
+  try {
+    await fetchCancellations()
+  } catch {
+    // 失败态由 cancellationsFailed 呈现，这里不再弹 toast（避免和空态重复提示）
   }
 }
 /** 写操作统一包一层：进行中忽略重复点击，结束后必定复位 */
@@ -468,6 +526,10 @@ watch(lastMessage, (msg) => {
   if (t === 'registration_updated' || t === 'tournament_started' || t === 'tournament_finished') {
     refreshBothIfNotJustRefreshed()
   }
+  // 取消记录弹层开着时跟着刷新：别人刚取消，这边列表要立刻变
+  if (t === 'registration_updated' && showCancellations.value) {
+    fetchCancellations().catch(() => {})
+  }
 })
 
 // 锁屏/切后台回到前台时补一次刷新：本页虽订阅了 WebSocket，
@@ -521,6 +583,8 @@ onUnmounted(() => {
 .player-section { margin: 8px 12px; padding: 14px; background: #fff; border-radius: 10px; }
 .player-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .ph-title { font-size: 15px; font-weight: 600; }
+.ph-actions { display: flex; align-items: center; gap: 12px; }
+.ph-action { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: #1989fa; }
 .player-grid { display: flex; flex-wrap: wrap; gap: 8px; }
 .player-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 70px; cursor: pointer; }
 .player-name { font-size: 12px; color: #666; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
@@ -543,6 +607,12 @@ onUnmounted(() => {
 .popup-player span { font-size: 12px; color: #666; }
 .popup-time { font-size: 10px !important; color: #bbb !important; }
 .popup-player-head { display: flex; flex-direction: column; align-items: center; margin-bottom: 16px; }
+/* 取消报名记录弹层 */
+.cancel-body { padding: 4px 16px 16px; }
+.cancel-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f5f5f5; }
+.cancel-row:last-child { border-bottom: none; }
+.cancel-name { flex: 1; font-size: 14px; color: #333; }
+.cancel-time { font-size: 12px; color: #999; }
 .transfer-player {
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   width: 68px; cursor: pointer; padding: 6px; border-radius: 8px;

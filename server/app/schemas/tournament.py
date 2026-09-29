@@ -110,6 +110,8 @@ class TournamentDetail(BaseModel):
     status: str
     courts: list[CourtOut] = []
     registered_count: int = 0
+    # 取消过报名的人数：>0 时详情页才显示「取消报名记录」入口，避免平时多一次请求
+    cancelled_count: int = 0
     total_matches: int | None = None
     points_to_win: int = 11
     registration_open_at: datetime | None = None
@@ -127,6 +129,15 @@ class RegistrationOut(BaseModel):
     username: str
     avatar: str
     created_at: str
+
+
+class CancellationOut(BaseModel):
+    """取消报名记录（取消是标记失效、不删行，所以查得到是谁）"""
+    user_id: int
+    username: str
+    avatar: str
+    # 老数据没有这个时间（该列是后来补的），前端按「未知时间」展示
+    cancelled_at: str | None = None
 
     class Config:
         from_attributes = True
