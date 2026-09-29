@@ -241,14 +241,6 @@ const isPrivileged = computed(() => auth.user?.role === 'admin' || auth.user?.ro
 const isReferee = computed(() => match.value?.active_referee?.id === auth.user?.id)
 // 只读锁定：赛事一结束就完全只读 —— 连超级管理员也不能再改（产品规则）
 const locked = computed(() => readOnly.value)
-// 赛事被别处结束时立刻退出修正模式：否则会停在一个永远不可能成功的面板里
-// （后端 load_writable_tournament 会 400），界面也会和只读横幅自相矛盾
-watch(() => readOnly.value, (v) => {
-  if (v && fixMode.value) {
-    fixMode.value = false
-    showToast('赛事已结束，已退出修正模式')
-  }
-})
 // 能否操作本场（记分 / 结束比赛 / 交换场地 / 修正）—— 按钮 disabled 与函数守卫都用它，
 // 否则会出现「按钮是灰的/点了没反应」但界面又提示可以修改的矛盾。
 //   · 赛事已结束：谁都不行（完全只读，管理员/超管也一样）
@@ -327,6 +319,16 @@ async function confirmFix() {
 // 只读锁定：后端要求赛事**恰好进行中**才允许写（load_writable_tournament），
 // 所以这里用 !== 'ongoing' 保持等价，避免出现"界面给操作但后端 400"
 const readOnly = computed(() => match.value?.tournament_status !== 'ongoing')
+// 赛事被别处结束时立刻退出修正模式：否则会停在一个永远不可能成功的面板里
+// （后端 load_writable_tournament 会 400），界面也会和只读横幅自相矛盾。
+// 注意必须放在 readOnly 声明之后：watch 的 getter 在 setup 期间会立即执行一次，
+// 放前面会命中暂时性死区、让整个组件 setup 抛错（vue-tsc 检查不出来，只有浏览器会炸）。
+watch(() => readOnly.value, (v) => {
+  if (v && fixMode.value) {
+    fixMode.value = false
+    showToast('赛事已结束，已退出修正模式')
+  }
+})
 
 function pp(path: string) {
   const parts = path.split('.')
