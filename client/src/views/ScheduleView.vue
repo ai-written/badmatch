@@ -271,9 +271,14 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 .schedule-page { display: flex; flex-direction: column; background: #f0f2f5; }
 /* position: relative 让本容器成为卡片的 offsetParent，
    这样卡片的 offsetTop 才稳定等于「相对列表内容顶部」的偏移（自动定位依赖它） */
-.schedule-scroll { flex: 1; overflow-y: auto; padding-top: 12px; position: relative; }
+.schedule-scroll { flex: 1; overflow-y: auto; position: relative; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; }
+/* 顶部余量必须留在这里（Vant 的 .van-pull-refresh 自带 overflow: hidden，
+   裁剪边界就在它的 padding box 上）：卡片的高亮是画在盒子外面的
+   （0 0 0 2px 的描边 + 0 3px 14px 的光晕，上方共需约 11px），
+   若把余量放在外层 .schedule-scroll 上，那 12px 位于裁剪框之外 —— 救不了首条，
+   实测首条高亮的上缘会被裁掉。这里给 14px（> 11px，留一点余量）。 */
+.pull-inner { padding: 14px 0 60px; }
 .empty-block { padding-top: 80px; }
 .load-failed {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
