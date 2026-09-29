@@ -28,6 +28,7 @@
           <div class="ig-item" v-if="tournament.courts && tournament.courts.length > 0"><van-icon name="guide-o" /><span>场地号{{ tournament.courts[0].name }}</span></div>
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
+          <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>
@@ -267,6 +268,11 @@ const canDelete = computed(() => {
   return auth.user.id === tournament.value.creator_id && tournament.value.status === 'open'
 })
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
+/** 总场次：开赛前 total_matches 为空（由后端在开赛时按人数自动算），此时如实说明 */
+const totalMatchesText = computed(() => {
+  const n = tournament.value?.total_matches
+  return n ? `共 ${n} 场` : '开赛时自动计算'
+})
 
 const WEEKDAYS2 = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 function fmtDateTime(start: string, end: string) {
