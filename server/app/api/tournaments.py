@@ -469,6 +469,11 @@ async def list_registrations(
         select(Registration, UserModel.username, UserModel.avatar)
         .join(UserModel, Registration.user_id == UserModel.id)
         .where(Registration.tournament_id == tournament_id, Registration.is_active == True)
+        # 按报名时间排序：不写 ORDER BY 时返回顺序由执行计划决定，而这两张表都很小、
+        # PG 常走 hash join，输出顺序跟插入顺序和报名时间都不一致；前端又是直接渲染
+        # 这个数组，于是「已报名」名单看起来是乱的。
+        # id 作为同一次批量报名的次序兜底（同一事务里 now() 取值相同）。
+        .order_by(Registration.created_at, Registration.id)
     )
     rows = result.all()
     return [

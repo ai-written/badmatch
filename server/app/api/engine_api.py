@@ -48,6 +48,9 @@ async def start_tournament(
             Registration.tournament_id == tournament_id,
             Registration.is_active == True,
         )
+        # 固定顺序：player_ids 会直接喂给排程算法，顺序不同排出来的对阵也不同。
+        # 不写 ORDER BY 时顺序由执行计划决定，等于每次开赛的输入都不一样。
+        .order_by(Registration.created_at, Registration.id)
     )
     registrations = regs.scalars().all()
     player_ids = [r.user_id for r in registrations]
