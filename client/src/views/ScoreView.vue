@@ -86,10 +86,33 @@
         <div class="support-hint" v-if="canSupport && match.status !== 'finished' && !readOnly">点击支持你喜欢的队伍</div>
       </div>
 
-      <div v-if="canOperate && isSuperadmin && match.status === 'finished'" class="swap-hint">
-        本场已结束，你是超级管理员 —— 可修正比分，改完再点一次「结束比赛」重算胜负
+      <!-- 已结束的比赛：默认只读。要改必须先点「修正比赛」并确认，进入修正模式后
+           加减只改本地数字，点「确认修正」才真正提交 —— 避免误触直接改掉成绩 -->
+      <div v-if="canOperate && isFinishedMatch && !fixMode" class="no-role">
+        <p>本场已结束</p>
+        <van-button type="warning" block round size="large" style="margin-top:16px" @click="startFix">修正比赛</van-button>
       </div>
-      <div v-if="canOperate" class="controls">
+
+      <div v-else-if="fixMode" class="controls">
+        <div class="swap-hint">修正模式：下面的加减只改本地数字，点「确认修正」才会提交并重算胜负</div>
+        <div class="wheel-board">
+          <div class="wheel-side">
+            <button class="wheel-btn plus" @click="fixA = Math.min(fixA + 1, 99)">+</button>
+            <div class="wheel"><span class="wheel-item mid">{{ fixA }}</span></div>
+            <button class="wheel-btn minus" :disabled="fixA <= 0" @click="fixA = Math.max(fixA - 1, 0)">-</button>
+          </div>
+          <div class="wheel-colon">:</div>
+          <div class="wheel-side">
+            <button class="wheel-btn plus" @click="fixB = Math.min(fixB + 1, 99)">+</button>
+            <div class="wheel"><span class="wheel-item mid">{{ fixB }}</span></div>
+            <button class="wheel-btn minus" :disabled="fixB <= 0" @click="fixB = Math.max(fixB - 1, 0)">-</button>
+          </div>
+        </div>
+        <van-button type="primary" block round size="large" style="margin-top:20px" :loading="fixSubmitting" @click="confirmFix">确认修正</van-button>
+        <van-button plain block round size="large" style="margin-top:10px" @click="fixMode = false">取消</van-button>
+      </div>
+
+      <div v-else-if="canOperate" class="controls">
         <div class="wheel-board">
           <div class="wheel-side">
             <button class="wheel-btn plus" :disabled="!canOperate" @click="addScore(swapSide('a'))">+</button>
@@ -227,6 +250,62 @@ const canOperate = computed(() => {
   if (isSuperadmin.value) return true     // 赛事进行中：比赛结束后也能修正结果
   return isReferee.value && match.value.status !== 'finished'
 })
+const isFinishedMatch = computed(() => match.value?.status === 'finished')
+// 修正模式：已结束的比赛默认只读，必须点「修正比赛」→ 确认 → 改本地数字 → 「确认修正」
+// 才提交，避免误触一下加号就把成绩改掉
+const fixMode = ref(false)
+const fixA = ref(0)
+const fixB = ref(0)
+const fixSubmitting = ref(false)
+
+async function startFix() {
+  try {
+    await showConfirmDialog({
+      title: '修正比赛结果',
+      message: '本场已结束。进入修正模式后，加减只改本地数字，点「确认修正」才会真正提交并重算胜负。',
+      confirmButtonText: '进入修正',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return // 取消
+  }
+  fixA.value = match.value?.score_a ?? 0
+  fixB.value = match.value?.score_b ?? 0
+  fixMode.value = true
+}
+
+async function confirmFix() {
+  if (fixA.value === fixB.value) {
+    showToast('比分不能相同')
+    return
+  }
+  try {
+    await showConfirmDialog({
+      title: '确认修正',
+      message: `比分将改为 ${fixA.value} : ${fixB.value}，并重算本场胜负。`,
+      confirmButtonText: '确认修正',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return // 取消
+  }
+  fixSubmitting.value = true
+  try {
+    // force_end：改完比分顺便重算胜负（后端对超管允许对已结束的比赛再结束一次）
+    await api.put(`/tournaments/${route.params.id}/matches/${route.params.matchId}/score`, {
+      score_a: fixA.value,
+      score_b: fixB.value,
+      force_end: true,
+    })
+    showToast('已修正')
+    fixMode.value = false
+    await fetchMatch().catch(() => {})
+  } catch {
+    // 失败提示由拦截器统一弹
+  } finally {
+    fixSubmitting.value = false
+  }
+}
 // 赛事已提前结束时，该场即使还没打完也整体只读（服务端也会拒绝所有写操作）
 const readOnly = computed(() => match.value?.tournament_status === 'finished')
 
