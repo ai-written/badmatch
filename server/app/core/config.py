@@ -51,8 +51,17 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
 
     # Login / invite-code brute-force protection
+    # 登录失败其实有两把锁：
+    #   LOGIN_*    按「用户名」——保护单个账号不被逐个试
+    #   LOGIN_IP_* 按「来源 IP」——兜底，防同一来源喷洒很多账号
+    # 兜底那把必须宽松得多：一个出口 IP 后面常常是一整片人（公司/学校网络、运营商 NAT），
+    # 用和「单个账号」相同的 5 次会让无关的人一起被拦 10 分钟。实测复现过：同一 IP 先失败
+    # 5 次（另一个用户名），随后用**正确密码**登录另一个账号也被 429 —— 用户看到的现象
+    # 就是「改完密码 / 重置完密码还是登不上」。
     LOGIN_MAX_ATTEMPTS: int = 5
     LOGIN_WINDOW_SECONDS: int = 600
+    LOGIN_IP_MAX_ATTEMPTS: int = 30
+    LOGIN_IP_WINDOW_SECONDS: int = 600
     INVITE_MAX_ATTEMPTS: int = 3
     INVITE_WINDOW_SECONDS: int = 300
 

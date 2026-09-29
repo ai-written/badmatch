@@ -24,7 +24,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 _settings = get_settings()
 login_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
-login_ip_limiter = RateLimiter(_settings.LOGIN_MAX_ATTEMPTS, _settings.LOGIN_WINDOW_SECONDS)
+# 兜底那把按 IP，阈值独立且宽松得多（理由见 config.py 里的注释）：
+# 5 次/10 分钟是「单个账号」的额度，拿它卡整个出口 IP 会误伤同网络的其他人，
+# 而且这份计数**任何重置都不会清**（重置密码只清按用户名的那把），
+# 于是「改完密码还是登不上」——只能等窗口过期或重启进程。
+login_ip_limiter = RateLimiter(_settings.LOGIN_IP_MAX_ATTEMPTS, _settings.LOGIN_IP_WINDOW_SECONDS)
 invite_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
 # 初始管理员注册码防爆破（按 IP 限流）
 init_limiter = RateLimiter(_settings.INVITE_MAX_ATTEMPTS, _settings.INVITE_WINDOW_SECONDS)
@@ -150,10 +154,10 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     if not login_limiter.check(req.username):
-        raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
+        raise HTTPException(status_code=429, detail=f"登录尝试次数过多，请 {_settings.LOGIN_WINDOW_SECONDS // 60} 分钟后再试")
     ip = get_client_ip(request)
     if not login_ip_limiter.check(ip):
-        raise HTTPException(status_code=429, detail="登录尝试次数过多，请稍后再试")
+        raise HTTPException(status_code=429, detail=f"登录尝试次数过多，请 {_settings.LOGIN_IP_WINDOW_SECONDS // 60} 分钟后再试")
     result = await db.execute(select(User).where(User.username == req.username))
     user = result.scalar_one_or_none()
     if not user:
