@@ -70,7 +70,7 @@
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px" v-if="canInvite">
-        <van-cell title="邀请码" :value="inviteCode || '点击生成'" @click="generateInvite" clickable />
+        <van-cell title="邀请码" :label="inviteCode ? '点击重新生成，旧码会立即失效' : ''" :value="inviteCode || '点击生成'" @click="generateInvite" clickable />
         <van-cell v-if="inviteCode" title="邀请链接" label="点击复制" :value="inviteLink" @click="copyInviteLink" clickable />
       </van-cell-group>
 
@@ -109,7 +109,7 @@ import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
-import { showToast, showFailToast } from 'vant'
+import { showToast, showFailToast, showConfirmDialog } from 'vant'
 import { compressAvatar } from '@/utils/avatar'
 import { copyText } from '@/utils/clipboard'
 
@@ -202,7 +202,27 @@ async function onRegister() {
 }
 
 async function generateInvite() {
-  try { const res = await api.post('/auth/generate-invite'); inviteCode.value = res.data.invite_code; showToast('已生成') } catch {}
+  // 重新生成是**覆盖**写 user.invite_code：旧码与旧链接当场失效。
+  // 以前点一下就换，提示只有「已生成」——很容易误触，把已经发给球友的码悄悄作废，
+  // 对方再点链接只会看到「邀请码无效」。所以已有码时先确认。
+  const hadCode = !!inviteCode.value
+  if (hadCode) {
+    try {
+      await showConfirmDialog({
+        title: '重新生成邀请码',
+        message: '旧邀请码和旧邀请链接会立即失效，已经发出去的将无法再注册；已经注册成功的球友不受影响。',
+        confirmButtonText: '重新生成',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return // 取消
+    }
+  }
+  try {
+    const res = await api.post('/auth/generate-invite')
+    inviteCode.value = res.data.invite_code
+    showToast(hadCode ? '已重新生成，旧邀请码已失效' : '已生成')
+  } catch {}
 }
 
 async function copyInviteLink() {
