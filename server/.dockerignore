@@ -1,0 +1,31 @@
+# 只把源码带进镜像：宿主机的字节码、测试缓存、日志与上传目录都不该进去。
+#
+# 为什么要专门写这个文件：Dockerfile 是 `COPY . .`，不设忽略规则的话，
+# - 本地跑过一次 pytest，就会把 __pycache__/.pytest_cache 打进镜像 —— 镜像里躺着
+#   无用的字节码，体积白白变大，而且同样的源码会因为"谁跑过测试"而构建出不同 digest，
+#   「按 digest 核对线上跑的是哪版」这件事就不成立了；
+# - 更要紧的是 .env：里面是 SECRET_KEY 等密钥，一旦被 COPY 进去就永久留在镜像层里。
+
+# 注意 **/ 前缀：.dockerignore 的模式是按「相对路径整段」匹配的，
+# 写 __pycache__/ 只能命中根目录那一层，app/api/__pycache__ 这类嵌套目录照样会被打进去
+# （第一次就是这么漏的）。所以这里一律用 **/ 覆盖任意层级。
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+
+# 运行时才产生的目录。生产环境这两个目录都另有 bind mount（./logs、./uploads），
+# 镜像里带一份只会把宿主机的内容（含用户上传的头像）烘进镜像层。
+logs/
+static/uploads/
+
+# 本地配置、虚拟环境、编辑器杂物
+.env
+.env.*
+venv/
+.venv/
+.DS_Store
+.idea/
+.vscode/
+
+# 注意：tests/ 与 scripts/ 刻意保留 —— scripts/backfill_avatars.py 要在容器里跑
+# （见 README），tests/ 体积很小，留着可以在容器内直接 pytest。
