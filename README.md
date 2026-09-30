@@ -97,16 +97,21 @@ docker compose -f docker-compose.prod.yml up -d
 
 **场景 A：Cloudflare Tunnel（Zero Trust）——内网/无公网 IP 服务器**
 
-- 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源走 HTTP（80 端口）
+- 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源 HTTP
 - 浏览器侧 HTTPS 和 HTTP/2 由 Cloudflare 提供，服务器**无需配置证书/443**
-- 真实客户端 IP 通过 `CF-Connecting-IP` 头获取 —— 需显式设置 **`TRUST_CF_CONNECTING_IP=true`** 才会使用该头
-- ⚠️ 安全：确保本地 80 端口**不对外暴露**（只允许本机 cloudflared 访问），否则可伪造 `CF-Connecting-IP` 绕过限流
+- 真实客户端 IP 由 **client 容器里的 nginx 还原**：`nginx.conf` 用 `realip` 按 `CF-Connecting-IP`
+  覆盖 `$remote_addr`（信任范围 = 私有网段 + Cloudflare 网段），再以 `X-Real-IP` 覆盖式转发。
+  因此后端只需 **`TRUST_PROXY_HEADERS=true`**（prod compose 默认即是）；**不必**再开
+  `TRUST_CF_CONNECTING_IP` —— nginx 转发前会把该头清空（防伪造）
+- ⚠️ 安全：把 client 端口绑到回环（`127.0.0.1:${PORT}:80`）或只放行隧道来源。realip 的信任
+  范围含私有网段，若该端口对同内网开放，直连者可自带伪造的 `CF-Connecting-IP`，把自己的
+  来源说成任意地址（按 IP 的限流与审计随之失效）
 
 **场景 B：Cloudflare 代理（橙色云，服务器有公网 IP）**
 
 - Cloudflare 面板 **SSL/TLS 模式保持 Flexible**（回源 HTTP）；若设为 Full/Full(strict) 会回源 TLS 失败（521/525）
 - ⚠️ 防火墙/安全组**只放行 Cloudflare IP 段**（https://www.cloudflare.com/ips/ ），否则直连可伪造 `CF-Connecting-IP`
-- 同样需要 `TRUST_CF_CONNECTING_IP=true`
+- 真实客户端 IP 同样由 nginx 的 `realip` 还原（`nginx.conf` 里已列出 CF 网段），后端仍是 `TRUST_PROXY_HEADERS=true`
 
 **场景 C：直接经 nginx 暴露（无 Cloudflare）**
 
@@ -119,6 +124,12 @@ docker compose -f docker-compose.prod.yml up -d
 - **邀请制注册**：生成邀请码/链接，可重新生成作废旧码
 - **赛事管理**：创建、删除、提前结束，自定义计分制和场次数
 - **报名链接分享**：赛事详情页「复制链接」一键把当前页面地址复制到剪贴板，发给球友来报名
+- **报名海报分享**：赛事详情页右上角生成 PNG 海报（时间 / 地点 / 名额 + 报名二维码），
+  发到微信群后球友长按识别即可进报名页 —— 不需要公众号，只用图片 + 二维码。
+  二维码来自 `GET /api/tournaments/{id}/poster-qr`，里面带**生成者自己的邀请码**：
+  未注册的球友扫码后会被路由守卫带到登录页并自动预填邀请码，注册完自动回到报名页。
+  注意邀请码只有管理员能生成（`auth/generate-invite`），普通成员的海报不含邀请码
+  （界面会提示这一点），只适合提醒**已注册**球友报名
 - **取消报名记录**：谁取消过报名在详情页可查（取消是标记失效而非删记录，会记下取消时间；
   取消后又重新报名则不再算取消记录）；入口只在有人取消过时才出现，弹层懒加载
 - **日历选日期 + 时间段**：日期默认本周五，时间段默认 19:00~21:00，分钟步长 5
@@ -216,7 +227,7 @@ docker compose -f docker-compose.prod.yml exec server python scripts/backfill_av
 ```
 ├── server/               # FastAPI 后端
 │   ├── app/
-│   │   ├── api/          # auth / tournaments / matches / rankings / engine / referee / notifications
+│   │   ├── api/          # auth / tournaments / matches / rankings / engine / referee / notifications / poster
 │   │   ├── core/         # 配置、数据库、安全、WebSocket、幂等启动迁移
 │   │   ├── engine/       # 赛程引擎
 │   │   ├── models/       # 数据模型

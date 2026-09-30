@@ -12,7 +12,14 @@
  *    这类情况统一退回「首字彩圈」，比随机猫图也更适合对外分享。
  * 2) 前三名不画 🥇🥈🥉：emoji 字形各设备不同，canvas 里的度量也不一致，同一张图
  *    在不同手机上会错位。改成自绘的金/银/铜圆牌，跨端完全一致。
+ *
+ * 量宽截断、圆角、图片加载、时间与域名格式化在 utils/canvasKit.ts，与报名海报共用。
  */
+import {
+  CANVAS_W as W, PAD, MAX_CANVAS_PIXELS,
+  font, ellipsis, loadImage as loadAvatar,
+  formatTime, displayHost,
+} from './canvasKit'
 
 export interface ShareCardPlayer {
   rank: number
@@ -43,12 +50,7 @@ export interface ShareCardResult {
 
 export const SHARE_CARD_FILE = '积分榜.png'
 
-const W = 750            // 逻辑宽度
 const SCALE = 2          // 导出倍率：实际 1500px 宽，够清晰、体积也可接受
-// canvas 总像素上限（保守取 14M；iOS 上的实际限制约 16M）。64 人时 2 倍图约 15.9M，
-// 已经贴到上限，所以超过这个值就退成 1 倍图。
-const MAX_CANVAS_PIXELS = 14_000_000
-const PAD = 36
 const HEADER_H = 172
 const TABLE_HEAD_H = 56
 const ROW_H = 76
@@ -62,60 +64,8 @@ const COL_WL = 470       // 胜负中心
 const COL_DIFF = 575     // 净胜分中心
 const COL_RATE = W - PAD // 胜率右边界
 
-const FONT = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif'
-const font = (size: number, weight = 'normal') => `${weight} ${size}px ${FONT}`
-
 const MEDAL = ['#f5c518', '#b9c2cc', '#d8a06a']          // 金 银 铜
 const AVATAR_COLORS = ['#1989fa', '#07c160', '#ee0a24', '#7232dd', '#ff976a', '#00b8d4']
-
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.lineTo(x + w - r, y)
-  ctx.arcTo(x + w, y, x + w, y + r, r)
-  ctx.lineTo(x + w, y + h - r)
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
-  ctx.lineTo(x + r, y + h)
-  ctx.arcTo(x, y + h, x, y + h - r, r)
-  ctx.lineTo(x, y + r)
-  ctx.arcTo(x, y, x + r, y, r)
-  ctx.closePath()
-}
-
-/** 超宽就截断加省略号（canvas 没有 ellipsis，只能自己量） */
-function ellipsis(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
-  if (ctx.measureText(text).width <= maxWidth) return text
-  let t = text
-  while (t.length > 1 && ctx.measureText(t + '…').width > maxWidth) t = t.slice(0, -1)
-  return t + '…'
-}
-
-/** 加载头像：只允许同源或 data:，失败/超时返回 null（调用方退回首字圈） */
-function loadAvatar(src?: string | null): Promise<HTMLImageElement | null> {
-  return new Promise((resolve) => {
-    if (!src) return resolve(null)
-    let url: URL
-    try {
-      url = new URL(src, location.origin)
-    } catch {
-      return resolve(null)
-    }
-    if (url.protocol !== 'data:' && url.origin !== location.origin) return resolve(null)
-
-    const img = new Image()
-    let settled = false
-    const finish = (v: HTMLImageElement | null) => {
-      if (settled) return
-      settled = true
-      resolve(v)
-    }
-    // 头像加载不能拖住出图：1.5 秒没回来就当没有
-    const timer = setTimeout(() => finish(null), 1500)
-    img.onload = () => { clearTimeout(timer); finish(img) }
-    img.onerror = () => { clearTimeout(timer); finish(null) }
-    img.src = url.href
-  })
-}
 
 /** 圆形裁剪 + 居中裁切（避免非方图被拉变形） */
 function drawRoundImage(ctx: CanvasRenderingContext2D, img: HTMLImageElement, cx: number, cy: number, r: number) {
@@ -146,27 +96,6 @@ function drawInitialCircle(ctx: CanvasRenderingContext2D, name: string, cx: numb
   ctx.textBaseline = 'middle'
   ctx.fillText(text.charAt(0) || '?', cx, cy + 1)
   ctx.restore()
-}
-
-function pad2(n: number) {
-  return n < 10 ? `0${n}` : String(n)
-}
-
-function formatTime(d: Date) {
-  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-}
-
-/** 本地/局域网调试时 location.host 是 localhost 或 192.168.x.x，印在分享图上没意义
- *  （线上会是真实域名），这类地址直接不写。 */
-function displayHost() {
-  const h = location.host
-  const name = location.hostname
-  if (!h || !name) return ''
-  if (name === 'localhost' || name === '0.0.0.0' || name === '[::1]' || name === '::1') return ''
-  if (/^127\./.test(name)) return ''
-  if (/^10\./.test(name) || /^192\.168\./.test(name)) return ''
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(name)) return ''   // 172.16.0.0 - 172.31.255.255
-  return h
 }
 
 export async function renderRankingCard(opt: ShareCardOptions): Promise<ShareCardResult> {

@@ -2,7 +2,11 @@
   <div class="detail-page vh-page">
     <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
-        <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
+        <!-- 报名中才有分享海报的意义（二维码指向报名页）；图标与积分榜的分享入口一致 -->
+        <span class="nav-right">
+          <van-icon v-if="tournament && tournament.status === 'open'" name="share-o" size="19" @click="openPoster" />
+          <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
+        </span>
       </template>
     </van-nav-bar>
 
@@ -177,6 +181,17 @@
       </div>
     </van-popup>
 
+    <!-- 报名海报预览（遮罩组件与积分榜分享图共用） -->
+    <ShareImageOverlay
+      v-if="posterUrl"
+      :url="posterUrl"
+      :file="posterFile"
+      :file-name="POSTER_FILE"
+      :share-title="tournament?.title || '羽毛球局'"
+      :tip="posterTip"
+      @close="closePoster"
+    />
+
 </template>
 
 <script setup lang="ts">
@@ -188,7 +203,9 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
 import { copyText } from '@/utils/clipboard'
-import { showToast, showConfirmDialog } from 'vant'
+import { renderSignupPoster, POSTER_FILE } from '@/utils/poster'
+import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
+import { showToast, showConfirmDialog, showLoadingToast, showFailToast } from 'vant'
 
 const route = useRoute()
 const router = useRouter()
@@ -342,6 +359,91 @@ const cancellationsFailed = ref(false)
 async function copyTournamentLink() {
   const ok = await copyText(location.href)
   showToast(ok ? '链接已复制，发给要报名的球友' : '复制失败，请长按地址栏复制')
+}
+
+/* ---------------- 报名海报（发到微信群） ----------------
+ * 群里发一张写清「时间 / 地点 / 还剩几个名额」的图，比甩一个"点开先跳登录"的链接
+ * 有用得多——报名页要登录，而群里的人多半还没注册。
+ * 二维码由后端出图，里面带了当前用户的邀请码：新球友扫码后会被路由守卫带到登录页
+ * 并自动预填邀请码（见 router/index.ts），注册完再回到本页。
+ */
+const posterUrl = ref('')
+const posterFile = ref<File | null>(null)
+const isWeChat = /MicroMessenger/i.test(navigator.userAgent)
+
+/** 发起人取房主昵称；报名列表还没加载出来时拿不到，海报就整行不画 */
+const hostName = computed(() => {
+  const cid = tournament.value?.creator_id
+  if (!cid) return null
+  return registrations.value.find(r => r.user_id === cid)?.username || null
+})
+const posterStatusText = computed(() => {
+  if (!tournament.value) return ''
+  if (openLocked.value) return '报名即将开放'
+  return regFull.value ? '报名已满' : '报名中'
+})
+const posterQuotaText = computed(() => {
+  const t = tournament.value
+  if (!t) return ''
+  const left = Math.max(0, (t.max_participants ?? 0) - (t.registered_count ?? 0))
+  const base = `${t.registered_count}/${t.max_participants} 人`
+  return left > 0 ? `${base}（还剩 ${left} 个）` : base
+})
+const posterPlaceText = computed(() => {
+  const t = tournament.value
+  if (!t) return ''
+  const court = t.courts?.[0]?.name
+  return [t.location || '地点待定', court ? `场地号${court}` : ''].filter(Boolean).join(' ')
+})
+// 邀请码只有管理员能生成（见 auth.generate_invite），普通成员的海报里就没有邀请码：
+// 这种情况下必须说清楚，否则新球友扫码后卡在注册表单前，发海报的人只会以为功能坏了
+const hasInviteCode = computed(() => !!auth.user?.invite_code)
+const posterTip = computed(() => {
+  if (!hasInviteCode.value) {
+    return '长按图片保存发给球友；本场报名页需要登录，你还没有邀请码（仅管理员可生成），新球友请先向管理员索取'
+  }
+  // 微信内没有一键分享图片（iOS 微信把文件交给自己的分享扩展必然失败，见
+  // ShareImageOverlay），提示语必须说清"长按保存再回群里发"
+  return isWeChat ? '长按图片保存，回到微信群发给球友；球友扫码即可报名' : undefined
+})
+
+async function openPoster() {
+  const t = tournament.value
+  if (!t) return
+  const toast = showLoadingToast({ message: '正在生成海报…', forbidClick: true, duration: 0 })
+  // 二维码是二进制响应：用 blob 取回来再转成 blob: URL 交给 canvas。
+  // 跨域图片会让 canvas 变 tainted、toBlob 直接抛 SecurityError，blob: 不会。
+  let qrObjectUrl = ''
+  try {
+    const res = await api.get(`/tournaments/${t.id}/poster-qr`, {
+      responseType: 'blob', skipLoading: true,
+    } as any)
+    qrObjectUrl = URL.createObjectURL(res.data as Blob)
+    const poster = await renderSignupPoster({
+      title: t.title,
+      statusText: posterStatusText.value,
+      timeText: fmtDateTime(t.start_date, t.end_date),
+      placeText: posterPlaceText.value,
+      quotaText: posterQuotaText.value,
+      hostName: hostName.value,
+      qrSrc: qrObjectUrl,
+    })
+    closePoster()   // 释放上一张
+    posterUrl.value = poster.url
+    posterFile.value = new File([poster.blob], POSTER_FILE, { type: 'image/png' })
+  } catch {
+    showFailToast('生成海报失败，请重试')
+  } finally {
+    toast.close()
+    // 二维码已经画进 canvas（像素已落定），这个对象 URL 可以立刻释放
+    if (qrObjectUrl) URL.revokeObjectURL(qrObjectUrl)
+  }
+}
+
+function closePoster() {
+  if (posterUrl.value) URL.revokeObjectURL(posterUrl.value)
+  posterUrl.value = ''
+  posterFile.value = null
 }
 
 async function fetchCancellations() {
@@ -569,6 +671,8 @@ onMounted(async () => {
 onUnmounted(() => {
   stopCountdown()
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  // 海报的 object URL 不释放会一直占着内存（与积分榜分享图同一处理）
+  closePoster()
 })
 </script>
 
@@ -616,6 +720,8 @@ onUnmounted(() => {
 .player-chip.more { justify-content: center; font-size: 13px; color: #999; cursor: default; }
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
 .nav-block { margin: 8px 12px; }
+/* 导航栏右侧可能同时有「分享海报」和「删除」两个图标，拉开间距免得点错 */
+.nav-right { display: inline-flex; align-items: center; gap: 14px; }
 .creator-block { padding: 10px 12px; }
 /* 滚动交给 .vh-sheet-body（main.css）：外壳 flex 列固定，内部只滚一次 */
 .popup-content { padding: 20px; }

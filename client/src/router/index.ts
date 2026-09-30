@@ -43,7 +43,11 @@ router.beforeEach((to) => {
   if (localStorage.getItem('token')) return true
   // 记下原目标，登录成功后 ProfileView 会自动回跳（与 401 处理共用同一个 key）
   sessionStorage.setItem('loginRedirect', to.fullPath)
-  return { path: '/profile', replace: true }
+  // 目标里带邀请码时要一并带到登录页：报名海报的二维码就是 /tournament/16?invite=xxx，
+  // 而 ProfileView 是从 ?invite= 预填注册表单的 —— 少了这一步，扫码进来的新用户
+  // 会落到一个空白的注册表单前，只能回去找人要邀请码。
+  const invite = to.query.invite
+  return { path: '/profile', query: invite ? { invite: String(invite) } : {}, replace: true }
 })
 
 export default router
