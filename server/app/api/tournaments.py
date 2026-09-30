@@ -313,6 +313,21 @@ async def get_tournament(
     return await _tournament_detail(t, db, user)
 
 
+def assert_can_delete(t: Tournament, user: User) -> None:
+    """删除赛事的权限判定（抽成纯函数，便于不起库就单测）。
+
+    - 创建者、管理员、超级管理员都可以删
+    - 但默认**只有报名中（open）的赛事**能删：已开赛/已结束的赛事连同全部轮次、
+      比赛、战绩都会被级联删掉，误删代价太大（与「赛事结束 = 完全只读」一致）
+    - **超级管理员是例外**：可以删除任意状态的赛事 —— 建错的局、脏数据总得有人能
+      收尾，这是唯一能跨状态删的角色（前端 `canDelete` 与这里保持同一套规则）
+    """
+    if t.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有创建者可以删除")
+    if t.status != TournamentStatus.OPEN and user.role != "superadmin":
+        raise HTTPException(status_code=400, detail="只能删除报名中的赛事（超级管理员可删除任意状态的赛事）")
+
+
 @router.delete("/{tournament_id}")
 async def delete_tournament(
     tournament_id: int,
@@ -326,13 +341,7 @@ async def delete_tournament(
     t = result.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="赛事不存在")
-    if t.creator_id != user.id:
-        if user.role not in ("admin", "superadmin"):
-            raise HTTPException(status_code=403, detail="只有创建者可以删除")
-    # 只有报名中（open）的赛事可删：已开赛/已结束的赛事连同全部轮次、比赛、战绩都不能删，
-    # 管理员/超管也不例外 —— 与「赛事结束 = 完全只读」的规则保持一致
-    if t.status != TournamentStatus.OPEN:
-        raise HTTPException(status_code=400, detail="只能删除报名中的赛事")
+    assert_can_delete(t, user)
 
     # delete related courts and time slots
     # delete match supports, matches, pairings, rounds

@@ -26,8 +26,12 @@ export interface PosterOptions {
   timeText: string
   /** 地点文案，如「XX体育馆 3号场」 */
   placeText: string
-  /** 名额文案，如「11/12 人（还剩 1 个）」 */
+  /** 第三个行的标签，默认「名额」；开赛后传「人数」 */
+  quotaLabel?: string
+  /** 名额文案，如「11/12 人（还剩 1 个）」；开赛后传「11 人参赛」 */
   quotaText: string
+  /** 二维码旁的行动号召，默认「扫码报名」；开赛后传「扫码看赛程」 */
+  qrTitle?: string
   /** 发起人昵称：取不到就整行不画（比如报名列表还没加载出来） */
   hostName?: string | null
   /** 二维码图片地址（blob:，来自后端接口） */
@@ -62,7 +66,7 @@ export async function renderSignupPoster(opt: PosterOptions): Promise<PosterResu
   const rows: Array<[string, string]> = [
     ['时间', opt.timeText],
     ['地点', opt.placeText],
-    ['名额', opt.quotaText],
+    [opt.quotaLabel || '名额', opt.quotaText],
   ]
   const height = HEADER_H + BODY_TOP + ROW_H * rows.length + BODY_TOP + QR_CARD_H + FOOTER_H
 
@@ -144,7 +148,7 @@ export async function renderSignupPoster(opt: PosterOptions): Promise<PosterResu
   ctx.textAlign = 'left'
   ctx.fillStyle = '#333333'
   ctx.font = font(30, 'bold')
-  ctx.fillText('扫码报名', textX, qrTop + 116)
+  ctx.fillText(opt.qrTitle || '扫码报名', textX, qrTop + 116)
 
   ctx.fillStyle = '#969799'
   ctx.font = font(22)

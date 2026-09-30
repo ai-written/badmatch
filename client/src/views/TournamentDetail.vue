@@ -2,9 +2,10 @@
   <div class="detail-page vh-page">
     <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
-        <!-- 报名中才有分享海报的意义（二维码指向报名页）；图标与积分榜的分享入口一致 -->
+        <!-- 分享海报：报名中用来说服球友报名，进行中用来把赛程/积分榜发出去。
+             删除入口：超管任意状态都能删，创建者/管理员只限报名中（与后端 assert_can_delete 一致） -->
         <span class="nav-right">
-          <van-icon v-if="tournament && tournament.status === 'open'" name="share-o" size="19" @click="openPoster" />
+          <van-icon v-if="canSharePoster" name="share-o" size="19" @click="openPoster" />
           <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
         </span>
       </template>
@@ -287,10 +288,12 @@ const isCreator = computed(() => auth.user?.id === tournament.value?.creator_id)
 const canManage = computed(() => isCreator.value || auth.user?.role === 'admin' || auth.user?.role === 'superadmin')
 const canDelete = computed(() => {
   if (!auth.user || !tournament.value) return false
-  // 与后端一致：只有报名中的赛事能删（已开赛/已结束的不能删，管理员/超管也一样）
+  // 与后端 assert_can_delete 同一套规则：
+  // 超级管理员可删任意状态的赛事（建错的局/脏数据总得有人收尾）；
+  // 创建者与管理员只限报名中的 —— 已开赛/已结束的赛事会连轮次、比赛、战绩一起级联删除
+  if (auth.user.role === 'superadmin') return true
   if (tournament.value.status !== 'open') return false
-  if (auth.user.role === 'admin' || auth.user.role === 'superadmin') return true
-  return auth.user.id === tournament.value.creator_id
+  return auth.user.role === 'admin' || auth.user.id === tournament.value.creator_id
 })
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
 /** 总场次：开赛前 total_matches 为空（由后端在开赛时按人数自动算），此时如实说明 */
@@ -377,18 +380,36 @@ const hostName = computed(() => {
   if (!cid) return null
   return registrations.value.find(r => r.user_id === cid)?.username || null
 })
+/** 报名中（说服球友报名）与进行中（把赛程/积分榜发出去）都值得分享 */
+const canSharePoster = computed(() => {
+  const s = tournament.value?.status
+  return s === 'open' || s === 'ongoing'
+})
+/** 已开赛（进行中/已结束）：海报的二维码指向对阵表，文案也该跟着变。
+    「已结束」目前没有海报入口，但这里一并处理，免得将来放开入口时文案是错的 */
+const isStarted = computed(() => {
+  const s = tournament.value?.status
+  return s === 'ongoing' || s === 'finished'
+})
 const posterStatusText = computed(() => {
-  if (!tournament.value) return ''
+  const t = tournament.value
+  if (!t) return ''
+  if (t.status === 'ongoing') return '进行中'
+  if (t.status === 'finished') return '已结束'
   if (openLocked.value) return '报名即将开放'
   return regFull.value ? '报名已满' : '报名中'
 })
+/** 开赛后「还剩几个名额」已无意义，那一行换成实际参赛人数 */
+const posterQuotaLabel = computed(() => (isStarted.value ? '人数' : '名额'))
 const posterQuotaText = computed(() => {
   const t = tournament.value
   if (!t) return ''
+  if (isStarted.value) return `${t.registered_count} 人参赛`
   const left = Math.max(0, (t.max_participants ?? 0) - (t.registered_count ?? 0))
   const base = `${t.registered_count}/${t.max_participants} 人`
   return left > 0 ? `${base}（还剩 ${left} 个）` : base
 })
+const posterQrTitle = computed(() => (isStarted.value ? '扫码看赛程' : '扫码报名'))
 const posterPlaceText = computed(() => {
   const t = tournament.value
   if (!t) return ''
@@ -399,12 +420,16 @@ const posterPlaceText = computed(() => {
 // 这种情况下必须说清楚，否则新球友扫码后卡在注册表单前，发海报的人只会以为功能坏了
 const hasInviteCode = computed(() => !!auth.user?.invite_code)
 const posterTip = computed(() => {
-  if (!hasInviteCode.value) {
+  // 邀请码只对「拉新报名」有意义，进行中的海报不必再提这件事
+  if (tournament.value?.status === 'open' && !hasInviteCode.value) {
     return '长按图片保存发给球友；本场报名页需要登录，你还没有邀请码（仅管理员可生成），新球友请先向管理员索取'
   }
   // 微信内没有一键分享图片（iOS 微信把文件交给自己的分享扩展必然失败，见
-  // ShareImageOverlay），提示语必须说清"长按保存再回群里发"
-  return isWeChat ? '长按图片保存，回到微信群发给球友；球友扫码即可报名' : undefined
+  // ShareImageOverlay），提示语必须说清"长按保存再回群里发"；其余环境用组件默认文案
+  if (!isWeChat) return undefined
+  return isStarted.value
+    ? '长按图片保存，回到微信群发给球友；球友扫码可直接看对阵表'
+    : '长按图片保存，回到微信群发给球友；球友扫码即可报名'
 })
 
 async function openPoster() {
@@ -424,7 +449,9 @@ async function openPoster() {
       statusText: posterStatusText.value,
       timeText: fmtDateTime(t.start_date, t.end_date),
       placeText: posterPlaceText.value,
+      quotaLabel: posterQuotaLabel.value,
       quotaText: posterQuotaText.value,
+      qrTitle: posterQrTitle.value,
       hostName: hostName.value,
       qrSrc: qrObjectUrl,
     })
@@ -605,7 +632,13 @@ async function doStart() {
 }
 async function doDelete() {
   await withSubmitting(async () => {
-    try { await showConfirmDialog({ title: '确认删除', message: '删除后不可恢复，确定要删除？' }) } catch { return }
+    // 已开赛/已结束的赛事连轮次、比赛、战绩一起删（只有超管能走到这一支），
+    // 代价比删一个报名中的局大得多，确认文案要说清
+    const notOpen = tournament.value && tournament.value.status !== 'open'
+    const message = notOpen
+      ? '该赛事已开赛或已结束，删除会连同全部轮次、比赛与战绩一起永久删除，确定要删除？'
+      : '删除后不可恢复，确定要删除？'
+    try { await showConfirmDialog({ title: '确认删除', message }) } catch { return }
     await api.delete(`/tournaments/${route.params.id}`)
     showToast('已删除')
     router.replace('/')
