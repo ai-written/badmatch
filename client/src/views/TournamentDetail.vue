@@ -358,10 +358,37 @@ const showCancellations = ref(false)
 const cancellations = ref<any[]>([])
 const cancellationsFailed = ref(false)
 
-/** 复制当前页面链接（赛事详情就是报名页），发给球友来报名 */
+/** 组装要发出去的链接：带上自己的邀请码与来源标记（没有邀请码就只带标记）。
+ *
+ *  - 来源标记统一改成 from=copy：这条链接是从「复制链接」发出去的，若原来是从海报
+ *    扫码进来的（地址里是 from=poster），这里要覆盖掉，否则访问日志会把它算成海报带来的。
+ *  - 为什么要带邀请码：报名页/对阵表都要登录，而站点是邀请注册制，新球友拿到不带
+ *    邀请码的链接会卡在空白的注册表单前。地址栏里通常是没有 invite 的（只有从海报
+ *    二维码进来才会带），所以这里补上；已经有就原样返回（多半是别人的码，不去覆盖）。
+ */
+function shareableLink(): { link: string; attached: boolean } {
+  const url = new URL(location.href)
+  url.searchParams.set('from', 'copy')
+  const code = auth.user?.invite_code
+  if (url.searchParams.has('invite') || !code) return { link: url.toString(), attached: false }
+  url.searchParams.set('invite', code)
+  return { link: url.toString(), attached: true }
+}
+
+/** 复制当前页面链接（赛事详情就是报名页），发给球友 */
 async function copyTournamentLink() {
-  const ok = await copyText(location.href)
-  showToast(ok ? '链接已复制，发给要报名的球友' : '复制失败，请长按地址栏复制')
+  const { link, attached } = shareableLink()
+  const ok = await copyText(link)
+  if (!ok) {
+    showToast('复制失败，请长按地址栏复制')
+    return
+  }
+  // 文案按状态走：进行中/已结束已经没有「报名」这回事了
+  const s = tournament.value?.status
+  const action = s === 'finished' ? '看战绩' : s === 'ongoing' ? '看赛程' : '报名'
+  showToast(attached
+    ? `链接已复制（已带上你的邀请码），发给球友${action}`
+    : `链接已复制，发给球友${action}`)
 }
 
 /* ---------------- 报名海报（发到微信群） ----------------
