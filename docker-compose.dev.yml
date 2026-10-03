@@ -39,6 +39,11 @@ services:
       SECRET_KEY: docker-dev-secret-key-not-for-production
       # 该密钥是公开的示例值，明确声明后才允许启动（生产环境不要设置这一项）
       ALLOW_INSECURE_SECRET_KEY: "true"
+      # 本地开发固定初始注册码。不配这一项时：那串码是「第一次有人提交注册请求」
+      # 才随机生成并打到日志里的，而 dev 容器开了 --reload —— 改一行后端代码就重载、
+      # 换一个新码，于是经常出现「照着日志填还是不对」。
+      # 生产环境绝不要照抄这一行（生产请在 .env 里配自己的值或不配）。
+      SUPERADMIN_INIT_CODE: ${SUPERADMIN_INIT_CODE:-dev-superadmin}
       TZ: Asia/Shanghai
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       SMTP_HOST: ${SMTP_HOST:-}
