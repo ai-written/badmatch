@@ -334,6 +334,9 @@ async function scenarioLayout(page) {
   }
   await page.enableMock(layoutMock)
   await page.setToken()
+  // 对阵表的按人筛选会按赛事持久化（localStorage）。上一次运行留下的条件会让
+  // 这里渲染出空列表 → 基线断言假失败，所以跑基线前先清掉。
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
 
   // 基线＝改动前的实测值，改布局时要么保持、要么同步改这里（改这里就要在 PR 里说明）
   const baseline = [
@@ -417,8 +420,248 @@ async function scenarioInviteLabel(page) {
   assert('右侧邀请码仍完整可见', info?.邀请码仍完整, info?.邀请码)
 }
 
+/** 场景 5：对阵表按人筛选（只看某人 / 排除一个或多个） */
+async function scenarioScheduleFilter(page) {
+  console.log('5) 对阵表：只看某人 / 排除多人')
+  // 第1场 p1 p2 | p3 p4 ；第2场 p5 p6 | p7 p8 ；第3场（第2轮）p1 p3 | p5 p7
+  const rounds = [
+    {
+      id: 11, round_number: 1, status: 'ongoing', matches: [
+        matchPayload({ id: 101, pairing_a: { id: 1011, player_a: P(1, 'p1'), player_b: P(2, 'p2') }, pairing_b: { id: 1012, player_a: P(3, 'p3'), player_b: P(4, 'p4') } }),
+        matchPayload({ id: 102, status: 'pending', pairing_a: { id: 1021, player_a: P(5, 'p5'), player_b: P(6, 'p6') }, pairing_b: { id: 1022, player_a: P(7, 'p7'), player_b: P(8, 'p8') } }),
+      ],
+    },
+    {
+      id: 12, round_number: 2, status: 'pending', matches: [
+        matchPayload({ id: 103, status: 'pending', pairing_a: { id: 1031, player_a: P(1, 'p1'), player_b: P(3, 'p3') }, pairing_b: { id: 1032, player_a: P(5, 'p5'), player_b: P(7, 'p7') } }),
+      ],
+    },
+  ]
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/\/rounds$/.test(path)) return rounds
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  // 筛选条件按赛事持久化（localStorage），上一次运行留下的条件会污染本场景
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
+  await page.goto('/tournament/2/schedule', 2200)
+
+  const shown = () => page.ev(`[...document.querySelectorAll('.match-card .match-num')].map(e => e.textContent.trim())`)
+  const count = () => page.ev(`document.querySelectorAll('.match-card').length`)
+  const summary = () => page.ev(`(document.querySelector('.filter-text')?.textContent || '').trim()`)
+  // 页面内的点击统一走这里：元素不存在或事件处理里抛错都返回字符串而不是抛异常，
+  // 否则一次失败会让整个场景中断，看不到后面的现象
+  const clickEl = (sel) => page.ev(`(() => {
+    try {
+      const el = document.querySelector(${JSON.stringify(sel)})
+      if (!el) return 'NOTFOUND'
+      el.click(); return 'OK'
+    } catch (e) { return 'ERR:' + (e && e.message) }
+  })()`)
+  const clickTextSafe = (txt) => page.ev(`(() => {
+    try {
+      const b = [...document.querySelectorAll('button, .van-button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(txt)})
+      if (!b) return 'NOTFOUND'
+      b.click(); return 'OK'
+    } catch (e) { return 'ERR:' + (e && e.message) }
+  })()`)
+  const pickIn = async (row, txt) => {
+    const r = await page.ev(`(() => {
+      try {
+        const row = document.querySelectorAll('.filter-panel-body .pick-row')[${row}]
+        if (!row) return 'NOROW'
+        const el = [...row.querySelectorAll('.pick')].find(e => (e.textContent || '').trim() === ${JSON.stringify(txt)})
+        if (!el) return 'NOTFOUND'
+        el.click(); return 'OK'
+      } catch (e) { return 'ERR:' + (e && e.message) }
+    })()`)
+    await sleep(220)
+    return r
+  }
+  const openPanel = async () => { const r = await clickEl('.filter-chip'); await sleep(600); return r }
+  const confirm = async () => { const r = await clickTextSafe('确定'); await sleep(600); return r }
+  const clear = async () => { const r = await clickEl('.filter-mini.clear'); await sleep(700); return r }
+
+  assert('默认显示全部 3 场', (await count()) === 3, `实际 ${await count()}`)
+  // 直接打开对阵表也要认得自己（本页原先漏了 auth.fetchMe()，「我」角标一直是空的）
+  assert('直接打开对阵表会加载自己的身份（「我」角标）',
+    (await page.ev(`document.querySelectorAll('.me-badge').length`)) === 2,
+    `实际 ${await page.ev(`document.querySelectorAll('.me-badge').length`)}`)
+
+  assert('能打开筛选面板', (await openPanel()) === 'OK')
+  assert('筛选面板已打开', await page.ev(`!!document.querySelector('.filter-panel-body')`))
+  assert('候选人是「全部」+ 8 名选手', (await page.ev(`document.querySelectorAll('.filter-panel-body .pick-row')[0].querySelectorAll('.pick').length`)) === 9)
+
+  // 只看 p5：第2场 + 第3场（p1 那场不该出现）
+  assert('能选中「只看 p5」', (await pickIn(0, 'p5')) === 'OK')
+  assert('点确定能生效', (await confirm()) === 'OK')
+  assert('只看某人：只剩他参加的比赛', JSON.stringify(await shown()) === JSON.stringify(['第2场', '第3场']), JSON.stringify(await shown()))
+  assert('筛选栏摘要显示条件', (await summary()) === '只看 p5', await summary())
+
+  // 「只看」的人不能被同时排除：点它应当无效
+  await openPanel()
+  await pickIn(1, 'p5')
+  await confirm()
+  assert('「只看」的人无法被同时排除（自相矛盾的条件被挡住）', (await count()) === 2, `实际 ${await count()}`)
+
+  // 叠加：只看 p1 + 排除 p2 —— 第1场有 p2 被排掉，第3场同时满足
+  await openPanel()
+  await clickTextSafe('重置')
+  await pickIn(0, 'p1')
+  await pickIn(1, 'p2')
+  assert('点确定能生效（叠加条件）', (await confirm()) === 'OK')
+  assert('只看 + 排除叠加生效', JSON.stringify(await shown()) === JSON.stringify(['第3场']), JSON.stringify(await shown()))
+
+  // 快速「只看我」（当前登录用户 p1）
+  assert('清除筛选', (await clear()) === 'OK')
+  assert('清除后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
+  const onlyMe = await clickEl('.filter-mini')
+  await sleep(700)
+  assert('「只看我」一键筛选', onlyMe === 'OK' && JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']),
+    `${onlyMe} ${JSON.stringify(await shown())}`)
+
+  // 重置后只做多选排除：p5 与 p6 都在第2场，第3场含 p5
+  await openPanel()
+  await clickTextSafe('重置')
+  await pickIn(1, 'p5')
+  await pickIn(1, 'p6')
+  await confirm()
+  assert('排除多人：含任一被排除者的比赛全部隐藏', JSON.stringify(await shown()) === JSON.stringify(['第1场']), JSON.stringify(await shown()))
+
+  // 空结果要有专门的空态与一键清除（不能显示成「已完成比赛已全部收起」）
+  await openPanel()
+  await pickIn(1, 'p1')
+  await confirm()
+  assert('筛选后无比赛时显示专用空态',
+    (await page.ev(`(document.querySelector('.van-empty__description')?.textContent || '').trim()`)) === '没有符合筛选条件的比赛')
+  assert('空态里的「清除筛选」可用', (await clickTextSafe('清除筛选')) === 'OK')
+  assert('清除后恢复全部比赛', (await count()) === 3, `实际 ${await count()}`)
+
+  // 持久化：重新进入页面条件仍在
+  await openPanel()
+  await pickIn(0, 'p6')
+  await confirm()
+  assert('只看 p6 生效', JSON.stringify(await shown()) === JSON.stringify(['第2场']), JSON.stringify(await shown()))
+  await page.goto('/tournament/2/schedule', 2000)
+  assert('刷新后筛选条件仍生效', JSON.stringify(await shown()) === JSON.stringify(['第2场']), JSON.stringify(await shown()))
+  assert('刷新后摘要也还在', (await summary()) === '只看 p6', await summary())
+
+  // 收尾清干净：条件会持久化，不能留给后面的场景（布局基线里也挂了对阵表）
+  await clear()
+  assert('收尾清除后恢复全部比赛', (await count()) === 3, `实际 ${await count()}`)
+}
+
+/** 场景 6：筛选对「已完成比赛」和「已结束赛事」同样生效 */
+async function scenarioFilterWithFinished(page) {
+  console.log('6) 对阵表筛选：含已完成比赛 / 赛事已结束')
+  const mk = (over) => matchPayload({ tournament_status: 'ongoing', ...over })
+  // 第1轮两场都已完成：默认会折叠较早的第1场，只留第2场
+  const playing = [
+    {
+      id: 11, round_number: 1, status: 'ongoing', matches: [
+        mk({
+          id: 201, status: 'finished', score_a: 11, score_b: 5, winner_pairing_id: 2011,
+          pairing_a: { id: 2011, player_a: P(1, 'p1'), player_b: P(2, 'p2') },
+          pairing_b: { id: 2012, player_a: P(3, 'p3'), player_b: P(4, 'p4') },
+        }),
+        mk({
+          id: 202, status: 'finished', score_a: 11, score_b: 9, winner_pairing_id: 2022,
+          pairing_a: { id: 2021, player_a: P(5, 'p5'), player_b: P(6, 'p6') },
+          pairing_b: { id: 2022, player_a: P(7, 'p7'), player_b: P(8, 'p8') },
+        }),
+      ],
+    },
+    {
+      id: 12, round_number: 2, status: 'ongoing', matches: [
+        mk({
+          id: 203, status: 'ongoing', score_a: 3, score_b: 2,
+          pairing_a: { id: 2031, player_a: P(1, 'p1'), player_b: P(3, 'p3') },
+          pairing_b: { id: 2032, player_a: P(5, 'p5'), player_b: P(7, 'p7') },
+        }),
+        mk({
+          id: 204, status: 'pending',
+          pairing_a: { id: 2041, player_a: P(2, 'p2'), player_b: P(4, 'p4') },
+          pairing_b: { id: 2042, player_a: P(6, 'p6'), player_b: P(8, 'p8') },
+        }),
+      ],
+    },
+  ]
+  const ended = [
+    {
+      id: 11, round_number: 1, status: 'finished', matches: [
+        mk({ id: 201, status: 'finished', tournament_status: 'finished', score_a: 11, score_b: 5, winner_pairing_id: 2011,
+             pairing_a: { id: 2011, player_a: P(1, 'p1'), player_b: P(2, 'p2') },
+             pairing_b: { id: 2012, player_a: P(3, 'p3'), player_b: P(4, 'p4') } }),
+        mk({ id: 202, status: 'finished', tournament_status: 'finished', score_a: 11, score_b: 9, winner_pairing_id: 2022,
+             pairing_a: { id: 2021, player_a: P(5, 'p5'), player_b: P(6, 'p6') },
+             pairing_b: { id: 2022, player_a: P(7, 'p7'), player_b: P(8, 'p8') } }),
+      ],
+    },
+    {
+      id: 12, round_number: 2, status: 'finished', matches: [
+        mk({ id: 203, status: 'finished', tournament_status: 'finished', score_a: 11, score_b: 8, winner_pairing_id: 2031,
+             pairing_a: { id: 2031, player_a: P(1, 'p1'), player_b: P(3, 'p3') },
+             pairing_b: { id: 2032, player_a: P(5, 'p5'), player_b: P(7, 'p7') } }),
+        mk({ id: 204, status: 'finished', tournament_status: 'finished', score_a: 4, score_b: 11, winner_pairing_id: 2042,
+             pairing_a: { id: 2041, player_a: P(2, 'p2'), player_b: P(4, 'p4') },
+             pairing_b: { id: 2042, player_a: P(6, 'p6'), player_b: P(8, 'p8') } }),
+      ],
+    },
+  ]
+  let rounds = playing
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/\/rounds$/.test(path)) return rounds
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  const shown = () => page.ev(`[...document.querySelectorAll('.match-card .match-num')].map(e => e.textContent.trim())`)
+  const clickEl = (sel) => page.ev(`(() => {
+    try { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return 'NOTFOUND'; el.click(); return 'OK' }
+    catch (e) { return 'ERR:' + (e && e.message) } })()`)
+  const pickOnly = async (txt) => {
+    await clickEl('.filter-chip'); await sleep(600)
+    await page.ev(`(() => {
+      const row = document.querySelectorAll('.filter-panel-body .pick-row')[0]
+      const el = [...row.querySelectorAll('.pick')].find(e => e.textContent.trim() === ${JSON.stringify(txt)})
+      el.click(); return true })()`)
+    await page.ev(`(() => { const b = [...document.querySelectorAll('button, .van-button')].find(x => x.textContent.trim() === '确定'); b.click(); return true })()`)
+    await sleep(700)
+  }
+  const clearFilter = async () => { await clickEl('.filter-mini.clear'); await sleep(700) }
+
+  await page.setToken()
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
+
+  // A) 赛事进行中 + 含两场已完成比赛
+  await page.goto('/tournament/2/schedule', 2200)
+  assert('A 默认折叠较早的已完成比赛（13 场→3 场这里 4→3）',
+    JSON.stringify(await shown()) === JSON.stringify(['第2场', '第3场', '第4场']), JSON.stringify(await shown()))
+  await pickOnly('p1')
+  assert('A 只看 p1：已完成的第1场也被筛出来（折叠按筛选结果重算，不再隐藏它）',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']), JSON.stringify(await shown()))
+  await clearFilter()
+
+  // B) 赛事已结束：不再折叠，筛选照常生效
+  rounds = ended
+  await page.goto('/tournament/2/schedule', 2200)
+  assert('B 赛事已结束时显示只读提示', await page.ev(`!!document.querySelector('.readonly-banner')`))
+  assert('B 赛事已结束不再折叠，4 场全显示',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场', '第3场', '第4场']), JSON.stringify(await shown()))
+  await pickOnly('p5')
+  assert('B 已结束赛事里筛选仍然生效（只看 p5 → 第2、3场）',
+    JSON.stringify(await shown()) === JSON.stringify(['第2场', '第3场']), JSON.stringify(await shown()))
+  await clearFilter()
+  assert('B 清除后回到 4 场', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场', '第3场', '第4场']), JSON.stringify(await shown()))
+  assert('收尾已清掉持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

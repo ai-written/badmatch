@@ -22,6 +22,18 @@
     </div>
 
     <template v-else>
+      <!-- 按人筛选：只看某人 / 排除一个或多个人（可叠加）。条件会记住（见下方 FILTER_KEY） -->
+      <div class="filter-bar">
+        <div class="filter-chip" :class="{ on: filterActive }" @click="openFilter">
+          <van-icon name="filter-o" size="14" />
+          <span class="filter-text">{{ filterSummary }}</span>
+          <van-icon name="arrow-down" size="10" />
+        </div>
+        <span v-if="myPlayerId != null" class="filter-mini"
+              :class="{ on: activeFilter.onlyPlayerId === myPlayerId }" @click="toggleOnlyMe">只看我</span>
+        <span v-if="filterActive" class="filter-mini clear" @click="clearFilter">清除</span>
+      </div>
+
       <!-- 赛事已提前结束：所有比赛只读 -->
       <div v-if="tournamentEnded" class="readonly-banner">
         <van-icon name="lock" />
@@ -34,7 +46,10 @@
         <span v-else>已隐藏 {{ hiddenFinishedCount }} 场已完成比赛</span>
       </div>
 
-      <van-empty v-if="visibleRounds.length === 0" description="已完成比赛已全部收起" />
+      <van-empty v-if="visibleRounds.length === 0 && filterActive" description="没有符合筛选条件的比赛">
+        <van-button size="small" round plain type="primary" @click="clearFilter">清除筛选</van-button>
+      </van-empty>
+      <van-empty v-else-if="visibleRounds.length === 0" description="已完成比赛已全部收起" />
 
       <template v-for="r in visibleRounds" :key="r.id">
         <div class="round-section">
@@ -113,6 +128,36 @@
       </div>
     </van-pull-refresh>
     </div>
+
+    <!-- 筛选面板：面板里改动的是草稿，点「确定」才生效（避免边点边变、误触后回不去） -->
+    <van-popup v-model:show="showFilter" position="bottom" round class="vh-sheet vh-60">
+      <div class="filter-panel-head">
+        <span class="filter-panel-title">筛选比赛</span>
+        <van-icon name="cross" size="18" @click="showFilter = false" />
+      </div>
+      <div class="vh-sheet-body filter-panel-body">
+        <div class="filter-label">只看某人的比赛</div>
+        <div class="pick-row">
+          <span class="pick" :class="{ on: draftOnly == null }" @click="setDraftOnly(null)">全部</span>
+          <span v-for="p in playerOptions" :key="p.id" class="pick"
+                :class="{ on: draftOnly === p.id }" @click="setDraftOnly(p.id)">{{ p.username }}</span>
+        </div>
+
+        <div class="filter-label">排除（可多选）</div>
+        <div class="pick-row">
+          <span v-for="p in playerOptions" :key="p.id" class="pick"
+                :class="{ on: draftExclude.includes(p.id), muted: draftOnly === p.id }"
+                @click="toggleDraftExclude(p.id)">{{ p.username }}</span>
+        </div>
+        <div class="filter-hint">
+          两者可叠加：例如「只看张三」并「排除李四」= 张三参加、且李四不参加的比赛。
+        </div>
+      </div>
+      <div class="filter-actions">
+        <van-button round plain block @click="resetDraft">重置</van-button>
+        <van-button round type="primary" block @click="applyFilter">确定</van-button>
+      </div>
+    </van-popup>
   </div>
 </template>
 
@@ -124,7 +169,11 @@ import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
-import { hiddenFinishedIds, visibleRounds as buildVisibleRounds, focusMatchId, focusScrollTop } from '@/utils/schedule'
+import {
+  withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
+  normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
+  emptyFilter, type ScheduleFilter,
+} from '@/utils/schedule'
 import { showToast, showConfirmDialog } from 'vant'
 
 const route = useRoute()
@@ -225,16 +274,108 @@ const tournamentEnded = computed(() =>
   rounds.value.some((r: any) => (r.matches || []).some((m: any) => m.tournament_status === 'finished'))
 )
 
-const hiddenIds = computed(() => hiddenFinishedIds(rounds.value, showAllFinished.value, tournamentEnded.value))
+// --- 按人筛选：只看某人 / 排除一个或多个人 ---
+// 条件按赛事记住（同一台手机上回到这个赛事时还在），因此状态串存在 localStorage 里。
+const FILTER_KEY = `schedule-filter:${route.params.id}`
+function loadFilter(): ScheduleFilter {
+  try {
+    return normalizeFilter(JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'))
+  } catch {
+    // 不能返回共享常量：它带着同一个 excludePlayerIds 数组，一旦哪里就地改了就会互相污染
+    return emptyFilter()
+  }
+}
+const activeFilter = ref<ScheduleFilter>(loadFilter())
+const filterActive = computed(() => isFilterActive(activeFilter.value))
+// 候选项取自**全量**赛程：若取自筛选结果，选中「只看张三」后其他人就从列表里消失了，
+// 再也切不回去。
+const playerOptions = computed(() => playersInRounds(rounds.value))
+const myPlayerId = computed(() => {
+  const uid = auth.user?.id
+  return uid != null && playerOptions.value.some((p) => p.id === uid) ? uid : null
+})
+function nameOf(id: number) {
+  return playerOptions.value.find((p) => p.id === id)?.username || `#${id}`
+}
+const filterSummary = computed(() => {
+  const f = activeFilter.value
+  if (!filterActive.value) return '全部比赛'
+  if (f.onlyPlayerId == null) return `已排除 ${f.excludePlayerIds.length} 人`
+  if (f.excludePlayerIds.length === 0) return `只看 ${nameOf(f.onlyPlayerId)}`
+  return `只看 ${nameOf(f.onlyPlayerId)} · 排除 ${f.excludePlayerIds.length} 人`
+})
+
+const showFilter = ref(false)
+const draftOnly = ref<number | null>(activeFilter.value.onlyPlayerId)
+const draftExclude = ref<number[]>([...activeFilter.value.excludePlayerIds])
+function openFilter() {
+  draftOnly.value = activeFilter.value.onlyPlayerId
+  draftExclude.value = [...activeFilter.value.excludePlayerIds]
+  showFilter.value = true
+}
+function setDraftOnly(id: number | null) {
+  draftOnly.value = id
+  // 「只看」的人又被排除是自相矛盾（结果必为空），选他时自动从排除里去掉
+  if (id != null) draftExclude.value = draftExclude.value.filter((x) => x !== id)
+}
+function toggleDraftExclude(id: number) {
+  if (draftOnly.value === id) return
+  draftExclude.value = draftExclude.value.includes(id)
+    ? draftExclude.value.filter((x) => x !== id)
+    : [...draftExclude.value, id]
+}
+function resetDraft() {
+  draftOnly.value = null
+  draftExclude.value = []
+}
+function persistFilter() {
+  try {
+    // 没有条件就把键删掉，别在 localStorage 里留一个空壳条目（按赛事累积会越来越多）
+    if (!isFilterActive(activeFilter.value)) {
+      localStorage.removeItem(FILTER_KEY)
+      return
+    }
+    localStorage.setItem(FILTER_KEY, JSON.stringify(activeFilter.value))
+  } catch {
+    // 隐私模式/被禁用时写不进去：只影响「记住筛选」，不该让页面报错
+  }
+}
+function applyFilter() {
+  activeFilter.value = normalizeFilter({ onlyPlayerId: draftOnly.value, excludePlayerIds: draftExclude.value })
+  persistFilter()
+  showFilter.value = false
+}
+function clearFilter() {
+  activeFilter.value = emptyFilter()
+  resetDraft()
+  persistFilter()
+}
+function toggleOnlyMe() {
+  const uid = myPlayerId.value
+  if (uid == null) return
+  activeFilter.value = activeFilter.value.onlyPlayerId === uid
+    ? { onlyPlayerId: null, excludePlayerIds: [...activeFilter.value.excludePlayerIds] }
+    : normalizeFilter({ onlyPlayerId: uid, excludePlayerIds: activeFilter.value.excludePlayerIds })
+  persistFilter()
+}
+
+// 处理顺序（不能颠倒）：
+//   1. 先在**全量**赛程上编号 —— 筛选不改变「第N场」，同一场在不同筛选下编号一致
+//   2. 再按人裁剪 —— 折叠规则只针对筛完剩下的比赛（只看某人时也能折叠他的旧战绩）
+//   3. 最后折叠 + 丢掉空轮次
+const numberedRounds = computed(() => withGlobalIndex(rounds.value))
+const filteredRounds = computed(() => filterRounds(numberedRounds.value, activeFilter.value))
+const hiddenIds = computed(() => hiddenFinishedIds(filteredRounds.value, showAllFinished.value, tournamentEnded.value))
 const hiddenFinishedCount = computed(() => hiddenIds.value.size)
 const hasHiddenFinished = computed(() => hiddenFinishedCount.value > 0 || showAllFinished.value)
-const visibleRounds = computed(() => buildVisibleRounds(rounds.value, hiddenIds.value))
+const visibleRounds = computed(() => renderRounds(filteredRounds.value, hiddenIds.value))
 
 // --- 进入页面时自动定位到当前该关注的比赛 ---
 // 优先「进行中」的第一场；没有进行中的则取「待打」的第一场；
 // 全部已结束（都折叠了）则不动。仅对本次进入页面生效，之后实时刷新不再抢占滚动位置。
+// 落点在**筛选后**的比赛里取：只看某人时，别把视口滚到他根本不参加的场次上。
 const initialScrollDone = ref(false)
-const targetMatchId = computed<number | null>(() => focusMatchId(rounds.value))
+const targetMatchId = computed<number | null>(() => focusMatchId(filteredRounds.value))
 const targetCard = ref<HTMLElement | null>(null)
 // 高亮不能跟着 initialScrollDone 一起消失：批处理会在首次绘制前就把它移除，等于从未显示。
 // 因此单独用一个 id 记录「本次落点」，并在若干帧后由定时器清除，让高亮真正可见一段时间。
@@ -286,7 +427,13 @@ onUnmounted(() => {
   if (highlightTimer) clearTimeout(highlightTimer)
 })
 
-onMounted(() => { fetchRounds().catch(() => {}) })
+onMounted(() => {
+  fetchRounds().catch(() => {})
+  // 直接打开/刷新本页时 store 里还没有 user（fetchMe 由我的/详情/记分/积分榜各页自己调，
+  // 本页原先漏了），而「我」角标、卡片 .my 高亮、以及筛选栏的「只看我」都依赖它 ——
+  // 表现为分享出去的赛程链接打开后看不到自己的比赛。
+  auth.fetchMe(true).catch(() => {})
+})
 </script>
 
 <style scoped>
@@ -311,6 +458,53 @@ onMounted(() => { fetchRounds().catch(() => {}) })
 
 /* 导航栏右侧的积分榜入口 */
 .nav-link { font-size: 14px; color: #1989fa; }
+
+/* --- 按人筛选 --- */
+/* 筛选栏是滚动内容的第一块：顶部留白仍由 .schedule-scroll 的 padding-top 负责，
+   这里不能再加 margin-top，否则整页首元素位置会变（e2e 有像素基线） */
+.filter-bar { display: flex; align-items: center; gap: 8px; margin: 0 12px 12px; }
+.filter-chip {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 5px;
+  padding: 8px 12px; border-radius: 10px;
+  background: #fff; color: #646566; font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+}
+.filter-chip.on { color: #1989fa; font-weight: 500; }
+.filter-chip:active { background: #f7f8fa; }
+/* min-width:0 + 省略号：排除了多个长名字时不能把这一行撑破 */
+.filter-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-mini {
+  flex-shrink: 0; padding: 8px 12px; border-radius: 10px;
+  background: #fff; color: #646566; font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+}
+.filter-mini.on { background: #e8f3ff; color: #1989fa; font-weight: 500; }
+.filter-mini.clear { color: #969799; }
+.filter-mini:active { opacity: .7; }
+
+.filter-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 6px; flex-shrink: 0;
+}
+.filter-panel-title { font-size: 16px; font-weight: 600; color: #323233; }
+.filter-panel-body { padding: 0 16px; }
+.filter-label { margin: 14px 0 8px; font-size: 13px; color: #969799; }
+.filter-label:first-child { margin-top: 6px; }
+.pick-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.pick {
+  max-width: 132px; padding: 6px 12px; border-radius: 16px;
+  background: #f5f6f8; color: #646566; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pick.on { background: #1989fa; color: #fff; }
+/* 已选为「只看」的人：排除它没有意义，置灰且点不动 */
+.pick.muted { opacity: .35; }
+.filter-hint { margin: 16px 0 4px; font-size: 12px; color: #c8c9cc; line-height: 1.5; }
+.filter-actions {
+  display: flex; gap: 10px; flex-shrink: 0;
+  padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+}
 
 /* 赛事已结束的只读提示 */
 .readonly-banner {
