@@ -137,10 +137,20 @@
       </div>
       <div class="vh-sheet-body filter-panel-body">
         <div class="filter-label">只看某人的比赛（可多选）</div>
+        <!-- 多选匹配方式：默认「或」（任意一人），可切成「且」（必须同场）。
+             刻意不用 .pick-row 这个类名：e2e 是按 .pick-row 的下标定位选手行的（0=只看、1=排除） -->
+        <div class="mode-row">
+          <span class="pick" :class="{ on: draftMode === 'any' }" @click="draftMode = 'any'">或（任意一人）</span>
+          <span class="pick" :class="{ on: draftMode === 'all' }" @click="draftMode = 'all'">且（必须同场）</span>
+        </div>
         <div class="pick-row">
           <span class="pick" :class="{ on: draftOnlyIds.length === 0 }" @click="clearDraftOnly()">全部</span>
           <span v-for="p in playerOptions" :key="p.id" class="pick"
                 :class="{ on: draftOnlyIds.includes(p.id) }" @click="toggleDraftOnly(p.id)">{{ p.username }}</span>
+        </div>
+        <div v-if="draftMode === 'all' && draftOnlyIds.length > 4" class="filter-hint warn">
+          「且」要求所选的人出现在同一场里，而 2v2 一场只有 4 人 —— 现在选了 {{ draftOnlyIds.length }} 人，
+          筛不出任何比赛。
         </div>
 
         <div class="filter-label">排除（可多选）</div>
@@ -150,7 +160,8 @@
                 @click="toggleDraftExclude(p.id)">{{ p.username }}</span>
         </div>
         <div class="filter-hint">
-          只看可多选：选中多个人 = 他们中任意一位参加的比赛（并集）。两者可叠加：
+          「或」= 选中的人里任意一位参加的比赛（默认）；「且」= 这些人必须出现在同一场里（2v2 一场只有 4 人）。
+          排除是并集：排除谁，谁参加的比赛就都不显示。两者可叠加：
           例如「只看张三、李四」并「排除王五」= 张三或李四参加、且王五不参加的比赛。
         </div>
       </div>
@@ -174,7 +185,7 @@ import {
   withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
   normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
   pruneFilter, isOnlyMeFilter, nextOnlyMeFilter,
-  emptyFilter, type ScheduleFilter,
+  emptyFilter, type ScheduleFilter, type OnlyMode,
 } from '@/utils/schedule'
 import { showToast, showConfirmDialog } from 'vant'
 
@@ -379,16 +390,20 @@ const filterSummary = computed(() => {
   const onlyText = only.length <= 2
     ? only.map(nameOf).join('、')
     : `${nameOf(only[0])} 等 ${only.length} 人`
-  if (f.excludePlayerIds.length === 0) return `只看 ${onlyText}`
-  return `只看 ${onlyText} · 排除 ${f.excludePlayerIds.length} 人`
+  // 「且」模式用「同场」开头：一眼能看出这次筛的是"必须一起打"，而不是"任一人"
+  const prefix = f.onlyMode === 'all' ? '同场' : '只看'
+  if (f.excludePlayerIds.length === 0) return `${prefix} ${onlyText}`
+  return `${prefix} ${onlyText} · 排除 ${f.excludePlayerIds.length} 人`
 })
 
 const showFilter = ref(false)
 const draftOnlyIds = ref<number[]>([...activeFilter.value.onlyPlayerIds])
 const draftExclude = ref<number[]>([...activeFilter.value.excludePlayerIds])
+const draftMode = ref<OnlyMode>(activeFilter.value.onlyMode)
 function openFilter() {
   draftOnlyIds.value = [...activeFilter.value.onlyPlayerIds]
   draftExclude.value = [...activeFilter.value.excludePlayerIds]
+  draftMode.value = activeFilter.value.onlyMode
   showFilter.value = true
 }
 // 「只看」多选：点一下选中/取消。选中时自动从排除里去掉 —— 同一人既「只看」又「排除」
@@ -417,6 +432,7 @@ function toggleDraftExclude(id: number) {
 function resetDraft() {
   draftOnlyIds.value = []
   draftExclude.value = []
+  draftMode.value = 'any'
 }
 function persistFilter() {
   try {
@@ -434,7 +450,11 @@ function applyFilter() {
   // 再过一次剪枝：面板打开期间可能正好有人退赛（草稿里还留着他的 chip），
   // 不剪的话刚点「确定」就会把一个已不在赛程里的 id 写回条件
   activeFilter.value = pruneMissingIds(
-    normalizeFilter({ onlyPlayerIds: draftOnlyIds.value, excludePlayerIds: draftExclude.value }),
+    normalizeFilter({
+      onlyPlayerIds: draftOnlyIds.value,
+      excludePlayerIds: draftExclude.value,
+      onlyMode: draftMode.value,
+    }),
   )
   persistFilter()
   showFilter.value = false
@@ -598,6 +618,11 @@ onMounted(() => {
 /* 已选为「只看」的人：排除它没有意义，置灰且点不动 */
 .pick.muted { opacity: .35; }
 .filter-hint { margin: 16px 0 4px; font-size: 12px; color: #c8c9cc; line-height: 1.5; }
+/* 「且（同场）」选超过 4 人时不可能有结果，用暖色明确提示，而不是让用户对着空列表猜 */
+.filter-hint.warn { margin: 8px 0 4px; color: #ee0a24; }
+/* 匹配方式那一行紧跟在标题下，和选手 chip 行稍作区分。
+   故意不叫 .pick-row：e2e 用 .pick-row 的下标记位选手行 */
+.mode-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .filter-actions {
   display: flex; gap: 10px; flex-shrink: 0;
   padding: 12px 16px calc(16px + env(safe-area-inset-bottom));

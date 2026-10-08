@@ -12,6 +12,8 @@
  *   3 布局：各页首元素相对滚动容器顶边的距离（改动前逐像素基线，别随手改 CSS）
  *     + 对阵表首条高亮不被裁剪（裁剪边界到卡片顶 ≥ 11px）
  *   4 邀请码那行：副标题只占一行；文案变长时省略号截断、右侧邀请码仍完整
+ *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）」开关（默认「或」、可持久化）
+ *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -808,8 +810,201 @@ async function scenarioFilterWithFinished(page) {
   assert('收尾已清掉持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
 }
 
+/** 场景 7：对阵表「只看」多选的匹配方式开关（默认「或」，可切「且（同场）」） */
+async function scenarioScheduleOnlyMode(page) {
+  console.log('7) 对阵表：只看多选的「或（任意一人）/ 且（必须同场）」开关')
+  // 第1场 p1 p2 | p3 p4 ；第2场 p5 p6 | p7 p8 ；第3场（第2轮）p1 p3 | p5 p7
+  // p2 与 p6 从不同场 → 用来区分「或」（看得见）与「且」（看不见）
+  const rounds = [
+    {
+      id: 11, round_number: 1, status: 'ongoing', matches: [
+        matchPayload({ id: 101, pairing_a: { id: 1011, player_a: P(1, 'p1'), player_b: P(2, 'p2') }, pairing_b: { id: 1012, player_a: P(3, 'p3'), player_b: P(4, 'p4') } }),
+        matchPayload({ id: 102, status: 'pending', pairing_a: { id: 1021, player_a: P(5, 'p5'), player_b: P(6, 'p6') }, pairing_b: { id: 1022, player_a: P(7, 'p7'), player_b: P(8, 'p8') } }),
+      ],
+    },
+    {
+      id: 12, round_number: 2, status: 'pending', matches: [
+        matchPayload({ id: 103, status: 'pending', pairing_a: { id: 1031, player_a: P(1, 'p1'), player_b: P(3, 'p3') }, pairing_b: { id: 1032, player_a: P(5, 'p5'), player_b: P(7, 'p7') } }),
+      ],
+    },
+  ]
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/\/rounds$/.test(path)) return rounds
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
+  await page.goto('/tournament/2/schedule', 2200)
+
+  const count = () => page.ev(`document.querySelectorAll('.match-card').length`)
+  const shown = () => page.ev(`[...document.querySelectorAll('.match-card .match-num')].map(e => e.textContent.trim())`)
+  const summary = () => page.ev(`(document.querySelector('.filter-text')?.textContent || '').trim()`)
+  const emptyText = () => page.ev(`(document.querySelector('.van-empty__description')?.textContent || '').trim()`)
+  const activeMode = () => page.ev(`(document.querySelector('.mode-row .pick.on')?.textContent || '').trim()`)
+  const clickEl = (sel) => page.ev(`(() => {
+    try { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return 'NOTFOUND'; el.click(); return 'OK' }
+    catch (e) { return 'ERR:' + (e && e.message) } })()`)
+  const pickIn = async (row, txt) => {
+    const r = await page.ev(`(() => {
+      try {
+        const row = document.querySelectorAll('.filter-panel-body .pick-row')[${row}]
+        if (!row) return 'NOROW'
+        const el = [...row.querySelectorAll('.pick')].find(e => (e.textContent || '').trim() === ${JSON.stringify(txt)})
+        if (!el) return 'NOTFOUND'
+        el.click(); return 'OK'
+      } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+    await sleep(200)
+    return r
+  }
+  const setMode = async (txt) => {
+    const r = await page.ev(`(() => {
+      try {
+        const el = [...document.querySelectorAll('.mode-row .pick')].find(e => (e.textContent || '').trim() === ${JSON.stringify(txt)})
+        if (!el) return 'NOTFOUND'
+        el.click(); return 'OK'
+      } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+    await sleep(200)
+    return r
+  }
+  const openPanel = async () => { const r = await clickEl('.filter-chip'); await sleep(600); return r }
+  const confirm = async () => { await page.clickText('确定'); await sleep(700) }
+  const clear = async () => { await clickEl('.filter-mini.clear'); await sleep(700) }
+
+  // 01. 默认必须是「或」（老用户升级后行为不变）
+  await openPanel()
+  assert('筛选面板默认选中「或（任意一人）」', (await activeMode()) === '或（任意一人）', await activeMode())
+  assert('「或」和「且」两个开关都在', (await page.ev(`document.querySelectorAll('.mode-row .pick').length`)) === 2)
+
+  // 02. 「或」：p2 与 p6 从不同场，但并集下两场都出来
+  await pickIn(0, 'p2')
+  await pickIn(0, 'p6')
+  await confirm()
+  assert('「或」：任一人参加就显示（第1场 + 第2场）',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场']), JSON.stringify(await shown()))
+  assert('「或」的摘要仍以「只看」开头', (await summary()) === '只看 p2、p6', await summary())
+
+  // 03. 同一批人切成「且」→ 两人从不同场，一场都不该有
+  await openPanel()
+  assert('能切到「且（必须同场）」', (await setMode('且（必须同场）')) === 'OK')
+  await confirm()
+  assert('「且」：所选的人必须同场（p2、p6 不同场 → 0 场）', (await count()) === 0, `实际 ${await count()}`)
+  assert('「且」的摘要以「同场」开头（一眼看出筛的是"必须一起打"）',
+    (await summary()) === '同场 p2、p6', await summary())
+  assert('「且」筛空时仍是专用空态', (await emptyText()) === '没有符合筛选条件的比赛', await emptyText())
+
+  // 04. 「且」+ p3、p7：两人只在第3场同场
+  //     （p3 还出现在第1场、p7 还出现在第2场，但那两场里只有他们中的一个）
+  await openPanel()
+  await pickIn(0, 'p2')
+  await pickIn(0, 'p6')
+  await pickIn(0, 'p3')
+  await pickIn(0, 'p7')
+  await confirm()
+  assert('「且」：只剩两人真正同场的那一场', JSON.stringify(await shown()) === JSON.stringify(['第3场']), JSON.stringify(await shown()))
+  // 同一批人在「或」下三场都会出现 —— 差别只来自开关
+  await openPanel()
+  await setMode('或（任意一人）')
+  await confirm()
+  assert('同一批人切回「或」：各自的比赛全都回来',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场', '第3场']), JSON.stringify(await shown()))
+
+  // 05. 「且」选超过 4 人：2v2 一场只有 4 人，提前给出红字提示（而不是让人对着空列表猜）
+  await openPanel()
+  await setMode('且（必须同场）')
+  await pickIn(0, 'p4')
+  await pickIn(0, 'p5')
+  await pickIn(0, 'p1')
+  assert('「且」选 5 人时给出红字提示', await page.ev(`!!document.querySelector('.filter-hint.warn')`))
+  assert('提示文案说明为什么筛不出来',
+    ((await page.ev(`(document.querySelector('.filter-hint.warn')?.textContent || '')`))).includes('筛不出任何比赛'))
+  await page.clickText('重置')
+  await sleep(400)
+  assert('「重置」把匹配方式也收回默认「或」', (await activeMode()) === '或（任意一人）', await activeMode())
+  await page.clickText('确定')
+  await sleep(700)
+  assert('重置后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
+
+  // 06. 开关要跟着条件一起记住（localStorage），刷新后不能悄悄变回「或」
+  await openPanel()
+  await setMode('且（必须同场）')
+  await pickIn(0, 'p3')
+  await pickIn(0, 'p7')
+  await confirm()
+  await page.goto('/tournament/2/schedule', 2200)
+  assert('刷新后仍是「且（同场）」', (await summary()) === '同场 p3、p7', await summary())
+  assert('刷新后筛选结果也一致（只剩第3场）', JSON.stringify(await shown()) === JSON.stringify(['第3场']), JSON.stringify(await shown()))
+  assert('持久化的条件里带上了 onlyMode',
+    (await page.ev(`JSON.parse(localStorage.getItem('schedule-filter:2') || '{}').onlyMode`)) === 'all')
+
+  await clear()
+  assert('收尾清除后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
+  assert('收尾已清掉持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
+}
+
+/** 场景 8：对阵表右侧那行「裁 X」：被顶替后必须显示新裁判 */
+async function scenarioScheduleRefereeRow(page) {
+  console.log('8) 对阵表：右侧「裁 X」在顶替 / 卸任后的显示 + 顶替确认')
+  // 模拟后端在两次 claim-referee 之后的真实返回（referee_id 被后来者覆盖）：
+  //   第1场：B 把 A 顶掉 → referee 与 active_referee 都指向 B
+  //   第2场：裁判 C 主动卸任 → referee 保留 C，active_referee 为空
+  //   第3场：还没人认领
+  const rounds = [{
+    id: 11, round_number: 1, status: 'ongoing',
+    matches: [
+      matchPayload({ id: 101, can_referee: true, referee: P(2, '裁判B'), active_referee: P(2, '裁判B') }),
+      matchPayload({ id: 102, status: 'pending', can_referee: true, referee: P(3, '裁判C') }),
+      matchPayload({ id: 103, status: 'pending', can_referee: true }),
+    ],
+  }]
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/\/rounds$/.test(path)) return rounds
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    if (/\/matches\/\d+$/.test(path)) return matchPayload({ id: 101 })
+    return {}
+  })
+  await page.setToken()
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
+  await page.goto('/tournament/2/schedule', 2200)
+
+  const foot = (i) => page.ev(`(document.querySelectorAll('.match-card')[${i}]?.querySelector('.foot-ref')?.textContent || '').trim()`)
+  const claimPosts = () => page.requests.filter((r) => r.method === 'POST' && /claim-referee$/.test(r.path))
+  const clickRefBtn = (i) => page.ev(`(() => {
+    try {
+      const b = document.querySelectorAll('.match-card')[${i}]?.querySelector('.match-info .van-button')
+      if (!b) return 'NOTFOUND'
+      b.click(); return 'OK'
+    } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+
+  assert('被顶替后：右侧那行显示的是**新**裁判（不是空白）', (await foot(0)) === '裁 裁判B', await foot(0))
+  assert('被顶替后：新裁判不会被误标成「已卸任」', !(await foot(0)).includes('已卸任'), await foot(0))
+  assert('主动卸任后：名字保留 + 标记「（已卸任）」', (await foot(1)) === '裁 裁判C（已卸任）', await foot(1))
+  assert('无人认领：右侧没有「裁」那行', (await foot(2)) === '', await foot(2))
+  assert('无人认领：仍有「裁判」按钮可认领',
+    (await page.ev(`(document.querySelectorAll('.match-card')[2]?.querySelector('.match-info .van-button')?.textContent || '').trim()`)) === '裁判')
+
+  // 点已有在任裁判那场的「裁判」按钮：必须先弹确认框写明要顶替谁
+  assert('能点到第1场的「裁判」按钮', (await clickRefBtn(0)) === 'OK')
+  await sleep(500)
+  const d = await page.dialog()
+  assert('顶替前先弹「顶替本场裁判」确认框', d?.标题 === '顶替本场裁判', d?.标题)
+  assert('确认框写明现任裁判是谁', (d?.正文 || '').includes('裁判B'), d?.正文)
+  await page.cancelDialog()
+  await sleep(500)
+  assert('取消后不发认领请求', claimPosts().length === 0, `实际 ${claimPosts().length}`)
+
+  assert('再次点「裁判」', (await clickRefBtn(0)) === 'OK')
+  await sleep(500)
+  await page.confirmDialog()
+  assert('确认顶替后恰好 1 个 claim-referee 请求', claimPosts().length === 1, `实际 ${claimPosts().length}`)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

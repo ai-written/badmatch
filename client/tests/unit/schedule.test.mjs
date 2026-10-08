@@ -24,41 +24,41 @@ const M = (ids) => ({
 })
 
 test('normalizeFilter：空值与非数字一律收敛成空条件', () => {
-  assert.deepEqual(normalizeFilter(null), { onlyPlayerIds: [], excludePlayerIds: [] })
-  assert.deepEqual(normalizeFilter(undefined), { onlyPlayerIds: [], excludePlayerIds: [] })
+  assert.deepEqual(normalizeFilter(null), { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
+  assert.deepEqual(normalizeFilter(undefined), { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
   assert.deepEqual(normalizeFilter({ onlyPlayerIds: 'x', excludePlayerIds: 'y' }),
-    { onlyPlayerIds: [], excludePlayerIds: [] })
+    { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
   // 重复项去重、非数字成员丢弃
   assert.deepEqual(
-    normalizeFilter({ onlyPlayerIds: [1, '2', null, 3], excludePlayerIds: [4, 4, 'x'] }),
-    { onlyPlayerIds: [1, 3], excludePlayerIds: [4] })
+    normalizeFilter({ onlyPlayerIds: [1, '2', null, 3], excludePlayerIds: [4, 4, 'x'], onlyMode: 'any' }),
+    { onlyPlayerIds: [1, 3], excludePlayerIds: [4], onlyMode: 'any' })
 })
 
 test('normalizeFilter：兼容旧版单选的 onlyPlayerId', () => {
   assert.deepEqual(normalizeFilter({ onlyPlayerId: 5, excludePlayerIds: [] }),
-    { onlyPlayerIds: [5], excludePlayerIds: [] })
+    { onlyPlayerIds: [5], excludePlayerIds: [], onlyMode: 'any' })
   assert.deepEqual(normalizeFilter({ onlyPlayerId: null, excludePlayerIds: [3] }),
-    { onlyPlayerIds: [], excludePlayerIds: [3] })
+    { onlyPlayerIds: [], excludePlayerIds: [3], onlyMode: 'any' })
 })
 
 test('normalizeFilter：新旧字段并存时，新字段为空才回落到旧值', () => {
   assert.deepEqual(normalizeFilter({ onlyPlayerIds: [7], onlyPlayerId: 5 }),
-    { onlyPlayerIds: [7], excludePlayerIds: [] })
+    { onlyPlayerIds: [7], excludePlayerIds: [], onlyMode: 'any' })
   assert.deepEqual(normalizeFilter({ onlyPlayerIds: [], onlyPlayerId: 5, excludePlayerIds: [9] }),
-    { onlyPlayerIds: [5], excludePlayerIds: [9] })
+    { onlyPlayerIds: [5], excludePlayerIds: [9], onlyMode: 'any' })
 })
 
 test('normalizeFilter：同一人不能既「只看」又「排除」（以只看优先）', () => {
-  assert.deepEqual(normalizeFilter({ onlyPlayerIds: [5], excludePlayerIds: [5, 6] }),
-    { onlyPlayerIds: [5], excludePlayerIds: [6] })
+  assert.deepEqual(normalizeFilter({ onlyPlayerIds: [5], excludePlayerIds: [5, 6], onlyMode: 'any' }),
+    { onlyPlayerIds: [5], excludePlayerIds: [6], onlyMode: 'any' })
   assert.deepEqual(normalizeFilter({ onlyPlayerId: 5, excludePlayerIds: [5] }),
-    { onlyPlayerIds: [5], excludePlayerIds: [] })
+    { onlyPlayerIds: [5], excludePlayerIds: [], onlyMode: 'any' })
 })
 
 test('normalizeFilter：NaN / 浮点会被 typeof 放行，必须丢弃', () => {
   assert.deepEqual(
-    normalizeFilter({ onlyPlayerIds: [1, NaN, 1.5], excludePlayerIds: [NaN, 2, 2.5] }),
-    { onlyPlayerIds: [1], excludePlayerIds: [2] })
+    normalizeFilter({ onlyPlayerIds: [1, NaN, 1.5], excludePlayerIds: [NaN, 2, 2.5], onlyMode: 'any' }),
+    { onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'any' })
   // 只剩非法值时视为「没有筛选」，否则会出现「筛选打开后一场都没有」
   assert.equal(isFilterActive(normalizeFilter({ onlyPlayerIds: [NaN] })), false)
 })
@@ -87,10 +87,64 @@ test('matchVisible：排除取并集（任一被排除者在场就隐藏）', ()
 })
 
 test('matchVisible：只看 + 排除叠加 = 两个条件同时满足', () => {
-  const f = normalizeFilter({ onlyPlayerIds: [1, 2], excludePlayerIds: [3] })
+  const f = normalizeFilter({ onlyPlayerIds: [1, 2], excludePlayerIds: [3], onlyMode: 'any' })
   assert.equal(matchVisible(M([1, 3, 5, 6]), f), false, '有只看的人但也有被排除的人 → 隐藏')
   assert.equal(matchVisible(M([1, 5, 6, 7]), f), true)
   assert.equal(matchVisible(M([9, 5, 6, 7]), f), false, '没有只看的人 → 隐藏')
+})
+
+// ------------------------------------------------ 「或 / 且」两种只看模式
+
+test('normalizeFilter：onlyMode 只认 all，其余一律回落 any', () => {
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1] }).onlyMode, 'any', '旧数据没有这个字段')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'all' }).onlyMode, 'all')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'ALL' }).onlyMode, 'any', '不认大小写变体')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: true }).onlyMode, 'any', '脏类型')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: null }).onlyMode, 'any')
+  assert.equal(emptyFilter().onlyMode, 'any', '默认必须是「或」')
+})
+
+test('matchVisible：onlyMode=all 时要求所选的人全部同场', () => {
+  const all = normalizeFilter({ onlyPlayerIds: [1, 3], onlyMode: 'all' })
+  assert.equal(matchVisible(M([1, 2, 3, 4]), all), true, '1 和 3 都在场上')
+  assert.equal(matchVisible(M([1, 2, 5, 6]), all), false, '只有 1 在')
+  assert.equal(matchVisible(M([3, 2, 5, 6]), all), false, '只有 3 在')
+  assert.equal(matchVisible(M([7, 8, 9, 10]), all), false, '都不在')
+  // 同一场比赛换回「或」就是可见的 —— 差别只在模式
+  assert.equal(matchVisible(M([1, 2, 5, 6]), normalizeFilter({ onlyPlayerIds: [1, 3] })), true)
+})
+
+test('matchVisible：只选一个人时两种模式完全等价', () => {
+  for (const mode of ['any', 'all']) {
+    const f = normalizeFilter({ onlyPlayerIds: [5], onlyMode: mode })
+    assert.equal(matchVisible(M([5, 1, 2, 3]), f), true, mode)
+    assert.equal(matchVisible(M([1, 2, 3, 4]), f), false, mode)
+  }
+})
+
+test('matchVisible：all 模式选超过 4 人恒为空（2v2 一场只有 4 人）', () => {
+  const f = normalizeFilter({ onlyPlayerIds: [1, 2, 3, 4, 5], onlyMode: 'all' })
+  assert.equal(matchVisible(M([1, 2, 3, 4]), f), false)
+  // 面板对这种情况有红字提示（draftOnlyIds.length > 4 时）
+})
+
+test('matchVisible：all 与排除叠加 = 同场且场上无被排除者', () => {
+  const f = normalizeFilter({ onlyPlayerIds: [1, 3], excludePlayerIds: [2], onlyMode: 'all' })
+  assert.equal(matchVisible(M([1, 3, 5, 6]), f), true)
+  assert.equal(matchVisible(M([1, 2, 3, 4]), f), false, '2 被排除')
+  assert.equal(matchVisible(M([1, 5, 6, 7]), f), false, '3 不在场')
+})
+
+test('pruneFilter / nextOnlyMeFilter 必须保留 onlyMode', () => {
+  const all = normalizeFilter({ onlyPlayerIds: [1, 99], excludePlayerIds: [2, 98], onlyMode: 'all' })
+  assert.equal(pruneFilter(all, [1, 2, 3, 4]).onlyMode, 'all', '剪枝不能把用户选的「且」重置成「或」')
+  assert.deepEqual(pruneFilter(all, [1, 2, 3, 4]),
+    { onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'all' })
+  assert.equal(nextOnlyMeFilter(all, 7).onlyMode, 'all', '「只看我」收敛时保留模式')
+  assert.equal(nextOnlyMeFilter(emptyFilter(), 7).onlyMode, 'any')
+  // 剪枝没有变化时保持同一个引用（调用方据此判断要不要落盘/提示）
+  const keep = normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'all' })
+  assert.equal(pruneFilter(keep, [1, 2]), keep)
 })
 
 test('filterRounds：未启用筛选时不重建数组，启用后保留轮次结构', () => {
@@ -110,12 +164,12 @@ test('filterRounds：未启用筛选时不重建数组，启用后保留轮次�
 })
 
 test('pruneFilter：剪掉已不在赛程里的人，其余保留', () => {
-  const f = normalizeFilter({ onlyPlayerIds: [1, 99], excludePlayerIds: [2, 98] })
-  assert.deepEqual(pruneFilter(f, [1, 2, 3, 4]), { onlyPlayerIds: [1], excludePlayerIds: [2] })
+  const f = normalizeFilter({ onlyPlayerIds: [1, 99], excludePlayerIds: [2, 98], onlyMode: 'any' })
+  assert.deepEqual(pruneFilter(f, [1, 2, 3, 4]), { onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'any' })
 })
 
 test('pruneFilter：没有可剪的返回原引用（调用方据此决定是否落盘/提示用户）', () => {
-  const f = normalizeFilter({ onlyPlayerIds: [1], excludePlayerIds: [2] })
+  const f = normalizeFilter({ onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'any' })
   assert.equal(pruneFilter(f, [1, 2, 3]), f)
 })
 
@@ -123,7 +177,7 @@ test('pruneFilter：拿到空名单就会清空条件 —— 所以调用方必�
   // 这是接口契约：ScheduleView 用 roundsLoadedFor + 「名单非空」两道护栏保证
   // "拉取失败/零场次"时不会调用到这里
   const f = normalizeFilter({ onlyPlayerIds: [1] })
-  assert.deepEqual(pruneFilter(f, []), { onlyPlayerIds: [], excludePlayerIds: [] })
+  assert.deepEqual(pruneFilter(f, []), { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
 })
 
 test('pruneFilter：空条件 + 空名单也返回原引用（否则首屏会凭空弹「已移除」提示）', () => {
@@ -135,16 +189,16 @@ test('pruneFilter：空条件 + 空名单也返回原引用（否则首屏会凭
 test('pruneFilter：只剪「只看」、只剪「排除」两条分支都要正确', () => {
   // 只剪 only（exclude 全都还在）
   assert.deepEqual(
-    pruneFilter(normalizeFilter({ onlyPlayerIds: [1, 99], excludePlayerIds: [2] }), [1, 2, 3]),
-    { onlyPlayerIds: [1], excludePlayerIds: [2] })
+    pruneFilter(normalizeFilter({ onlyPlayerIds: [1, 99], excludePlayerIds: [2], onlyMode: 'any' }), [1, 2, 3]),
+    { onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'any' })
   // 只剪 exclude（only 全都还在）
   assert.deepEqual(
-    pruneFilter(normalizeFilter({ onlyPlayerIds: [1], excludePlayerIds: [2, 99] }), [1, 2, 3]),
-    { onlyPlayerIds: [1], excludePlayerIds: [2] })
+    pruneFilter(normalizeFilter({ onlyPlayerIds: [1], excludePlayerIds: [2, 99], onlyMode: 'any' }), [1, 2, 3]),
+    { onlyPlayerIds: [1], excludePlayerIds: [2], onlyMode: 'any' })
   // 两边都要剪
   assert.deepEqual(
-    pruneFilter(normalizeFilter({ onlyPlayerIds: [99], excludePlayerIds: [98] }), [1, 2, 3]),
-    { onlyPlayerIds: [], excludePlayerIds: [] })
+    pruneFilter(normalizeFilter({ onlyPlayerIds: [99], excludePlayerIds: [98], onlyMode: 'any' }), [1, 2, 3]),
+    { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
 })
 
 test('isOnlyMeFilter：只有「正好只看我一个人」才算生效', () => {
@@ -154,7 +208,7 @@ test('isOnlyMeFilter：只有「正好只看我一个人」才算生效', () => 
   assert.equal(isOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [7, 8] }), me), false, '还有别人不算')
   assert.equal(isOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [8] }), me), false, '只看别人不算')
   assert.equal(
-    isOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [7], excludePlayerIds: [8] }), me), false,
+    isOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [7], excludePlayerIds: [8], onlyMode: 'any' }), me), false,
     '还排除了别人就不算「只看我」（否则按钮高亮与实际结果不符）')
   assert.equal(isOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [7] }), null), false, '不知道自己是谁不算')
 })
@@ -164,7 +218,7 @@ test('isOnlyMeFilter 为真时排除必为空 —— 所以「再点一下取消
     emptyFilter(),
     normalizeFilter({ onlyPlayerIds: [7] }),
     normalizeFilter({ onlyPlayerIds: [7, 8] }),
-    normalizeFilter({ onlyPlayerIds: [7], excludePlayerIds: [9] }),
+    normalizeFilter({ onlyPlayerIds: [7], excludePlayerIds: [9], onlyMode: 'any' }),
     normalizeFilter({ excludePlayerIds: [9] }),
   ]
   for (const f of cases) {
@@ -178,13 +232,13 @@ test('nextOnlyMeFilter：一键收敛成只看我一个人；已经是则取消�
   const me = 7
   // 选了别人 + 排除了别人 → 收敛成只看我，且排除被清掉
   const converged = nextOnlyMeFilter(
-    normalizeFilter({ onlyPlayerIds: [8, 9], excludePlayerIds: [10] }), me)
-  assert.deepEqual(converged, { onlyPlayerIds: [7], excludePlayerIds: [] })
+    normalizeFilter({ onlyPlayerIds: [8, 9], excludePlayerIds: [10], onlyMode: 'any' }), me)
+  assert.deepEqual(converged, { onlyPlayerIds: [7], excludePlayerIds: [], onlyMode: 'any' })
   assert.equal(isOnlyMeFilter(converged, me), true, '收敛后必须处于生效态')
 
   // 从零开始点一下 → 只看我
-  assert.deepEqual(nextOnlyMeFilter(emptyFilter(), me), { onlyPlayerIds: [7], excludePlayerIds: [] })
+  assert.deepEqual(nextOnlyMeFilter(emptyFilter(), me), { onlyPlayerIds: [7], excludePlayerIds: [], onlyMode: 'any' })
 
   // 已经生效再点 → 回到全部比赛
-  assert.deepEqual(nextOnlyMeFilter(converged, me), { onlyPlayerIds: [], excludePlayerIds: [] })
+  assert.deepEqual(nextOnlyMeFilter(converged, me), { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
 })
