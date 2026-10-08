@@ -20,6 +20,9 @@ async def claim_referee(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 顺序：先取赛事的共享锁，再锁比赛行（见 load_writable_tournament 的说明）。
+    # 反过来的话，与"退赛先锁赛事再删比赛"会形成环路而死锁。
+    await load_writable_tournament(db, tournament_id)
     # 行锁：并发认领同一场比赛时串行化，否则两人都会读到「无裁判」，
     # 后提交者覆盖前者——前者收到「认领成功」却立刻失去权限。
     result = await db.execute(
@@ -30,8 +33,6 @@ async def claim_referee(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 赛事已结束则该场只读，不允许再认领裁判
-    await load_writable_tournament(db, tournament_id)
     if m.status == MatchStatus.FINISHED:
         raise HTTPException(status_code=400, detail="比赛已结束")
     # 认领规则（按真实使用场景放宽，前端会先弹确认框再发请求）：
@@ -57,11 +58,9 @@ async def claim_referee(
             message="您认领的裁判场次已由他人接手，如仍需执裁请重新认领。",
         ))
 
-    await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
-                detail={"tournament_id": tournament_id, "replaced_referee_id": replaced_referee_id},
-                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    # 先提交再广播：订阅者收到 referee_claimed 后回查比赛详情时，
-    # 未提交的话看到的仍是无裁判状态，这一次实时更新就被吞掉
+    # 先提交再广播再审计：订阅者收到 referee_claimed 后回查比赛详情时，
+    # 未提交的话看到的仍是无裁判状态，这一次实时更新就被吞掉；
+    # 审计随后（见 auth.update_profile 的说明：避免假日志、也避免取消时跳过广播）
     await db.commit()
     from app.core.websocket import manager
     await manager.broadcast(tournament_id, {
@@ -69,6 +68,9 @@ async def claim_referee(
         "match_id": match_id,
         "referee_id": user.id,
     })
+    await audit(user=user, action="referee_claim", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id, "replaced_referee_id": replaced_referee_id},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
@@ -102,13 +104,13 @@ async def release_referee(
 
     # 只标记卸任时间，保留 referee_id 作为执裁历史；此后不再拥有记分等权限
     m.referee_released_at = datetime.now()
-    await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
-                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    # 先提交再广播（同上）
+    # 先提交再广播再审计（同上）
     await db.commit()
     from app.core.websocket import manager
     await manager.broadcast(tournament_id, {
         "type": "referee_released",
         "match_id": match_id,
     })
+    await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}

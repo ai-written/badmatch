@@ -1,5 +1,9 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+# 站点本地时区（与 docker-compose 的 TZ/PGTZ、audit 的 _parse_audit_dt 一致）
+SITE_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class TimeSlotCreate(BaseModel):
@@ -63,9 +67,25 @@ class TournamentCreate(BaseModel):
             raise ValueError("赛事名称不能为空")
         return v
 
+    @field_validator("start_date", "end_date", "registration_open_at")
+    @classmethod
+    def _to_site_naive(cls, v: datetime | None) -> datetime | None:
+        """把带时区的时间换算成站点本地时间并去掉 tzinfo。
+
+        DB 列是 naive TIMESTAMP（会话时区 Asia/Shanghai），而 asyncpg 不接受
+        offset-aware 的 datetime：以前接口直接把 `2026-10-20T19:00:00+08:00`
+        这类输入打成 500（DataError: can't subtract offset-naive and offset-aware
+        datetimes），而不是 422。这里换算掉，语义也更正确（给的是同一时刻）。
+        前端提交的本来就是 naive 本地时间，行为不变。
+        """
+        if v is None or v.tzinfo is None:
+            return v
+        return v.astimezone(SITE_TZ).replace(tzinfo=None)
+
     @model_validator(mode="after")
     def _check_times(self):
-        # 时区感知性必须一致，否则比较会抛 TypeError；前端目前提交的是 naive 本地时间
+        # 到这里 start/end 一定都是 naive 了（上面的字段校验器统一换算过）；
+        # 仍保留一次防御性判断，避免将来有人绕过校验器直接构造模型
         if (self.start_date.tzinfo is None) == (self.end_date.tzinfo is None):
             if self.end_date <= self.start_date:
                 raise ValueError("结束时间必须晚于开始时间")

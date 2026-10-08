@@ -138,13 +138,19 @@ async def create_tournament(
     db: AsyncSession = Depends(get_db),
 ):
     t = await _create_tournament(data, user, db, background_tasks)
+    # 响应在事务内构造：构造失败就整体回滚（与原先一致），不会留下"创建成功但返回 500"、
+    # 让客户端重试后建出两条赛事的中间态。
+    detail = await _tournament_detail(t, db)
+    # 先提交再写审计（同 auth.update_profile）：审计用独立会话立即提交，
+    # 写在提交前的话，业务事务一回滚就会留下一条"赛事已创建"的假日志。
+    await db.commit()
     await audit(
         user=user, action="tournament_create",
         target_type="tournament", target_id=t.id,
         detail={"title": t.title, "max_participants": t.max_participants, "total_matches": t.total_matches},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
-    return await _tournament_detail(t, db)
+    return detail
 
 
 @router.post("/batch")
@@ -166,6 +172,8 @@ async def create_tournaments_batch(
             continue
         sent_emails.add(task[0])
         background_tasks.add_task(send_tournament_invite, *task)
+    # 先提交再写审计（同上）
+    await db.commit()
     await audit(
         user=user, action="tournament_create_batch",
         target_type="tournament", target_id=tournament_ids[0] if tournament_ids else None,
@@ -365,12 +373,17 @@ async def delete_tournament(
     # delete registrations  
     await db.execute(delete(Registration).where(Registration.tournament_id == tournament_id))
 
+    # 快照在 delete **之前**取（同 auth.delete_user）：删完再读列属性虽然现在也能用，
+    # 但只要哪天给这个 select 加了 load_only/defer 就会变成"对已删除对象取属性"
+    deleted_id, deleted_title, deleted_status = t.id, t.title, t.status.value
     await db.delete(t)
     await db.flush()
+    # 先提交再写审计（同上）
+    await db.commit()
     await audit(
         user=user, action="tournament_delete",
-        target_type="tournament", target_id=t.id,
-        detail={"title": t.title, "status": t.status.value},
+        target_type="tournament", target_id=deleted_id,
+        detail={"title": deleted_title, "status": deleted_status},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True}
@@ -427,10 +440,11 @@ async def register(
     else:
         db.add(Registration(tournament_id=tournament_id, user_id=user.id))
 
-    await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
-    # 先提交再广播：广播是网络 IO，提交后订阅者回查也不会读到旧数据
+    # 先提交再广播再审计：审计对请求取消是向上抛的，写在广播前会让广播被跳过；
+    # 写在提交前则业务回滚时会留下"已报名"的假日志
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
     return {"ok": True}
 
 
@@ -464,10 +478,10 @@ async def cancel_register(
     reg.is_active = False
     # 时间交给数据库生成（now()），与 created_at 的 server_default=func.now() 同一时区口径
     reg.cancelled_at = func.now()
-    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
-    # 先提交再广播，避免订阅者回查时报名人数还是旧值
+    # 先提交再广播再审计（同上）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
     return {"ok": True}
 
 

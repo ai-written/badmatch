@@ -136,16 +136,18 @@ async def start_tournament(
         db.add(stat)
 
     tournament.status = TournamentStatus.ONGOING
+    # 先提交再广播：订阅者收到 tournament_started 后会立刻拉赛程，
+    # 未提交的话可能读到还没生成的轮次（表现为「已开始但赛程是空的」）；
+    # 审计随后（见 auth.update_profile 的说明：避免业务回滚留下假日志，
+    # 也避免 audit 遇到请求取消时把这次广播连带跳过）
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "tournament_started"})
     await audit(
         user=user, action="tournament_start",
         target_type="tournament", target_id=tournament.id,
         detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data)},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
-    # 先提交再广播：订阅者收到 tournament_started 后会立刻拉赛程，
-    # 未提交的话可能读到还没生成的轮次（表现为「已开始但赛程是空的」）
-    await db.commit()
-    await manager.broadcast(tournament_id, {"type": "tournament_started"})
     return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
 
 
@@ -187,12 +189,12 @@ async def withdraw_player(
         # 与 cancel-register 同一口径：取消/退赛都要记时间，否则「取消报名记录」里
         # 这条只能显示「时间未知」，和「老数据缺列」的兜底语义混淆
         r.cancelled_at = func.now()
+        # 先提交再广播再审计（见 auth.update_profile 的说明）
+        await db.commit()
+        await manager.broadcast(tournament_id, {"type": "registration_updated"})
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                     detail={"player_id": player_id, "self": True, "phase": "open"},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-        # 先提交再广播，避免订阅者回查时报名人数还是旧值
-        await db.commit()
-        await manager.broadcast(tournament_id, {"type": "registration_updated"})
         return {"ok": True, "message": "已取消报名"}
 
     if tournament.status != TournamentStatus.ONGOING:
@@ -239,9 +241,16 @@ async def withdraw_player(
             first = remaining_players.scalar_one_or_none()
             if first:
                 tournament.creator_id = first
-        # 先提交再广播（同上：订阅者会立刻回查报名列表与赛事详情）
+        # 先提交再广播再审计（与本函数其它分支、以及全仓其它接口统一）：
+        # 这条分支也在改状态（房主转移 + 报名记录失效），原先一条审计都不写 ——
+        # 事后查「谁把房主转走了」只能看到一片空白。
+        # 审计必须在广播之后：audit 遇到请求取消会向上抛，写在广播前会让这次广播被跳过。
         await db.commit()
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
+        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                    detail={"player_id": player_id, "self": is_self, "phase": "already_withdrawn",
+                            "creator_id": tournament.creator_id},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "选手已退赛"}
 
     ps.is_active = False
@@ -334,13 +343,20 @@ async def withdraw_player(
     if remaining_count < 4:
         # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事
         tournament.status = TournamentStatus.FINISHED
-        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
-                    detail={"player_id": player_id, "remaining": remaining_count, "auto_finished": True},
-                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         # 先提交再广播：订阅者收到 tournament_finished 后会回查赛事状态，
         # 未提交的话读到的还是「进行中」
         await db.commit()
         await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+        # 审计放在提交**和广播之后**：写在提交前，业务事务一旦回滚就会留下
+        # 「赛事已结束」的假日志；写在广播前，手机端提交后立刻切页导致的请求取消
+        # 会让广播被直接跳过（audit 对取消是向上抛的，见 core/audit.py）。
+        # 两条都记：一条「结束赛事」，一条「谁退的赛」。
+        await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
+                    detail={"auto": True, "reason": "players_below_4"},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                    detail={"player_id": player_id, "remaining": remaining_count, "auto_finished": True},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
     if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
@@ -391,13 +407,13 @@ async def withdraw_player(
             message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
         ))
 
+    # 先提交再广播再审计：这里重排了赛程、通知了原裁判，订阅者收到后若立刻拉赛程，
+    # 未提交的话会读到重排前的旧轮次；审计随后（见 auth.update_profile 的说明）
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                 detail={"player_id": player_id, "remaining": remaining_count, "new_creator_id": tournament.creator_id},
                 ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    # 先提交再广播：这里重排了赛程、通知了原裁判，订阅者收到后若立刻拉赛程，
-    # 未提交的话会读到重排前的旧轮次
-    await db.commit()
-    await manager.broadcast(tournament_id, {"type": "registration_updated"})
     return {"ok": True}
 
 
@@ -408,7 +424,12 @@ async def end_tournament(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    # 行锁：与「比赛全部打完自动收尾」串行化。否则两条路径可能都读到 ongoing 各自收尾，
+    # 结果是两条 tournament_end 审计（一条 title、一条 auto）+ 两次广播。
+    # 同时也与正在记分的请求（它们持赛事的 FOR SHARE 锁）互斥，保证不会改到一半就被结束。
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404)
@@ -418,9 +439,11 @@ async def end_tournament(
     if tournament.status != TournamentStatus.ONGOING:
         raise HTTPException(status_code=400, detail="只能结束进行中的赛事")
     tournament.status = TournamentStatus.FINISHED
-    await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
-                detail={"title": tournament.title}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     # 先提交再广播，避免订阅者回查时赛事状态还是「进行中」
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+    # 审计放最后（提交 + 广播之后）：写在提交前，提交失败会留下「赛事已结束」的假日志；
+    # 写在广播前，手机端提交后立刻切页导致的请求取消会让广播被跳过。
+    await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
+                detail={"title": tournament.title}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}

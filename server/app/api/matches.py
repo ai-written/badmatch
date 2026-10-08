@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import lazyload
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
@@ -27,8 +28,26 @@ async def load_writable_tournament(db: AsyncSession, tournament_id: int) -> Tour
     赛事被提前结束（end-tournament）时，往往还会有没打完的比赛。
     这些比赛必须变成只读：否则仍能认领裁判、记分、交换场地，
     在已结束的赛事上继续改动数据。所有会改数据的比赛级接口都应先过这里。
+
+    这里额外取一个**共享行锁**（FOR SHARE），把全局加锁顺序钉成「先赛事、后比赛」：
+    - 比赛级接口都会改 matches 行；而退赛（withdraw_player）是先锁赛事行、再删 matches、
+      同时改 player_stats。若比赛级接口先锁 matches 再锁赛事，就会出现
+      「A 持 matches 等赛事 vs B 持赛事等 matches」的环路，PostgreSQL 直接报死锁（用户看到 500）。
+    - 共享锁之间相容：多个裁判同时记分互不阻塞；只有退赛/开赛/结束这类持排他锁的操作
+      与它们互斥 —— 这正是想要的语义：改赛事结构与改比分不并发。
+      实测：持 FOR SHARE 时 FOR UPDATE 会被阻塞到前者提交。
+    因此**调用点必须在锁比赛行之前调用本函数**，顺序反了这个保证就没了。
+
+    `lazyload("*")`：这里只用到 status/creator_id 等列属性，而 Tournament 的 5 个集合都是
+    `lazy="selectin"` —— 不显式关掉的话，一次 select 会连带把整张赛事图（轮次、比赛、
+    配对、报名、战绩）拉出来，而这条查询每次记分/换边/认领都会跑，现在还在行锁持有期间。
+    若将来这里要读关系，请显式加 eager 选项（别依赖默认行为，那正是性能陷阱）。
     """
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id)
+        .with_for_update(read=True)
+        .options(lazyload("*"))
+    )
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404, detail="赛事不存在")
@@ -112,14 +131,15 @@ async def update_score(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 顺序：先取赛事的共享锁，再锁比赛行（见 load_writable_tournament 的说明）。
+    # 反过来的话，与"退赛先锁赛事再删比赛"会形成环路而死锁。
+    await load_writable_tournament(db, tournament_id)
     result = await db.execute(
         select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id).with_for_update()
     )
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 赛事已结束 = 整场只读，谁都不能再改（超级管理员也不行）
-    await load_writable_tournament(db, tournament_id)
     # 比赛已结束是另一回事：赛事进行中时，管理员/超管、或**本场记录的裁判**（谁记的分谁能改）
     # 仍可修正该场比分并重算胜负
     is_privileged = user.role in ("admin", "superadmin")
@@ -163,20 +183,25 @@ async def update_score(
             raise HTTPException(status_code=400, detail="比分相同，无法结束")
         winner = m.pairing_a_id if sa > sb else m.pairing_b_id
         await _finalize_match(m, winner, db, previous=previous)
-        await _maybe_finish_tournament(tournament_id, db)
+        await _maybe_finish_tournament(tournament_id, db, user=user, request=request)
+        # 先提交再广播（同 swap_sides）：广播是网络 IO，不应在持有行锁时进行；
+        # 提交后订阅者立刻拉取也能读到最新比分与赛事状态。
+        await db.commit()
+        await _broadcast_match(m, tournament_id)
+        # 审计放最后（业务提交与广播之后）：见 auth.update_profile 的说明 —— 写在提交前，
+        # 业务回滚就会留下假日志；而 audit 对请求取消是向上抛的，写在广播前会让广播被跳过。
         await audit(
             user=user, action="match_force_end",
             target_type="match", target_id=m.id,
             detail={"score_a": sa, "score_b": sb, "winner_pairing_id": winner},
             ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         )
-        # 先提交再广播（同 swap_sides）：广播是网络 IO，不应在持有行锁时进行；
-        # 提交后订阅者立刻拉取也能读到最新比分与赛事状态。
-        await db.commit()
-        await _broadcast_match(m, tournament_id)
         return {"ok": True, "finished": True}
 
-    # 高频操作：默认不记录，由 AUDIT_HIGH_FREQ_ENABLED 控制
+    # 同上：先提交再广播，缩短持锁时间（记分是最高频的写操作，影响最明显）
+    await db.commit()
+    await _broadcast_match(m, tournament_id)
+    # 高频操作：默认不记录，由 AUDIT_HIGH_FREQ_ENABLED 控制；写也放在提交与广播之后
     await audit(
         user=user, action="match_score_update",
         target_type="match", target_id=m.id,
@@ -184,9 +209,6 @@ async def update_score(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         high_freq=True,
     )
-    # 同上：先提交再广播，缩短持锁时间（记分是最高频的写操作，影响最明显）
-    await db.commit()
-    await _broadcast_match(m, tournament_id)
     return {"ok": True}
 
 
@@ -204,6 +226,8 @@ async def swap_sides(
     此前这是纯前端行为，每个观众各自的视角只在自己浏览器里生效；
     改为服务端状态后，裁判交换一次，所有正在看这场的人一起切换。
     """
+    # 顺序：先赛事共享锁，再比赛行锁（同 update_score，见 load_writable_tournament）
+    await load_writable_tournament(db, tournament_id)
     result = await db.execute(
         select(Match)
         .where(Match.id == match_id, Match.tournament_id == tournament_id)
@@ -212,8 +236,6 @@ async def swap_sides(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 赛事已结束则该场只读，不允许再交换场地
-    await load_writable_tournament(db, tournament_id)
     # 同上：已卸任的裁判不能再交换场地
     # 同 update_score：管理员/超级管理员也可交换场地
     if not (user.role in ("admin", "superadmin") or (m.referee_id == user.id and m.has_active_referee)):
@@ -222,12 +244,6 @@ async def swap_sides(
         raise HTTPException(status_code=400, detail="比赛已结束")
 
     m.is_swapped = (not m.is_swapped) if body.swapped is None else body.swapped
-    await audit(
-        user=user, action="match_swap_sides",
-        target_type="match", target_id=m.id,
-        detail={"is_swapped": m.is_swapped},
-        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
-    )
     # 先提交再广播：广播是可能阻塞的网络 IO，而此处仍持有该行的 FOR UPDATE 锁，
     # 拖长持锁时间会挡住同一场比赛的记分请求。提交后数据也已可见，
     # 订阅者收到广播再拉取时不会读到旧值。
@@ -237,6 +253,13 @@ async def swap_sides(
         "match_id": match_id,
         "is_swapped": m.is_swapped,
     })
+    # 审计放最后（提交与广播之后），见 auth.update_profile 的说明
+    await audit(
+        user=user, action="match_swap_sides",
+        target_type="match", target_id=m.id,
+        detail={"is_swapped": m.is_swapped},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
     return {"ok": True, "is_swapped": m.is_swapped}
 
 
@@ -259,11 +282,11 @@ async def start_round(
     if round_obj.status != RoundStatus.PENDING:
         raise HTTPException(status_code=400, detail="该轮次已开始或已结束")
     round_obj.status = RoundStatus.ONGOING
-    await audit(user=user, action="round_start", target_type="round", target_id=round_id,
-                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    # 先提交再广播，避免订阅者回查时读到旧状态
+    # 先提交再广播，避免订阅者回查时读到旧状态；审计随后（见 auth.update_profile 的说明）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "round_started", "round_id": round_id})
+    await audit(user=user, action="round_start", target_type="round", target_id=round_id,
+                detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 
 
@@ -335,12 +358,7 @@ async def support_match(
 
     # count
     counts = await _count_supports(match_id, db)
-    # 高频操作：默认不记录
-    await audit(user=user, action="support_vote", target_type="match", target_id=match_id,
-                detail={"side": body.side, "via_retry": upserted_via_retry},
-                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
-                high_freq=True)
-    # 先提交再广播，避免订阅者回查时票数还是旧的
+    # 先提交再广播，避免订阅者回查时票数还是旧的；审计随后（见 auth.update_profile 的说明）
     await db.commit()
     await manager.broadcast(tournament_id, {
         "type": "support_updated",
@@ -348,6 +366,11 @@ async def support_match(
         "support_a": counts[0],
         "support_b": counts[1],
     })
+    # 高频操作：默认不记录（AUDIT_HIGH_FREQ_ENABLED）
+    await audit(user=user, action="support_vote", target_type="match", target_id=match_id,
+                detail={"side": body.side, "via_retry": upserted_via_retry},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+                high_freq=True)
     return {"support_a": counts[0], "support_b": counts[1], "my_side": body.side}
 
 
@@ -681,8 +704,45 @@ async def _broadcast_match(m: Match, tournament_id: int) -> None:
     })
 
 
-async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession) -> None:
-    """比赛全部结束后自动将赛事置为 finished 并广播。"""
+async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession, user=None, request=None) -> None:
+    """比赛全部结束后自动将赛事置为 finished 并广播。
+
+    自动结束同样要写一条 `tournament_end` 审计：这是**最常见的结束路径**
+    （正常打完最后一场，而不是谁去点「提前结束」）。原先这里静默改状态，
+    管理面板里筛「结束赛事」一条都查不到，看起来就像日志丢了。
+    detail.auto 标明是系统自动收尾，触发者是当时正在记分/结束比赛的那位。
+
+    并发与事务边界（顺序很关键，这里踩过两次）：
+    1. **先提交**本场结果、放掉 matches 行锁，再取 tournaments 行锁。否则会与
+       withdraw_player（先锁 tournaments 再删 matches）形成反向加锁顺序而互相死锁 ——
+       记分路径本来已持有 match 行锁。
+    2. 拿到 tournaments 行锁**之后**才数剩余场次，数完才决定收尾。**不能图省事先数一次
+       就提前返回**：两场「最后比赛」并发结束时，双方都会在对方提交前数到「还剩 1 场」
+       而各自返回，赛事就永远停在 ongoing（既没有 tournament_end，也没有
+       tournament_finished 广播）。
+       代价：每次结束比赛都会多一次提交，并在调用方提交前短暂持有赛事行锁。
+       这远小于「比赛全打完了却还显示进行中」的代价。
+    """
+    # 见注释 1
+    await db.commit()
+    # populate_existing：强制用新行覆盖 identity map 里可能已存在的同 id 对象。
+    # **这一行在并发收尾时必须生效**：等 FOR UPDATE 的过程中，另一个请求（或
+    # end-tournament）可能已经改过 status；不同步覆盖就会读到旧值 —— 表现为多写一条
+    # tournament_end + 多广播一次 tournament_finished。
+    # （load_writable_tournament 的 selectin 预加载会把父对象留在 identity map 里，
+    #  所以不能指望"对象已被回收"。）
+    # lazyload("*")：本函数只需要回写 status，别在这里把整张赛事图拉出来 —— 这段代码
+    # 跑在行锁持有期间，多出的每条查询都在延长其它记分请求的等待。
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+        .options(lazyload("*"))
+    )
+    tournament = t.scalar_one_or_none()
+    if not tournament or tournament.status == TournamentStatus.FINISHED:
+        return
+    # 见注释 2：必须在拿到锁之后再数，且**只以这一次计数为准**
     remaining = await db.execute(
         select(func.count(Match.id)).where(
             Match.tournament_id == tournament_id,
@@ -691,16 +751,24 @@ async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession) -> None
     )
     if (remaining.scalar() or 0) > 0:
         return
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
-    tournament = t.scalar_one_or_none()
-    if not tournament or tournament.status == TournamentStatus.FINISHED:
-        return
     tournament.status = TournamentStatus.FINISHED
     await db.flush()
     # 先提交再广播：订阅者收到 tournament_finished 后可能立刻回查赛事详情，
     # 若此时事务未提交，读到的是仍是 ongoing 的旧状态，这次实时更新就被吞掉了
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+    # 审计放在提交**和广播之后**：
+    # - 提交之后：它用独立会话立即提交，写在提交前的话，业务事务一回滚就会留下
+    #   「赛事已结束」的假日志；
+    # - 广播之后：audit 遇到请求取消会向上抛（见 core/audit.py），写在广播前会让
+    #   手机端"提交后立刻切页"直接跳过这次广播，别人一直看到旧状态。
+    await audit(
+        user=user, action="tournament_end",
+        target_type="tournament", target_id=tournament_id,
+        detail={"auto": True, "reason": "all_matches_finished"},
+        ip=get_client_ip(request) if request is not None else None,
+        user_agent=request.headers.get("user-agent") if request is not None else None,
+    )
 
 
 async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, PlayerInfo | None]:
