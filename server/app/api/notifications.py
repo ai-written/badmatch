@@ -79,6 +79,9 @@ async def mark_all_read(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 刻意**不写审计**（下面 mark_read 同理）：这是每个用户点开消息列表就会发生的
+    # 高频低价值操作，写进去只会把操作日志刷满，和 ws-ticket 不写审计是同一个理由。
+    # 管理面板「操作日志」的覆盖范围以 README 表格为准。
     await db.execute(
         update(Notification)
         .where(Notification.user_id == user.id, Notification.is_read == False)

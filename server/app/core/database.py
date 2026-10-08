@@ -15,6 +15,12 @@ engine = create_async_engine(
     echo=settings.DEBUG,
     pool_pre_ping=True,
 )
+# expire_on_commit=False 是**业务依赖**，不要顺手改成 True：
+# 1) 全仓的成功路径都是「先 db.commit() 再写审计 / 再广播」，提交后还会读对象属性
+#    （如 _broadcast_match 读 m.score_a、_tournament_detail 读 t.*、audit() 读 user.id）；
+#    一旦过期，这些读取会触发同步懒加载，在异步上下文里直接 MissingGreenlet（成片 500）。
+# 2) 该设置由 server/tests/test_audit_order.py 里的 test_session_factory_does_not_expire_on_commit 守着。
+# 如果你确实要改成 True：必须把上述所有"提交后读 ORM"改成提交前取纯数据。
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

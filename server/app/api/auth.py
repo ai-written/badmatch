@@ -183,6 +183,9 @@ async def login(
     # （注册任意一个账号即可），若成功一次就清零，攻击者用自有账号登录一次
     # 就能把 IP 计数刷回 0，按 IP 的兜底限流形同虚设。
     # 同出口（办公网 NAT）被他人失败尝试牵连的代价，由窗口时间（10 分钟）自然消化。
+    # 登录本身不写业务数据，这里提交只是收尾只读事务：保持与其它接口一致的
+    # 「先提交、再写审计」顺序，将来若在登录里加了写入也不会退化成假日志
+    await db.commit()
     await audit(
         user=user, action="login_success",
         detail={"username": user.username},
@@ -218,13 +221,14 @@ async def _deliver_reset_mail(user_id: int, to_email: str, username: str, url: s
     try:
         async with async_session_factory() as session:
             u = (await session.execute(select(_User).where(_User.id == user_id))).scalar_one_or_none()
+            # 先收尾这个只读事务，再写审计（审计用自己的会话，顺序统一成"先提交再审计"）
+            await session.commit()
             if u is not None:
                 await audit(
                     user=u, action="password_reset_request",
                     target_type="user", target_id=u.id,
                     detail={"sent": sent},
                 )
-            await session.commit()
     except Exception:
         # 审计失败不能影响已经发出的邮件
         logger.exception("写 password_reset_request 审计失败: user_id=%s", user_id)
@@ -323,6 +327,9 @@ async def reset_password(
     from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
     revoke_user(user.id)
+    # 先提交再写审计（同 update_profile/register）：审计用独立会话立即提交，
+    # 写在提交前的话，业务事务一旦回滚就会留下一条"密码已重置"的假日志。
+    await db.commit()
     await audit(
         user=user, action="password_reset",
         target_type="user", target_id=user.id,
@@ -372,6 +379,8 @@ async def logout(
     await manager.kick_user(user.id)
     # 一并作废未使用的连接票据，否则登出后 60 秒内仍可用旧票据建连
     revoke_user(user.id)
+    # 先提交再写审计（同上）：token_version 的改动要真的落库，才谈得上"已登出"
+    await db.commit()
     await audit(
         user=user, action="logout",
         detail={"username": user.username},
@@ -487,6 +496,8 @@ async def change_password(
     from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
     revoke_user(user.id)
+    # 先提交再写审计（同上）：改密的落库与"已改密"的审计不能脱节
+    await db.commit()
     await audit(user=user, action="change_password", detail={"username": user.username})
     return {"ok": True}
 
@@ -889,6 +900,8 @@ async def set_role(
     old_role = target_user.role
     target_user.role = body.role
     await db.flush()
+    # 先提交再写审计（同上）
+    await db.commit()
     await audit(
         user=admin, action="admin_set_role",
         target_type="user", target_id=target_user.id,
@@ -954,6 +967,8 @@ async def delete_user(
     )
     await db.execute(update(User).where(User.invited_by == user.id).values(invited_by=None))
     _remove_avatar_file(user.avatar)
+    # 提交前留快照：审计要用，而提交之后这个对象已经是"已删除"状态
+    deleted_id, deleted_username = user.id, user.username
     await db.delete(user)
     await db.flush()
     # 断开该用户已建立的 WebSocket 并作废其未用票据。
@@ -961,12 +976,14 @@ async def delete_user(
     # 仍会继续收到推送，直到连接自然断开。
     from app.core.websocket import manager
     from app.core.ws_ticket import revoke_user
-    await manager.kick_user(user.id)
-    revoke_user(user.id)
+    await manager.kick_user(deleted_id)
+    revoke_user(deleted_id)
+    # 先提交再写审计（同上）
+    await db.commit()
     await audit(
         user=admin, action="admin_delete_user",
-        target_type="user", target_id=user.id,
-        detail={"username": user.username},
+        target_type="user", target_id=deleted_id,
+        detail={"username": deleted_username},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True}
@@ -1002,6 +1019,8 @@ async def admin_reset_password(
     from app.core.ws_ticket import revoke_user
     await manager.kick_user(user.id)
     revoke_user(user.id)
+    # 先提交再写审计（同上）
+    await db.commit()
     await audit(
         user=admin, action="admin_reset_password",
         target_type="user", target_id=user.id,
