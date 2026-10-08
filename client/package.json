@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
+    "test:unit": "node --test \"tests/unit/*.test.mjs\"",
     "test:e2e": "node tests/e2e/run.mjs"
   },
   "dependencies": {

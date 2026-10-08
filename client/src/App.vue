@@ -1,6 +1,10 @@
 <template>
   <div class="app-root">
-    <router-view />
+    <!-- 用 path 作 key：同一个组件被不同参数复用时（例如将来出现"从对阵表直接跳到另一个
+         赛事的对阵表"），必须重建组件实例。否则页内那些"按组件实例一次性求值"的状态
+         （赛事 id、筛选条件 key、WebSocket 频道、已加载的赛程）会串到新赛事上。
+         按 path 而不是 fullPath：只改 query（如记分页的 ?num=）不该重建。 -->
+    <router-view :key="route.path" />
   </div>
   <van-tabbar v-if="showTabbar" route active-color="#1989fa" inactive-color="#999" safe-area-inset-bottom>
     <van-tabbar-item icon="orders-o" to="/">赛事</van-tabbar-item>

@@ -22,7 +22,7 @@
     </div>
 
     <template v-else>
-      <!-- 按人筛选：只看某人 / 排除一个或多个人（可叠加）。条件会记住（见下方 FILTER_KEY） -->
+      <!-- 按人筛选：只看某些人（可多选）/ 排除一个或多个人（可多选，可叠加）。条件会记住（见下方 FILTER_KEY） -->
       <div class="filter-bar">
         <div class="filter-chip" :class="{ on: filterActive }" @click="openFilter">
           <van-icon name="filter-o" size="14" />
@@ -30,7 +30,7 @@
           <van-icon name="arrow-down" size="10" />
         </div>
         <span v-if="myPlayerId != null" class="filter-mini"
-              :class="{ on: activeFilter.onlyPlayerId === myPlayerId }" @click="toggleOnlyMe">只看我</span>
+              :class="{ on: onlyMeActive }" @click="toggleOnlyMe">只看我</span>
         <span v-if="filterActive" class="filter-mini clear" @click="clearFilter">清除</span>
       </div>
 
@@ -136,21 +136,22 @@
         <van-icon name="cross" size="18" @click="showFilter = false" />
       </div>
       <div class="vh-sheet-body filter-panel-body">
-        <div class="filter-label">只看某人的比赛</div>
+        <div class="filter-label">只看某人的比赛（可多选）</div>
         <div class="pick-row">
-          <span class="pick" :class="{ on: draftOnly == null }" @click="setDraftOnly(null)">全部</span>
+          <span class="pick" :class="{ on: draftOnlyIds.length === 0 }" @click="clearDraftOnly()">全部</span>
           <span v-for="p in playerOptions" :key="p.id" class="pick"
-                :class="{ on: draftOnly === p.id }" @click="setDraftOnly(p.id)">{{ p.username }}</span>
+                :class="{ on: draftOnlyIds.includes(p.id) }" @click="toggleDraftOnly(p.id)">{{ p.username }}</span>
         </div>
 
         <div class="filter-label">排除（可多选）</div>
         <div class="pick-row">
           <span v-for="p in playerOptions" :key="p.id" class="pick"
-                :class="{ on: draftExclude.includes(p.id), muted: draftOnly === p.id }"
+                :class="{ on: draftExclude.includes(p.id), muted: draftOnlyIds.includes(p.id) }"
                 @click="toggleDraftExclude(p.id)">{{ p.username }}</span>
         </div>
         <div class="filter-hint">
-          两者可叠加：例如「只看张三」并「排除李四」= 张三参加、且李四不参加的比赛。
+          只看可多选：选中多个人 = 他们中任意一位参加的比赛（并集）。两者可叠加：
+          例如「只看张三、李四」并「排除王五」= 张三或李四参加、且王五不参加的比赛。
         </div>
       </div>
       <div class="filter-actions">
@@ -172,6 +173,7 @@ import { useGoBack } from '@/composables/useGoBack'
 import {
   withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
   normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
+  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter,
   emptyFilter, type ScheduleFilter,
 } from '@/utils/schedule'
 import { showToast, showConfirmDialog } from 'vant'
@@ -184,6 +186,9 @@ const refreshing = ref(false)
 const rounds = ref<any[]>([])
 // 加载失败（赛事不存在/网络异常）与「暂无赛程」必须区分开
 const loadFailed = ref(false)
+// 已成功加载过赛程的**赛事 id**（不是布尔）：护栏按赛事记，这样将来即使同组件被
+// 复用到另一个赛事（路由未重建组件），也不会拿"新赛事的名单"去剪"旧赛事的条件"
+const roundsLoadedFor = ref<number | null>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 
 function isMyMatch(m: any) {
@@ -202,6 +207,8 @@ async function fetchRounds(skipLoading = false) {
     const res = await api.get(`/tournaments/${route.params.id}/rounds`, { skipLoading } as any)
     rounds.value = res.data
     loadFailed.value = false
+    // 记下"这个赛事的赛程已成功加载过"，剪枝护栏用（见 roundsLoadedFor 的说明）
+    roundsLoadedFor.value = tid
   } catch (e) {
     // 赛事不存在（后端现在返回 404）或网络异常：
     // 不能让它显示成「暂无赛程」——那是「赛事还没有比赛」的意思，两回事
@@ -248,7 +255,12 @@ const { lastMessage } = useWebSocket(tid)
 // 卡片上的「裁 X」与「裁判」按钮状态，不接的话别人认领完你这边还是旧样子。
 watch(lastMessage, (msg) => {
   const t = msg?.type
-  if (t === 'match_updated' || t === 'referee_claimed' || t === 'referee_released') {
+  // registration_updated：有人退赛会**重排赛程**（未开打的轮次被删、重新生成），
+  //   不重拉的话列表与筛选条件都停在旧快照上（「已不在赛程里的人」也剪不掉）；
+  // tournament_finished：比赛全部打完自动结束时后端只发这一个事件，
+  //   少了它就看不到「赛事已结束」的只读横幅。
+  if (t === 'match_updated' || t === 'referee_claimed' || t === 'referee_released'
+      || t === 'registration_updated' || t === 'tournament_finished') {
     fetchRounds(true).catch(() => {})
   }
 })
@@ -274,16 +286,35 @@ const tournamentEnded = computed(() =>
   rounds.value.some((r: any) => (r.matches || []).some((m: any) => m.tournament_status === 'finished'))
 )
 
-// --- 按人筛选：只看某人 / 排除一个或多个人 ---
+// --- 按人筛选：只看某些人（可多选）/ 排除一个或多个人（可多选） ---
 // 条件按赛事记住（同一台手机上回到这个赛事时还在），因此状态串存在 localStorage 里。
+// 升级前的单选格式由 normalizeFilter 兼容读取（见 utils/schedule.ts）。
 const FILTER_KEY = `schedule-filter:${route.params.id}`
 function loadFilter(): ScheduleFilter {
+  let parsed: unknown = null
   try {
-    return normalizeFilter(JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'))
+    const raw = localStorage.getItem(FILTER_KEY)
+    if (!raw) return emptyFilter()
+    parsed = JSON.parse(raw)
   } catch {
-    // 不能返回共享常量：它带着同一个 excludePlayerIds 数组，一旦哪里就地改了就会互相污染
+    // 只有「读/解析失败」才当作坏键清掉：被外部写坏或更早版本的残留，
+    // 不清掉的话每次打开都要再失败一次。
+    // 注意 emptyFilter() 不能换成共享常量：那样 excludePlayerIds 数组会被各方共用。
+    try { localStorage.removeItem(FILTER_KEY) } catch { /* 隐私模式下删不掉，只影响「记住筛选」 */ }
     return emptyFilter()
   }
+  const f = normalizeFilter(parsed)
+  // 旧格式迁移的回写**单独 try**：写不进去（Safari 无痕、配额满）只影响「记住筛选」，
+  // 绝不能把刚刚已经读出来的合法条件一起丢掉 —— 那会让用户的条件静默消失。
+  // 这里只做规范化、**不按赛程剪枝**：此刻 rounds 还没加载、playerOptions 是空的，
+  // 剪枝会把用户存的条件整个清空（剪枝交给 playerOptions 的 watch）。
+  try {
+    if (JSON.stringify(f) !== JSON.stringify(parsed)) {
+      if (isFilterActive(f)) localStorage.setItem(FILTER_KEY, JSON.stringify(f))
+      else localStorage.removeItem(FILTER_KEY)
+    }
+  } catch { /* 写不进去不影响本次读取到的条件 */ }
+  return f
 }
 const activeFilter = ref<ScheduleFilter>(loadFilter())
 const filterActive = computed(() => isFilterActive(activeFilter.value))
@@ -294,38 +325,97 @@ const myPlayerId = computed(() => {
   const uid = auth.user?.id
   return uid != null && playerOptions.value.some((p) => p.id === uid) ? uid : null
 })
+// 「只看我」是否正处于生效状态（判定逻辑在 utils/schedule.ts，有单测）：
+// 条件正好是「只看我一个人」才算生效 —— 不能只看「我在不在选中集合里」。
+const onlyMeActive = computed(() => isOnlyMeFilter(activeFilter.value, myPlayerId.value))
+// 赛中退赛会重排赛程（见 server 的 withdraw），被选中的那个人从此不再出现在任何一场比赛里：
+// 他既不可能被筛出来，面板里也没有可点的 chip，条件会永远卡在集合里（摘要显示成 `#123`）。
+// 因此赛程加载出来后就把这类 id 剪掉。两道护栏：
+//   1. 只在这个赛事的赛程**成功加载过**之后才剪 —— 拉取失败时 rounds 也是空的，
+//      这时剪会把用户存的条件当成"人已不在赛程"而清空；
+//   2. 赛程里一个人都没有时不剪 —— 没有可比对的名单，而且此时筛选栏根本不渲染，
+//      条件留着无害、等赛程回来还能自动生效（宁可暂时残留，也不要静默删掉用户的条件）。
+// 剪枝规则本身在 utils/schedule.ts（有单测），这里只负责"什么时候剪"。
+function pruneMissingIds(f: ScheduleFilter): ScheduleFilter {
+  if (roundsLoadedFor.value !== tid || playerOptions.value.length === 0) return f
+  return pruneFilter(f, playerOptions.value.map((p) => p.id))
+}
+// playerOptions 每次赛程刷新都会重新计算（含 WebSocket 广播触发的静默刷新），
+// 因此这一个 watch 同时覆盖「刚进页面加载完」和「比赛进行中有人退赛」两种情况。
+watch(playerOptions, () => {
+  const next = pruneMissingIds(activeFilter.value)
+  if (next === activeFilter.value) return   // 没变化（含"没加载好/零场次"）就什么都不做
+  activeFilter.value = next
+  persistFilter()
+  // 剪枝是破坏性的（会覆盖 localStorage），不能静默：告诉用户条件被收窄了
+  const kept = activeFilter.value.onlyPlayerIds.length + activeFilter.value.excludePlayerIds.length
+  showToast(kept > 0
+    ? `已移除不在赛程中的筛选条件（还剩 ${kept} 人）`
+    : '筛选条件里的人已不在赛程，已自动清除')
+  // 面板正开着时，草稿也要跟着剪：否则草稿里留着一个面板上没有 chip 的 id，
+  // 会让「全部」chip 也不高亮，看起来"什么都没选"（点确定虽然会自愈，但视觉上自相矛盾）
+  const ids = new Set(playerOptions.value.map((p) => p.id))
+  draftOnlyIds.value = draftOnlyIds.value.filter((id) => ids.has(id))
+  draftExclude.value = draftExclude.value.filter((id) => ids.has(id))
+})
 function nameOf(id: number) {
   return playerOptions.value.find((p) => p.id === id)?.username || `#${id}`
+}
+/** 按面板（赛程里首次出场）的顺序排列 id。
+ *  条件里存的是点选顺序，直接用会让摘要里的名字忽前忽后、与面板里的排列对不上；
+ *  这只影响筛选栏那行文字，不涉及比赛列表的顺序（那份由赛程决定，见 filterRounds）。 */
+function sortByPanelOrder(ids: number[]): number[] {
+  const order = new Map(playerOptions.value.map((p, i) => [p.id, i]))
+  return [...ids].sort((a, b) =>
+    (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER))
 }
 const filterSummary = computed(() => {
   const f = activeFilter.value
   if (!filterActive.value) return '全部比赛'
-  if (f.onlyPlayerId == null) return `已排除 ${f.excludePlayerIds.length} 人`
-  if (f.excludePlayerIds.length === 0) return `只看 ${nameOf(f.onlyPlayerId)}`
-  return `只看 ${nameOf(f.onlyPlayerId)} · 排除 ${f.excludePlayerIds.length} 人`
+  const only = sortByPanelOrder(f.onlyPlayerIds)
+  if (only.length === 0) return `已排除 ${f.excludePlayerIds.length} 人`
+  // 2 人以内全列；3 人以上只列第一个 + 总数：筛选栏固定一行，长名单会被省略号截断，
+  // 截断之后连「一共选了几个人」都看不出来（见 .filter-text 的 ellipsis）
+  const onlyText = only.length <= 2
+    ? only.map(nameOf).join('、')
+    : `${nameOf(only[0])} 等 ${only.length} 人`
+  if (f.excludePlayerIds.length === 0) return `只看 ${onlyText}`
+  return `只看 ${onlyText} · 排除 ${f.excludePlayerIds.length} 人`
 })
 
 const showFilter = ref(false)
-const draftOnly = ref<number | null>(activeFilter.value.onlyPlayerId)
+const draftOnlyIds = ref<number[]>([...activeFilter.value.onlyPlayerIds])
 const draftExclude = ref<number[]>([...activeFilter.value.excludePlayerIds])
 function openFilter() {
-  draftOnly.value = activeFilter.value.onlyPlayerId
+  draftOnlyIds.value = [...activeFilter.value.onlyPlayerIds]
   draftExclude.value = [...activeFilter.value.excludePlayerIds]
   showFilter.value = true
 }
-function setDraftOnly(id: number | null) {
-  draftOnly.value = id
-  // 「只看」的人又被排除是自相矛盾（结果必为空），选他时自动从排除里去掉
-  if (id != null) draftExclude.value = draftExclude.value.filter((x) => x !== id)
+// 「只看」多选：点一下选中/取消。选中时自动从排除里去掉 —— 同一人既「只看」又「排除」
+// 结果必然为空（自相矛盾），面板里不该让用户凑出这种条件
+function toggleDraftOnly(id: number) {
+  const selected = draftOnlyIds.value.includes(id)
+  draftOnlyIds.value = selected
+    ? draftOnlyIds.value.filter((x) => x !== id)
+    : [...draftOnlyIds.value, id]
+  if (!selected) draftExclude.value = draftExclude.value.filter((x) => x !== id)
+}
+function clearDraftOnly() {
+  draftOnlyIds.value = []
 }
 function toggleDraftExclude(id: number) {
-  if (draftOnly.value === id) return
+  // 已在「只看」里的人不能被排除（两者叠加的结果必然为空）：
+  // 光把 chip 置灰、点了没反应会让人以为界面卡了，这里明确说一句。
+  if (draftOnlyIds.value.includes(id)) {
+    showToast(`「${nameOf(id)}」已在「只看」里，不能再排除`)
+    return
+  }
   draftExclude.value = draftExclude.value.includes(id)
     ? draftExclude.value.filter((x) => x !== id)
     : [...draftExclude.value, id]
 }
 function resetDraft() {
-  draftOnly.value = null
+  draftOnlyIds.value = []
   draftExclude.value = []
 }
 function persistFilter() {
@@ -341,7 +431,11 @@ function persistFilter() {
   }
 }
 function applyFilter() {
-  activeFilter.value = normalizeFilter({ onlyPlayerId: draftOnly.value, excludePlayerIds: draftExclude.value })
+  // 再过一次剪枝：面板打开期间可能正好有人退赛（草稿里还留着他的 chip），
+  // 不剪的话刚点「确定」就会把一个已不在赛程里的 id 写回条件
+  activeFilter.value = pruneMissingIds(
+    normalizeFilter({ onlyPlayerIds: draftOnlyIds.value, excludePlayerIds: draftExclude.value }),
+  )
   persistFilter()
   showFilter.value = false
 }
@@ -353,9 +447,12 @@ function clearFilter() {
 function toggleOnlyMe() {
   const uid = myPlayerId.value
   if (uid == null) return
-  activeFilter.value = activeFilter.value.onlyPlayerId === uid
-    ? { onlyPlayerId: null, excludePlayerIds: [...activeFilter.value.excludePlayerIds] }
-    : normalizeFilter({ onlyPlayerId: uid, excludePlayerIds: activeFilter.value.excludePlayerIds })
+  // 「只看我」是**一键收敛**，不是往多选集合里加自己：不管当前选了多少人、排除了谁，
+  // 点它都变成「只看我一个人」。排除必须一起清掉 —— 否则被别人挡住的、我自己参加的比赛
+  // 仍然看不到，与按钮的字面意思不符。
+  // 已经正好是「只看我一个人」时再点一下 = 取消筛选，回到全部比赛（保留开关键手感）。
+  // 状态迁移是纯函数（utils/schedule.ts 的 nextOnlyMeFilter），有单测。
+  activeFilter.value = nextOnlyMeFilter(activeFilter.value, uid)
   persistFilter()
 }
 

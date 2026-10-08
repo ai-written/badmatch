@@ -128,17 +128,32 @@ class Page {
     const entry = { method: params.request.method, path: url.pathname, body: params.request.postData }
     this.requests.push(entry)
     const body = this.mock ? this.mock(url.pathname, entry) : {}
+    // mock 可以返回 { __status: 4xx/5xx } 表示"这个接口失败"（例如验证赛程拉取失败时
+    // 不会把用户存的筛选条件清掉）
+    const status = (body && typeof body === 'object' && body.__status) || 200
     this.send('Fetch.fulfillRequest', {
       requestId: params.requestId,
-      responseCode: 200,
+      responseCode: status,
       responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-      body: Buffer.from(JSON.stringify(body ?? {})).toString('base64'),
+      body: Buffer.from(JSON.stringify(status === 200 ? (body ?? {}) : { detail: 'mock error' })).toString('base64'),
     })
   }
   async enableMock(mock) {
     this.mock = mock
     this.requests = []
     await this.send('Fetch.enable', { patterns: [{ urlPattern: `${APP}/api/*`, requestStage: 'Request' }] })
+  }
+  /** 在**每个新文档**里注入脚本。
+   *
+   *  Page.navigate 会换一个 JS realm：在当前文档里改 `Storage.prototype` 对"下一次加载"
+   *  是无效的（只有注入到新文档才生效）。踩过一次，差点写出一条永远通过的假断言。
+   *  返回 identifier，用完记得 removeInitScript。 */
+  async addInitScript(source) {
+    const r = await this.send('Page.addScriptToEvaluateOnNewDocument', { source })
+    return r.result?.identifier
+  }
+  async removeInitScript(identifier) {
+    await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier })
   }
   async goto(path, waitMs = 2600) {
     await this.send('Page.navigate', { url: `${APP}${path}` })
@@ -420,9 +435,9 @@ async function scenarioInviteLabel(page) {
   assert('右侧邀请码仍完整可见', info?.邀请码仍完整, info?.邀请码)
 }
 
-/** 场景 5：对阵表按人筛选（只看某人 / 排除一个或多个） */
+/** 场景 5：对阵表按人筛选（只看某些人，可多选 / 排除一个或多个） */
 async function scenarioScheduleFilter(page) {
-  console.log('5) 对阵表：只看某人 / 排除多人')
+  console.log('5) 对阵表：只看某些人（多选）/ 排除多人')
   // 第1场 p1 p2 | p3 p4 ；第2场 p5 p6 | p7 p8 ；第3场（第2轮）p1 p3 | p5 p7
   const rounds = [
     {
@@ -507,6 +522,24 @@ async function scenarioScheduleFilter(page) {
   await confirm()
   assert('「只看」的人无法被同时排除（自相矛盾的条件被挡住）', (await count()) === 2, `实际 ${await count()}`)
 
+  // 多选「只看」：先取消已选的 p5，再选 p2 + p6（p2 只在第1场、p6 只在第2场）
+  // 语义是并集：选中的人里任意一位参加就显示，所以第3场（p1/p3/p5/p7）不该出现
+  await openPanel()
+  assert('再点一次已选的人可以取消选中', (await pickIn(0, 'p5')) === 'OK')
+  await pickIn(0, 'p2')
+  await pickIn(0, 'p6')
+  assert('点确定能生效（多选只看）', (await confirm()) === 'OK')
+  assert('多选「只看」取并集', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场']), JSON.stringify(await shown()))
+  assert('摘要列出两个人', (await summary()) === '只看 p2、p6', await summary())
+
+  // 多选状态下，「只看」里的人同样不能被排除（点它无效，结果不变，但要有明确提示）
+  await openPanel()
+  assert('多选时「只看」的人仍被挡在排除之外', (await pickIn(1, 'p2')) === 'OK')
+  assert('被挡住时给出提示（而不是点了没反应）',
+    (await page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)) === '「p2」已在「只看」里，不能再排除')
+  await confirm()
+  assert('排除未生效：结果仍是那 2 场', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场']), JSON.stringify(await shown()))
+
   // 叠加：只看 p1 + 排除 p2 —— 第1场有 p2 被排掉，第3场同时满足
   await openPanel()
   await clickTextSafe('重置')
@@ -515,6 +548,21 @@ async function scenarioScheduleFilter(page) {
   assert('点确定能生效（叠加条件）', (await confirm()) === 'OK')
   assert('只看 + 排除叠加生效', JSON.stringify(await shown()) === JSON.stringify(['第3场']), JSON.stringify(await shown()))
 
+  // 反方向：把已被排除的人再选进「只看」→ 自动从排除里摘掉（否则条件自相矛盾、结果必空）
+  // 当前状态：只看 p1、排除 p2；这里在「只看」行点 p2
+  await openPanel()
+  await pickIn(0, 'p2')
+  await confirm()
+  assert('选进「只看」的人会自动从排除里摘掉', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']), JSON.stringify(await shown()))
+  assert('摘掉后摘要不再显示排除', (await summary()) === '只看 p1、p2', await summary())
+
+  // 多选「只看」+ 排除的摘要叠加格式（两处条件同时存在时才走这个分支）
+  await openPanel()
+  await pickIn(1, 'p6')
+  await confirm()
+  assert('多选只看 + 排除：摘要同时体现两者', (await summary()) === '只看 p1、p2 · 排除 1 人', await summary())
+  assert('多选只看 + 排除：两者取交集', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']), JSON.stringify(await shown()))
+
   // 快速「只看我」（当前登录用户 p1）
   assert('清除筛选', (await clear()) === 'OK')
   assert('清除后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
@@ -522,6 +570,44 @@ async function scenarioScheduleFilter(page) {
   await sleep(700)
   assert('「只看我」一键筛选', onlyMe === 'OK' && JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']),
     `${onlyMe} ${JSON.stringify(await shown())}`)
+
+  // 「只看我」= 一键收敛成「只看我一个人」（不是往多选集合里加自己）
+  const onlyMeOn = () => page.ev(`document.querySelectorAll('.filter-mini.on').length`)
+  assert('「只看我」生效时高亮', (await onlyMeOn()) === 1, `实际 ${await onlyMeOn()}`)
+  await openPanel()
+  await pickIn(0, 'p2')   // 再选一个人
+  await pickIn(1, 'p6')   // 同时排除一个人
+  await confirm()
+  assert('多选别人 + 排除后，「只看我」不再是生效状态', (await onlyMeOn()) === 0, `实际 ${await onlyMeOn()}`)
+  const onlyMe2 = await clickEl('.filter-mini')
+  await sleep(700)
+  assert('再点「只看我」＝收敛成只看我一个人（其他条件一起清掉）',
+    onlyMe2 === 'OK' && JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']),
+    `${onlyMe2} ${JSON.stringify(await shown())}`)
+  assert('收敛后摘要只剩我一个人', (await summary()) === '只看 p1', await summary())
+  assert('收敛后「只看我」重新高亮', (await onlyMeOn()) === 1, `实际 ${await onlyMeOn()}`)
+  const onlyMe3 = await clickEl('.filter-mini')
+  await sleep(700)
+  assert('再点一下「只看我」＝取消筛选回到全部比赛',
+    onlyMe3 === 'OK' && (await count()) === 3, `${onlyMe3} 实际 ${await count()}`)
+
+  // 三人以上：摘要只列第一个 + 总数（筛选栏固定一行，截断后仍要能看出选了几个人）
+  await openPanel()
+  await pickIn(0, 'p2')
+  await pickIn(0, 'p3')
+  await pickIn(0, 'p6')
+  await confirm()
+  assert('只选 3 人时摘要显示「等 N 人」', (await summary()) === '只看 p2 等 3 人', await summary())
+  assert('3 人并集：三个人参加过的比赛都在', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场', '第3场']), JSON.stringify(await shown()))
+
+  // 摘要里的名字按**面板顺序**（赛程出场序）排，而不是点选顺序：上面按 p2→p3→p6 点的，这里倒过来点
+  await openPanel()
+  await clickTextSafe('重置')
+  await pickIn(0, 'p6')
+  await pickIn(0, 'p2')
+  await confirm()
+  assert('摘要按面板顺序排列（与点选顺序无关）', (await summary()) === '只看 p2、p6', await summary())
+  assert('倒序点选不影响结果', JSON.stringify(await shown()) === JSON.stringify(['第1场', '第2场']), JSON.stringify(await shown()))
 
   // 重置后只做多选排除：p5 与 p6 都在第2场，第3场含 p5
   await openPanel()
@@ -549,9 +635,71 @@ async function scenarioScheduleFilter(page) {
   assert('刷新后筛选条件仍生效', JSON.stringify(await shown()) === JSON.stringify(['第2场']), JSON.stringify(await shown()))
   assert('刷新后摘要也还在', (await summary()) === '只看 p6', await summary())
 
+  // 兼容升级前存的单选格式（onlyPlayerId: number）：老用户手机里那份条件不该失效
+  await page.ev(`localStorage.setItem('schedule-filter:2', JSON.stringify({ onlyPlayerId: 2, excludePlayerIds: [] })); true`)
+  await page.goto('/tournament/2/schedule', 2000)
+  assert('旧版单选条件仍生效（读取时迁移）', JSON.stringify(await shown()) === JSON.stringify(['第1场']), JSON.stringify(await shown()))
+  assert('旧版条件摘要按新格式显示', (await summary()) === '只看 p2', await summary())
+
+  // 旧版「只排除」条件（没有只看的人）同样要能迁移
+  await page.ev(`localStorage.setItem('schedule-filter:2', JSON.stringify({ onlyPlayerId: null, excludePlayerIds: [5] })); true`)
+  await page.goto('/tournament/2/schedule', 2000)
+  assert('旧版「只排除」条件仍生效', JSON.stringify(await shown()) === JSON.stringify(['第1场']), JSON.stringify(await shown()))
+  assert('旧版「只排除」摘要正确', (await summary()) === '已排除 1 人', await summary())
+
   // 收尾清干净：条件会持久化，不能留给后面的场景（布局基线里也挂了对阵表）
   await clear()
   assert('收尾清除后恢复全部比赛', (await count()) === 3, `实际 ${await count()}`)
+
+  // 赛程里已经没有这个人（赛中退赛会重排赛程）：这类残留 id 必须在赛程加载后被剪掉，
+  // 否则条件永远卡着 —— 摘要显示 `只看 #99`、面板里也没有 chip 可以取消
+  await page.ev(`localStorage.setItem('schedule-filter:2', JSON.stringify({ onlyPlayerIds: [99], excludePlayerIds: [] })); true`)
+  await page.goto('/tournament/2/schedule', 2200)
+  assert('已不在赛程里的选中者被剪掉（回到全部比赛）', (await count()) === 3, `实际 ${await count()}`)
+  assert('剪枝后摘要回到「全部比赛」', (await summary()) === '全部比赛', await summary())
+  assert('剪枝后不残留持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
+
+  // 存着一段解析不了的字符串（被外部写坏）：当作没有条件，并把坏键清掉，
+  // 否则每次打开都要再失败一次，而且坏键会一直躺在存储里
+  await page.ev(`localStorage.setItem('schedule-filter:2', '{oops'); true`)
+  await page.goto('/tournament/2/schedule', 2000)
+  assert('损坏的筛选条件被忽略（回到全部比赛）', (await count()) === 3, `实际 ${await count()}`)
+  assert('损坏的筛选键被顺手清掉', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
+
+  // 存储不可写（Safari 无痕/配额满/被策略禁用）：旧格式的回写失败**不能**把已经读到的
+  // 条件一起丢掉（此前 setItem 抛错会走到同一个 catch，直接返回空条件并顺手删掉存储）。
+  // 覆盖必须注入到**新文档**才生效（见 addInitScript 的说明）。
+  await page.ev(`localStorage.setItem('schedule-filter:2', JSON.stringify({ onlyPlayerId: 2, excludePlayerIds: [] })); true`)
+  const initId = await page.addInitScript(`Storage.prototype.setItem = function () { throw new Error('quota exceeded') }`)
+  await page.goto('/tournament/2/schedule', 2000)
+  // 元断言：先证明"注入真的生效、setItem 确实抛错"，否则这条用例会退化成永远通过的假断言
+  assert('注入生效：该文档里 localStorage.setItem 确实不可写',
+    (await page.ev(`(() => { try { localStorage.setItem('__probe', '1'); return false } catch (e) { return true } })()`)) === true)
+  assert('存储不可写时，已存的条件仍能读到（回写失败不牵连读取）',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场']), JSON.stringify(await shown()))
+  await page.removeInitScript(initId)
+  // 上面那个覆盖只对被注入的那个文档有效；换一个干净文档才能拿回原生 setItem，
+  // 否则后续用例的 localStorage.setItem 会继续抛错
+  await page.goto('/', 900)
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
+
+  // 赛程**拉取失败**时绝不能剪枝：否则一次网络抖动就会把用户存的条件当成"人已不在赛程"
+  // 而清掉（roundsLoaded 护栏的意义）。这里让 /rounds 返回 500 再进页面。
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/\/rounds$/.test(path)) return { __status: 500 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.ev(`localStorage.setItem('schedule-filter:2', JSON.stringify({ onlyPlayerIds: [5], excludePlayerIds: [] })); true`)
+  await page.goto('/tournament/2/schedule', 2200)
+  const storedAfterFail = await page.ev(`localStorage.getItem('schedule-filter:2')`)
+  assert('赛程拉取失败时不清掉用户存的筛选条件',
+    typeof storedAfterFail === 'string' && storedAfterFail.includes('"onlyPlayerIds":[5]'), String(storedAfterFail))
+  assert('拉取失败显示的是失败态（不是「暂无赛程」）',
+    (await page.ev(`!!document.querySelector('.load-failed')`)) === true)
+  await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
 }
 
 /** 场景 6：筛选对「已完成比赛」和「已结束赛事」同样生效 */
