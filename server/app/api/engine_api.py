@@ -51,10 +51,33 @@ async def start_tournament(
     if tournament.status != TournamentStatus.OPEN:
         raise HTTPException(status_code=400, detail="赛事不是报名中状态")
 
-    regs = await db.execute(
-        select(Registration).where(
+    # 被禁用的报名者不进赛程，并且顺带把他们的报名置为取消（保留行、记取消时间），
+    # 否则会出现「名单里显示 8 人、赛程里只有 7 人」，而开赛后又没有 PlayerStats
+    # 可供「退赛」清理 —— 那条报名会永久卡在名单里。
+    # 取消记录在「取消/退赛记录」里能查到，开赛审计里也记了条数。
+    disabled_regs = await db.execute(
+        select(Registration)
+        .join(User, User.id == Registration.user_id)
+        .where(
             Registration.tournament_id == tournament_id,
             Registration.is_active == True,
+            User.is_active == False,
+        )
+    )
+    disabled_cancelled = 0
+    for r in disabled_regs.scalars().all():
+        r.is_active = False
+        r.cancelled_at = func.now()
+        disabled_cancelled += 1
+
+    regs = await db.execute(
+        select(Registration)
+        .join(User, User.id == Registration.user_id)
+        .where(
+            Registration.tournament_id == tournament_id,
+            Registration.is_active == True,
+            # 被禁用的账号登录不进来，排进赛程就是给全场安排一场打不了的比赛
+            User.is_active == True,
         )
         # 固定顺序：player_ids 会直接喂给排程算法，顺序不同排出来的对阵也不同。
         # 不写 ORDER BY 时顺序由执行计划决定，等于每次开赛的输入都不一样。
@@ -156,7 +179,9 @@ async def start_tournament(
     await audit(
         user=user, action="tournament_start",
         target_type="tournament", target_id=tournament.id,
-        detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data)},
+        detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data),
+                # 被禁用而自动取消的报名数：事后能解释"报名 8 人怎么只排了 7 人"
+                "disabled_registrations_cancelled": disabled_cancelled},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
@@ -171,12 +196,18 @@ async def _active_player_ids(db: AsyncSession, tournament_id: int) -> list[int]:
 
     顺序必须固定：这个列表会直接喂给排程算法，顺序不同排出来的对阵也不同
     （与 withdraw 重排用的是同一个口径）。
+
+    「在场」= PlayerStats.is_active 且**账号未被禁用**：禁用不改 PlayerStats
+    （那是"退赛"的语义、也刻意保留数据），但被禁用的人登录不进来，
+    把他排进新比赛等于凭空制造一场没人能打的比赛。
     """
     rows = await db.execute(
         select(PlayerStats.user_id)
+        .join(User, User.id == PlayerStats.user_id)
         .where(
             PlayerStats.tournament_id == tournament_id,
             PlayerStats.is_active == True,
+            User.is_active == True,
         )
         .order_by(PlayerStats.id)
     )
@@ -565,9 +596,14 @@ async def withdraw_player(
 
     remaining = []
     stats = await db.execute(
-        select(PlayerStats).where(
+        select(PlayerStats)
+        .join(User, User.id == PlayerStats.user_id)
+        .where(
             PlayerStats.tournament_id == tournament_id,
             PlayerStats.is_active == True,
+            # 被禁用的账号不进重排：重排本来就是为了"人变了，重新排"，
+            # 把登录不进来的人排进新的未开打轮次，等于制造打不了的比赛
+            User.is_active == True,
         )
         # 与 start_tournament 同一口径：remaining 会直接喂给排程算法，
         # 顺序不同重排出来的对阵也不同。PlayerStats 没有 created_at，

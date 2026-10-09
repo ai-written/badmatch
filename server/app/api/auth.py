@@ -969,7 +969,7 @@ async def set_user_active(
         return {"ok": True, "changed": False, "user_id": user.id, "is_active": user.is_active}
 
     from datetime import datetime
-    from app.models.round import Match
+    from app.models.round import Match, MatchStatus
 
     user.is_active = body.is_active
     if not body.is_active:
@@ -977,10 +977,16 @@ async def set_user_active(
         # 再断开 WebSocket（与登出/改密/删号同一套机制）
         user.token_version += 1
         # 在任的裁判场次标记卸任：referee_id 保留作执裁历史（与选手主动卸任同一形态），
-        # 否则那些场次会一直挂着一个永远不可能来操作的人，看起来像"已经有裁判了"
+        # 否则那些场次会一直挂着一个永远不可能来操作的人，看起来像"已经有裁判了"。
+        # **已结束的比赛不动**：那边的裁判记录是归档，release_referee 本身也拒绝
+        # 卸任已结束的比赛；标成「已卸任」会把历史改错。
         released = await db.execute(
             update(Match)
-            .where(Match.referee_id == user.id, Match.referee_released_at.is_(None))
+            .where(
+                Match.referee_id == user.id,
+                Match.referee_released_at.is_(None),
+                Match.status != MatchStatus.FINISHED,
+            )
             .values(referee_released_at=datetime.now())
         )
         released_count = released.rowcount or 0
