@@ -149,6 +149,9 @@ class RegistrationOut(BaseModel):
     username: str
     avatar: str
     created_at: str
+    # 该账号是否可用（False = 已禁用）。前端「转让房主」等"选人"场景据此刻意排除，
+    # 免得把房主交给一个登录不进来的人
+    user_is_active: bool = True
 
 
 class CancellationOut(BaseModel):

@@ -10,7 +10,7 @@ from app.core.ratelimit import RateLimiter
 from app.core.audit import audit, get_client_ip
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, UserProfile, UserStats,
-    AdminResetPassword, AdminSetRole, SelectableUser, UpdateProfile,
+    AdminResetPassword, AdminSetRole, AdminSetActive, SelectableUser, UpdateProfile,
     ChangePasswordRequest, ForgotPasswordRequest, ResetPasswordRequest,
 )
 from app.models.user import User
@@ -179,6 +179,15 @@ async def login(
         )
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     login_limiter.reset(req.username)
+    # 凭据正确、但账号已被禁用：这时对方已经证明自己知道密码，明说不会变成
+    # "探测某账号是否被禁用"的额外渠道（密码错的人拿到的仍是那句通用提示）
+    if not user.is_active:
+        await audit(
+            user=None, action="login_failed",
+            detail={"username": req.username, "reason": "disabled"},
+            ip=ip, user_agent=request.headers.get("user-agent"),
+        )
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员")
     # 刻意**不**清零该 IP 的失败计数：登录成功者的身份是攻击者可以自己持有的
     # （注册任意一个账号即可），若成功一次就清零，攻击者用自有账号登录一次
     # 就能把 IP 计数刷回 0，按 IP 的兜底限流形同虚设。
@@ -859,12 +868,23 @@ async def list_users(
 
 @router.get("/admin/selectable-users", response_model=list[SelectableUser])
 async def selectable_users(
+    include_disabled: bool = False,
     admin: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """可选用户列表：创建赛事时选「默认参赛人员」用。
+
+    默认**不含已禁用的账号**（他们不该再被选进来）。
+    管理面板（普通 admin 也用这个接口看名单）要带 `include_disabled=true`，
+    否则一旦禁用了自己邀请的人，就再也找不到他、也就无法恢复。
+    """
     if admin.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403)
-    result = await db.execute(select(User).order_by(User.id))
+    # 过滤放在服务端而不是只靠前端：旧页面/直接调接口都会绕过前端校验
+    stmt = select(User).order_by(User.id)
+    if not include_disabled:
+        stmt = stmt.where(User.is_active == True)
+    result = await db.execute(stmt)
     return [
         SelectableUser(
             id=u.id,
@@ -873,6 +893,7 @@ async def selectable_users(
             gender=u.gender,
             role=u.role,
             invited_by=u.invited_by,
+            is_active=u.is_active,
         )
         for u in result.scalars().all()
     ]
@@ -909,6 +930,80 @@ async def set_role(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "user_id": target_user.id, "role": target_user.role}
+
+
+@router.post("/admin/set-active")
+async def set_user_active(
+    body: AdminSetActive,
+    request: Request,
+    admin: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """禁用 / 恢复一个账号（数据全部保留，只挡登录与新的参与行为）。
+
+    与「删除用户」的关系：删除会被「有比赛记录 / 创建过赛事」两条护栏挡住，
+    而真实场景里常常只是想让他别再来了 —— 那就禁用：历史比赛、战绩、审计都在，
+    只是登录不进去、也不再被预选/报名/执裁。权限模型与删除保持一致
+    （超管可操作任意人；普通 admin 只能操作自己邀请来的普通用户），
+    另外超级管理员和「自己」不能被禁用，避免把管理入口锁死。
+    """
+    if admin.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403)
+    u = await db.execute(select(User).where(User.id == body.user_id))
+    user = u.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="不能禁用自己的账号")
+    if user.role == "superadmin":
+        raise HTTPException(status_code=403, detail="不能禁用超级管理员")
+    if admin.role != "superadmin":
+        if user.invited_by != admin.id:
+            raise HTTPException(status_code=403, detail="只能操作通过自己邀请码注册的用户")
+        if user.role != "user":
+            raise HTTPException(status_code=403, detail="只能操作普通用户")
+
+    if user.is_active == body.is_active:
+        # 状态没变就不要动 token_version：否则「重复点一次禁用」会把已恢复的人
+        # 再次踢下线，行为与界面提示不符
+        return {"ok": True, "changed": False, "user_id": user.id, "is_active": user.is_active}
+
+    from datetime import datetime
+    from app.models.round import Match
+
+    user.is_active = body.is_active
+    if not body.is_active:
+        # 禁用即失效：自增版本号让所有已签发的 token 立刻作废，
+        # 再断开 WebSocket（与登出/改密/删号同一套机制）
+        user.token_version += 1
+        # 在任的裁判场次标记卸任：referee_id 保留作执裁历史（与选手主动卸任同一形态），
+        # 否则那些场次会一直挂着一个永远不可能来操作的人，看起来像"已经有裁判了"
+        released = await db.execute(
+            update(Match)
+            .where(Match.referee_id == user.id, Match.referee_released_at.is_(None))
+            .values(referee_released_at=datetime.now())
+        )
+        released_count = released.rowcount or 0
+        await db.flush()
+        from app.core.websocket import manager
+        from app.core.ws_ticket import revoke_user
+        await manager.kick_user(user.id)
+        revoke_user(user.id)
+    else:
+        released_count = 0
+        await db.flush()
+
+    username = user.username
+    is_active = user.is_active
+    await db.commit()
+    await audit(
+        user=admin,
+        action="admin_disable_user" if not is_active else "admin_enable_user",
+        target_type="user", target_id=user.id,
+        detail={"username": username, "released_referee_matches": released_count},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, "changed": True, "user_id": user.id, "is_active": is_active}
 
 
 @router.delete("/admin/users/{user_id}")
@@ -1034,6 +1129,7 @@ def _profile(u: User, invited_by_username: str | None = None) -> UserProfile:
     return UserProfile(
         id=u.id, username=u.username, email=u.email,
         avatar=u.avatar, gender=u.gender, role=u.role,
+        is_active=u.is_active,
         invite_code=u.invite_code, invited_by=u.invited_by,
         invited_by_username=invited_by_username,
     )

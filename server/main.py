@@ -121,10 +121,12 @@ async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
 
     if user_id is not None:
         # 票据只断言「签发那一刻的身份」，这里补一次存活校验：
-        # 否则签发后 60 秒内账号被删（或票据被 revoke 遗漏）仍能建连。
+        # 否则签发后 60 秒内账号被删/被禁用（或票据被 revoke 遗漏）仍能建连。
         # 一次轻量 SELECT，只在握手时执行一次。
         async with async_session_factory() as session:
-            alive = await session.execute(select(User.id).where(User.id == user_id))
+            alive = await session.execute(
+                select(User.id).where(User.id == user_id, User.is_active == True)
+            )
             if alive.scalar_one_or_none() is None:
                 user_id = None
 
@@ -143,8 +145,8 @@ async def websocket_endpoint(websocket: WebSocket, tournament_id: int):
                 async with async_session_factory() as session:
                     result = await session.execute(select(User).where(User.id == uid))
                     u = result.scalar_one_or_none()
-                    # 同时校验 token 版本号（旧 token 按 0 处理），登出/作废后的 token 不可订阅
-                    if u is not None and payload.get("tv", 0) == u.token_version:
+                    # 同时校验 token 版本号（旧 token 按 0 处理），登出/作废/被禁用后不可订阅
+                    if u is not None and u.is_active and payload.get("tv", 0) == u.token_version:
                         user_id = u.id
 
     await websocket.accept()

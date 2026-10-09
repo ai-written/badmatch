@@ -175,6 +175,13 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
         )
 
+    # 账号禁用开关。默认 true，老库升级后所有人照常可用（不会误伤已有账号）。
+    if not await _column_exists(conn, "users", "is_active"):
+        logger.info("migration: adding users.is_active column")
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT true")
+        )
+
     if await _table_exists(conn, "registrations"):
         if not await _column_exists(conn, "registrations", "cancelled_at"):
             logger.info("migration: adding registrations.cancelled_at column")

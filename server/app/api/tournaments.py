@@ -220,6 +220,10 @@ async def _create_tournament(
         if missing:
             raise HTTPException(status_code=400, detail="部分预选用户不存在")
         users_map = {u.id: u for u in found_users}
+        # 已禁用的账号不再作为默认参赛人员：静默过滤掉。
+        # 选择列表（/auth/admin/selectable-users）已经不显示他们，这里兜住
+        # 「旧页面缓存 / 直接调接口」的情况；若全部被过滤，就等于没预选。
+        preselected = [uid for uid in preselected if users_map[uid].is_active]
 
     t = Tournament(
         creator_id=user.id,
@@ -494,7 +498,7 @@ async def list_registrations(
 ):
     from app.models.user import User as UserModel
     result = await db.execute(
-        select(Registration, UserModel.username, UserModel.avatar)
+        select(Registration, UserModel.username, UserModel.avatar, UserModel.is_active)
         .join(UserModel, Registration.user_id == UserModel.id)
         .where(Registration.tournament_id == tournament_id, Registration.is_active == True)
         # 按报名时间排序：不写 ORDER BY 时返回顺序由执行计划决定，而这两张表都很小、
@@ -511,6 +515,8 @@ async def list_registrations(
             username=row[1],
             avatar=row[2],
             created_at=row[0].created_at.isoformat() if row[0].created_at else "",
+            # 账号是否已禁用：转让房主等"选择某人"的场景要把他排除掉
+            user_is_active=row[3],
         )
         for row in rows
     ]

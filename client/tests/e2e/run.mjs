@@ -15,6 +15,7 @@
  *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）」开关（默认「或」、可持久化）
  *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
  *   9 赛事详情：进行中「追加比赛」（档位来自服务端、按倍数追加、非创建者看不到入口）
+ *  10 管理面板：禁用 / 恢复账号（标记、确认框、请求体、普通 admin 仍能看到已禁用账号）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -128,7 +129,7 @@ class Page {
       this.send('Fetch.continueRequest', { requestId: params.requestId })
       return
     }
-    const entry = { method: params.request.method, path: url.pathname, body: params.request.postData }
+    const entry = { method: params.request.method, path: url.pathname, search: url.search, body: params.request.postData }
     this.requests.push(entry)
     const body = this.mock ? this.mock(url.pathname, entry) : {}
     // mock 可以返回 { __status: 4xx/5xx } 表示"这个接口失败"（例如验证赛程拉取失败时
@@ -1093,8 +1094,107 @@ async function scenarioAddMatches(page) {
   assert('不会弹出空档位列表', !(await page.ev(`!!document.querySelector('.add-hint')`)))
 }
 
+/** 场景 10：管理面板禁用 / 恢复账号 */
+async function scenarioAdminDisableUser(page) {
+  console.log('10) 管理面板：禁用 / 恢复账号')
+  const me = { id: 1, username: 'root', avatar: '', gender: 'M', role: 'superadmin', invite_code: '' }
+  let users = [
+    { id: 2, username: '张三', avatar: '', gender: 'M', role: 'user', is_active: true, invited_by: 1, invited_by_username: 'root' },
+    { id: 3, username: '李四', avatar: '', gender: 'M', role: 'user', is_active: false, invited_by: 1, invited_by_username: 'root' },
+  ]
+  const adminMock = (path, entry) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/admin\/users$/.test(path)) return users
+    if (/admin\/selectable-users$/.test(path)) return users
+    if (/set-active$/.test(path)) {
+      const body = JSON.parse(entry?.body || '{}')
+      users = users.map(u => (u.id === body.user_id ? { ...u, is_active: body.is_active } : u))
+      return { ok: true, changed: true, user_id: body.user_id, is_active: body.is_active }
+    }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  }
+  await page.enableMock(adminMock)
+  await page.setToken()
+  await page.goto('/admin', 2400)
+
+  const rowText = (name) => page.ev(`(() => {
+    const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes(${JSON.stringify(name)}))
+    return cell ? (cell.textContent || '').replace(/\\s+/g, ' ').trim() : ''
+  })()`)
+  const clickBtnIn = (name, text) => page.ev(`(() => {
+    try {
+      const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes(${JSON.stringify(name)}))
+      if (!cell) return 'NOCELL'
+      const b = [...cell.querySelectorAll('.van-button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(text)})
+      if (!b) return 'NOBTN'
+      b.click(); return 'OK'
+    } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+  const toast = () => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
+  const setActivePosts = () => page.requests.filter((r) => r.method === 'POST' && /set-active$/.test(r.path))
+
+  assert('已禁用的账号在名单里标出来', (await rowText('李四')).includes('已禁用'), await rowText('李四'))
+  assert('可用账号有「禁用」按钮', (await rowText('张三')).includes('禁用'), await rowText('张三'))
+  assert('已禁用账号有「恢复」按钮', (await rowText('李四')).includes('恢复'))
+
+  // 先取消一次：不能只靠「点了就禁用」
+  page.requests = []
+  assert('点「禁用」', (await clickBtnIn('张三', '禁用')) === 'OK')
+  await sleep(500)
+  const d = await page.dialog()
+  assert('先弹确认框（标题写明是禁用）', d?.标题 === '确认禁用', d?.标题)
+  assert('确认框写明后果（无法登录、数据保留）',
+    (d?.正文 || '').includes('无法登录') && (d?.正文 || '').includes('保留'), d?.正文)
+  await page.cancelDialog()
+  await sleep(400)
+  assert('取消后不发请求', setActivePosts().length === 0, `实际 ${setActivePosts().length}`)
+
+  page.requests = []
+  assert('再次点「禁用」', (await clickBtnIn('张三', '禁用')) === 'OK')
+  await sleep(500)
+  await page.confirmDialog()
+  const posts = setActivePosts()
+  assert('恰好 1 个 set-active 请求', posts.length === 1, `实际 ${posts.length}`)
+  assert('请求体 = 禁用该用户',
+    /"user_id":2/.test(posts[0]?.body || '') && /"is_active":false/.test(posts[0]?.body || ''),
+    posts[0]?.body)
+  assert('提示已禁用', (await toast()) === '已禁用', await toast())
+  assert('刷新后该用户显示为已禁用', (await rowText('张三')).includes('已禁用'), await rowText('张三'))
+
+  // 恢复
+  page.requests = []
+  assert('点「恢复」', (await clickBtnIn('李四', '恢复')) === 'OK')
+  await sleep(500)
+  const d2 = await page.dialog()
+  assert('恢复也要确认', d2?.标题 === '确认恢复', d2?.标题)
+  await page.confirmDialog()
+  const posts2 = setActivePosts()
+  assert('恢复请求 is_active=true',
+    posts2.length === 1 && /"is_active":true/.test(posts2[0]?.body || ''), posts2[0]?.body)
+  assert('提示已恢复', (await toast()) === '已恢复', await toast())
+
+  // 普通 admin：名单请求必须带 include_disabled=true，
+  // 否则一旦禁用了自己邀请的人，就再也找不到、无法恢复
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { ...me, id: 9, username: 'adm', role: 'admin' }
+    if (/admin\/selectable-users$/.test(path)) return users
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.goto('/admin', 2400)
+  const listReqs = page.requests.filter((r) => r.path === '/api/auth/admin/selectable-users')
+  assert('普通 admin 的名单请求带上 include_disabled=true',
+    listReqs.some((r) => (r.search || '').includes('include_disabled=true')),
+    JSON.stringify(listReqs.map((r) => r.search)))
+  // 此时张三已被禁用（李四在前面被恢复了），他必须仍然出现在名单里，否则无法恢复
+  assert('普通 admin 也能看到已禁用账号（才能恢复）', (await rowText('张三')).includes('已禁用'), await rowText('张三'))
+  assert('普通 admin 看不到超管专属的重置密码入口', !(await rowText('张三')).includes('重置密码'))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminDisableUser]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

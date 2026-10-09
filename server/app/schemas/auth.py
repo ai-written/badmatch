@@ -50,6 +50,8 @@ class UserProfile(BaseModel):
     avatar: str
     gender: str | None = None
     role: str = "user"
+    # 账号是否可用（False = 已禁用）。管理面板据此显示「已禁用」并提供恢复入口
+    is_active: bool = True
     invite_code: str | None = None
     invited_by: int | None = None
     invited_by_username: str | None = None
@@ -66,6 +68,11 @@ class AdminResetPassword(BaseModel):
 class AdminSetRole(BaseModel):
     user_id: int
     role: str
+
+
+class AdminSetActive(BaseModel):
+    user_id: int
+    is_active: bool
 
 
 class UpdateProfile(BaseModel):
@@ -86,6 +93,9 @@ class SelectableUser(BaseModel):
     gender: str | None = None
     role: str = "user"
     invited_by: int | None = None
+    # 管理面板（include_disabled=true）据此显示「已禁用」并提供恢复入口；
+    # 创建赛事的默认参赛人员列表默认只含可用账号
+    is_active: bool = True
 
 
 class UserStats(BaseModel):

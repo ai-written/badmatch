@@ -63,6 +63,10 @@ async def get_current_user(
     # 旧格式 token（无 tv 字段）按版本 0 处理，保证升级/重启后登录状态平滑保留。
     if payload.get("tv", 0) != user.token_version:
         return None
+    # 被禁用的账号立即失效：即使版本号还对（禁用时漏了自增、或库里被手工改过），
+    # 也一律按未登录处理 —— 所有接口退化成 401，前端拦截器会清 token 回登录页。
+    if not user.is_active:
+        return None
     return user
 
 

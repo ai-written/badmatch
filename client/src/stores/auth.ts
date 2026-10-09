@@ -9,6 +9,9 @@ export interface UserProfile {
   avatar: string
   gender?: string | null
   role: string
+  // false = 账号已被管理员禁用。本人被禁用时后端直接拒绝登录/鉴权，
+  // 这里只用于管理面板等展示场景
+  is_active?: boolean
   invite_code?: string | null
 }
 

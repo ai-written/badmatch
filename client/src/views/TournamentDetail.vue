@@ -253,9 +253,11 @@ const showPlayerStats = ref(false)
 const showMatchPicker = ref(false)
 const showTransferPicker = ref(false)
 // 除自己外没有其他报名者：房主此时无法「转让后退出」（弹窗里没有候选），
-// 需要走「直接退出 + 赛事自动结束」这条路（后端在剩余人数不足 4 人时会自动结束）
+// 需要走「直接退出 + 赛事自动结束」这条路（后端在剩余人数不足 4 人时会自动结束）。
+// 已禁用的账号不能当新房主（他登录不进来，赛事会没人能推进流程），从候选里排除。
 const otherActivePlayers = computed(() =>
-  (registrations.value || []).filter(r => r.user_id !== auth.user?.id && r.is_active !== false)
+  (registrations.value || []).filter(r =>
+    r.user_id !== auth.user?.id && r.is_active !== false && r.user_is_active !== false)
 )
 const canTransfer = computed(() => otherActivePlayers.value.length > 0)
 const selectedNewCreator = ref(0)

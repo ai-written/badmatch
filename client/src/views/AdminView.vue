@@ -13,8 +13,11 @@
                     <van-image lazy-load round width="36" height="36" :src="u.avatar || defaultAvatar" class="user-avatar" />
                   </template>
                   <template #value>
+                    <!-- 已禁用：名单里标出来，否则和正常账号看不出区别 -->
+                    <van-tag v-if="u.is_active === false" type="danger" style="margin-right:6px">已禁用</van-tag>
                     <van-button v-if="isSuper && u.role !== 'superadmin' && u.id !== auth.user?.id" size="small" type="warning" @click="toggleRole(u)">{{ u.role === 'admin' ? '取消管理员' : '设为管理员' }}</van-button>
-                    <van-button v-if="u.id !== auth.user?.id && (isSuper || u.invited_by === auth.user?.id)" size="small" type="danger" style="margin-left:6px" @click="doDelete(u)">删除</van-button>
+                    <van-button v-if="canToggleActive(u)" size="small" :type="u.is_active === false ? 'primary' : 'default'" style="margin-left:6px" @click="doToggleActive(u)">{{ u.is_active === false ? '恢复' : '禁用' }}</van-button>
+                    <van-button v-if="canModerateUser(u)" size="small" type="danger" style="margin-left:6px" @click="doDelete(u)">删除</van-button>
                   </template>
                 </van-cell>
                 <van-cell v-if="isSuper && u.id !== auth.user?.id" title="重置密码" is-link @click="openResetPwd(u)" />
@@ -130,15 +133,43 @@ function roleLabel(role: string) {
 }
 
 async function fetchUsers(skipLoading = false) {
-  const url = isSuper.value ? '/auth/admin/users' : '/auth/admin/selectable-users'
+  // 管理面板必须能看到已禁用的账号（否则禁用之后再也找不到、无法恢复）：
+  // 超管的 /admin/users 本来就返回全部；普通 admin 用 selectable-users 时要显式带上标志，
+  // 那个接口默认会过滤掉已禁用的人（给「默认参赛人员」选择用）。
+  const url = isSuper.value
+    ? '/auth/admin/users'
+    : '/auth/admin/selectable-users?include_disabled=true'
   const res = await api.get(url, { skipLoading } as any)
   users.value = res.data
+}
+
+// 能否对该用户执行管理操作（与原「删除」按钮的条件一致，后端 delete_user 同一套规则）
+function canModerateUser(u: any) {
+  return u.id !== auth.user?.id && (isSuper.value || u.invited_by === auth.user?.id)
+}
+// 禁用/恢复：再排除超级管理员（后端也挡，避免把管理入口锁死）
+function canToggleActive(u: any) {
+  return canModerateUser(u) && u.role !== 'superadmin'
 }
 
 async function toggleRole(u: any) {
   const newRole = u.role === 'admin' ? 'user' : 'admin'
   await api.post('/auth/admin/set-role', { user_id: u.id, role: newRole })
   showToast(newRole === 'admin' ? '已设为管理员' : '已取消管理员')
+  await fetchUsers()
+}
+
+/** 禁用 / 恢复账号：禁用只是让他登不进来、不再被预选/参赛，历史数据全部保留 */
+async function doToggleActive(u: any) {
+  const disable = u.is_active !== false
+  const message = disable
+    ? `禁用后「${u.username}」无法登录，也不会再被选为参赛人员/房主；比赛记录与战绩全部保留。确定禁用？`
+    : `恢复后「${u.username}」可以重新登录。确定恢复？`
+  try {
+    await showConfirmDialog({ title: disable ? '确认禁用' : '确认恢复', message })
+  } catch { return }
+  await api.post('/auth/admin/set-active', { user_id: u.id, is_active: !disable })
+  showToast(disable ? '已禁用' : '已恢复')
   await fetchUsers()
 }
 
@@ -170,6 +201,7 @@ const ACTION_LABELS: Record<string, string> = {
   register: '注册', login_success: '登录成功', login_failed: '登录失败', logout: '登出',
   change_password: '修改密码', admin_reset_password: '重置密码', admin_set_role: '设置角色',
   admin_delete_user: '删除用户', tournament_create: '创建赛事', tournament_create_batch: '批量创建赛事',
+  admin_disable_user: '禁用用户', admin_enable_user: '恢复用户',
   tournament_delete: '删除赛事', tournament_start: '开始赛事', tournament_end: '结束赛事',
   tournament_add_matches: '追加比赛',
   tournament_withdraw: '退赛', registration: '报名', cancel_registration: '取消报名',

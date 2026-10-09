@@ -460,10 +460,13 @@ async def withdraw_player(
         # 避免赛事处于"无房主"状态
         if tournament.creator_id == player_id:
             remaining_players = await db.execute(
-                select(PlayerStats.user_id).where(
+                select(PlayerStats.user_id)
+                .join(User, User.id == PlayerStats.user_id)
+                .where(
                     PlayerStats.tournament_id == tournament_id,
                     PlayerStats.is_active == True,
                     PlayerStats.user_id != player_id,
+                    User.is_active == True,   # 不把房主传给已禁用的账号
                 ).limit(1)
             )
             first = remaining_players.scalar_one_or_none()
@@ -492,10 +495,14 @@ async def withdraw_player(
         if body.new_creator_id == player_id:
             raise HTTPException(status_code=400, detail="不能把房主转让给自己")
         ok_new = await db.execute(
-            select(PlayerStats).where(
+            select(PlayerStats)
+            .join(User, User.id == PlayerStats.user_id)
+            .where(
                 PlayerStats.tournament_id == tournament_id,
                 PlayerStats.user_id == body.new_creator_id,
                 PlayerStats.is_active == True,
+                # 被禁用的账号登录不进来，不能当房主（否则赛事没人能推进流程）
+                User.is_active == True,
             )
         )
         if ok_new.scalar_one_or_none() is None:
@@ -503,10 +510,13 @@ async def withdraw_player(
         tournament.creator_id = body.new_creator_id
     elif tournament.creator_id == player_id:
         remaining_players = await db.execute(
-            select(PlayerStats.user_id).where(
+            select(PlayerStats.user_id)
+            .join(User, User.id == PlayerStats.user_id)
+            .where(
                 PlayerStats.tournament_id == tournament_id,
                 PlayerStats.is_active == True,
                 PlayerStats.user_id != player_id,
+                User.is_active == True,   # 同上：不把房主传给已禁用的账号
             ).limit(1)
         )
         first = remaining_players.scalar_one_or_none()
