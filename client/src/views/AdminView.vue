@@ -171,6 +171,7 @@ const ACTION_LABELS: Record<string, string> = {
   change_password: '修改密码', admin_reset_password: '重置密码', admin_set_role: '设置角色',
   admin_delete_user: '删除用户', tournament_create: '创建赛事', tournament_create_batch: '批量创建赛事',
   tournament_delete: '删除赛事', tournament_start: '开始赛事', tournament_end: '结束赛事',
+  tournament_add_matches: '追加比赛',
   tournament_withdraw: '退赛', registration: '报名', cancel_registration: '取消报名',
   round_start: '开始轮次', match_force_end: '结束比赛', match_score_update: '记分',
   match_swap_sides: '交换场地',

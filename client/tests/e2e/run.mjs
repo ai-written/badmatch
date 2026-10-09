@@ -14,6 +14,7 @@
  *   4 邀请码那行：副标题只占一行；文案变长时省略号截断、右侧邀请码仍完整
  *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）」开关（默认「或」、可持久化）
  *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
+ *   9 赛事详情：进行中「追加比赛」（档位来自服务端、按倍数追加、非创建者看不到入口）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1003,8 +1004,97 @@ async function scenarioScheduleRefereeRow(page) {
   assert('确认顶替后恰好 1 个 claim-referee 请求', claimPosts().length === 1, `实际 ${claimPosts().length}`)
 }
 
+/** 场景 9：赛中追加比赛（开场次排少了 / 还有时间，再排几场） */
+async function scenarioAddMatches(page) {
+  console.log('9) 赛事详情：进行中的赛事追加比赛')
+  const players = Array.from({ length: 8 }, (_, i) => ({
+    id: i + 1, user_id: i + 1, username: `p${i + 1}`, avatar: '', is_active: true,
+    created_at: '2026-09-26T09:00:00',
+  }))
+  // 服务端只给「每人新增场次相同」的档位：8 人 → step=2
+  let options = {
+    players: 8, step: 2, current_total: 22, remaining: 78,
+    options: [
+      { added: 2, per_person_added: 1, total: 24 },
+      { added: 4, per_person_added: 2, total: 26 },
+    ],
+  }
+  let detail = {
+    id: 2, creator_id: 1, title: 'T', location: 'L', status: 'ongoing', max_participants: 8,
+    courts: [], registered_count: 8, cancelled_count: 0, total_matches: 22, points_to_win: 11,
+    server_now: '2026-09-29T08:00:00', is_registered: true, created_at: '2026-09-26T09:00:00',
+  }
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    if (/extra-match-options$/.test(path)) return options
+    if (/add-matches$/.test(path)) {
+      detail = { ...detail, total_matches: detail.total_matches + 2 }
+      return { ok: true, added: 2, requested: 2, total_matches: detail.total_matches, rounds: 1, per_person_added: 1 }
+    }
+    if (/\/registrations$/.test(path)) return players
+    if (/\/tournaments\/2$/.test(path)) return detail
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+
+  const btnTexts = () => page.ev(`[...document.querySelectorAll('.creator-block .van-button')].map(b => (b.textContent || '').trim())`)
+  const toast = () => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
+
+  await page.goto('/tournament/2', 2400)
+  assert('进行中：创建者能看到「追加比赛」', (await btnTexts()).includes('追加比赛'), JSON.stringify(await btnTexts()))
+  assert('「提前结束赛事」还在（只是多了一个按钮）', (await btnTexts()).includes('提前结束赛事'))
+
+  assert('能打开追加比赛弹层', (await page.clickText('追加比赛')) === true)
+  const title = await page.ev(`(document.querySelector('.picker-title')?.textContent || '').trim()`)
+  assert('弹层标题写明在场人数', title.includes('8 人在场'), title)
+  const cells = await page.ev(`[...document.querySelectorAll('.van-popup .van-cell__title')].map(e => e.textContent.trim())`)
+  // Vant 把 label 嵌在 .van-cell__title 里面，所以这里用前缀匹配标题
+  assert('档位来自服务端（只能是 2 的倍数）',
+    cells.length === 2 && cells[0].startsWith('追加 2 场') && cells[1].startsWith('追加 4 场'),
+    JSON.stringify(cells))
+  const labels = await page.ev(`[...document.querySelectorAll('.van-popup .van-cell__label')].map(e => e.textContent.trim())`)
+  assert('标注每人新增场次与追加后的总场次', labels[0] === '每人再打 1 场，共 24 场', labels[0])
+  assert('说明为什么只能按倍数追加',
+    (await page.ev(`(document.querySelector('.add-hint')?.textContent || '')`)).includes('倍数'))
+
+  page.requests = []
+  assert('点档位即提交', (await page.ev(`(() => {
+    try {
+      const cell = [...document.querySelectorAll('.van-popup .van-cell')].find(c => (c.textContent || '').includes('追加 2 场'))
+      if (!cell) return 'NOTFOUND'
+      cell.click(); return 'OK'
+    } catch (e) { return 'ERR:' + (e && e.message) } })()`)) === 'OK')
+  await sleep(900)
+  const posts = page.requests.filter((r) => r.method === 'POST' && /add-matches$/.test(r.path))
+  assert('恰好 1 个 add-matches 请求', posts.length === 1, `实际 ${posts.length}`)
+  assert('请求体是所选场次', /"matches":2/.test(posts[0]?.body || ''), posts[0]?.body)
+  assert('提示已追加', (await toast()) === '已追加 2 场比赛', await toast())
+  // van-popup 关闭后 DOM 仍在（lazy-render 只挡首次渲染），所以要按"不可见"判断
+  assert('弹层已关闭', await page.ev(`(() => {
+    const el = document.querySelector('.add-hint')
+    return !el || el.offsetParent === null })()`))
+  assert('总场次刷新为新值（共 24 场）',
+    await page.ev(`(document.body.textContent || '').includes('共 24 场')`))
+
+  // 非创建者（也不是管理员）不该看到入口
+  detail = { ...detail, creator_id: 2 }
+  await page.goto('/tournament/2', 2200)
+  assert('非创建者看不到「追加比赛」', !(await btnTexts()).includes('追加比赛'), JSON.stringify(await btnTexts()))
+
+  // 在场人数不足 4 人：给明确提示，而不是弹一个空列表
+  detail = { ...detail, creator_id: 1 }
+  options = { players: 3, step: 0, current_total: 22, remaining: 78, options: [] }
+  await page.goto('/tournament/2', 2200)
+  await page.clickText('追加比赛')
+  await sleep(400)
+  assert('人数不足时提示原因', (await toast()) === '在场选手不足 4 人，无法再排比赛', await toast())
+  assert('不会弹出空档位列表', !(await page.ev(`!!document.querySelector('.add-hint')`)))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

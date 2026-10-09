@@ -270,8 +270,10 @@ watch(lastMessage, (msg) => {
   //   不重拉的话列表与筛选条件都停在旧快照上（「已不在赛程里的人」也剪不掉）；
   // tournament_finished：比赛全部打完自动结束时后端只发这一个事件，
   //   少了它就看不到「赛事已结束」的只读横幅。
+  // schedule_updated：赛中追加了比赛，新排出来的轮次要立刻出现。
   if (t === 'match_updated' || t === 'referee_claimed' || t === 'referee_released'
-      || t === 'registration_updated' || t === 'tournament_finished') {
+      || t === 'registration_updated' || t === 'schedule_updated'
+      || t === 'tournament_finished') {
     fetchRounds(true).catch(() => {})
   }
 })

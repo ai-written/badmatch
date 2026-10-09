@@ -81,7 +81,9 @@
       </div>
 
       <div class="creator-block" v-if="canManage && tournament.status === 'ongoing'">
-        <van-button type="danger" block round :loading="submitting" :disabled="submitting" @click="doEndTournament">提前结束赛事</van-button>
+        <!-- 开场次排少了 / 还有时间：可以再追加几场（后端只为每人新增场次相等的组合放行） -->
+        <van-button plain type="primary" block round :loading="submitting" :disabled="submitting" @click="openAddMatches">追加比赛</van-button>
+        <van-button type="danger" block round :loading="submitting" :disabled="submitting" style="margin-top:10px" @click="doEndTournament">提前结束赛事</van-button>
       </div>
 
       <div class="nav-block" v-if="tournament.status !== 'open'">
@@ -157,6 +159,28 @@
             @click="selectMatchStart(opt.total)" :class="{ active: matchTotal === opt.total }"
           />
         </van-cell-group>
+        </div>
+      </van-popup>
+
+      <!-- 追加比赛：可选档位由服务端算（保证每人新增场次相同），前端只负责展示 -->
+      <van-popup v-model:show="showAddMatches" position="bottom" round class="vh-sheet vh-45">
+        <div class="picker-toolbar">
+          <span @click="showAddMatches = false">取消</span>
+          <span class="picker-title">当前 {{ addOptions.players }} 人在场，请选择追加场次</span>
+        </div>
+        <div class="vh-sheet-body">
+        <van-cell-group inset style="margin-top:10px">
+          <van-cell
+            v-for="opt in addOptions.options" :key="opt.added"
+            :title="`追加 ${opt.added} 场`"
+            :label="`每人再打 ${opt.per_person_added} 场，共 ${opt.total} 场`"
+            @click="doAddMatches(opt.added)"
+          />
+        </van-cell-group>
+        <p class="add-hint">
+          为保证每人场次相同，追加场次只能是 {{ addOptions.step }} 的倍数。
+          新比赛接在最后一个轮次之后，已经打过的比赛不受影响。
+        </p>
         </div>
       </van-popup>
 
@@ -237,6 +261,14 @@ const canTransfer = computed(() => otherActivePlayers.value.length > 0)
 const selectedNewCreator = ref(0)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const matchTotal = ref(0)
+// 追加比赛：可选项由服务端算（约束是「每人新增场次相同」，见后端 extra-match-options）
+const showAddMatches = ref(false)
+const addOptions = ref<{
+  players: number
+  step: number
+  current_total: number
+  options: { added: number; per_person_added: number; total: number }[]
+}>({ players: 0, step: 0, current_total: 0, options: [] })
 const playerDetail = ref<any>({})
 const playerStats = ref<any>({})
 const statsFailed = ref(false)
@@ -618,6 +650,38 @@ function selectMatchStart(total: number) {
   doStartWithTotal()
 }
 
+/* ---------------- 赛中追加比赛（开场次排少了 / 还有时间） ----------------
+ * 只让用户从服务端给的档位里选：追加数必须是「每人新增场次相同」的倍数，
+ * 前端自己算人数容易和后端校验口径对不上（界面能选、点了报错）。
+ */
+async function openAddMatches() {
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/extra-match-options`)
+    addOptions.value = res.data
+  } catch {
+    return   // 失败提示交给拦截器
+  }
+  if (!addOptions.value.options?.length) {
+    // 两种原因分开说，别让人以为是网络问题
+    showToast(addOptions.value.players < 4
+      ? '在场选手不足 4 人，无法再排比赛'
+      : `总场次已达上限（现在 ${addOptions.value.current_total} 场）`)
+    return
+  }
+  showAddMatches.value = true
+}
+
+async function doAddMatches(added: number) {
+  showAddMatches.value = false
+  await withSubmitting(async () => {
+    const res = await api.post(`/tournaments/${route.params.id}/add-matches`, { matches: added })
+    const actual = Number(res.data?.added ?? added)
+    // 服务端排不出请求的场次时会按步长往上试，实际追加数要如实告知
+    showToast(actual === added ? `已追加 ${actual} 场比赛` : `所选场次排不出，已追加 ${actual} 场`)
+    await fetchDetail()
+  })
+}
+
 async function doStartWithTotal() {
   await withSubmitting(async () => {
     const res = await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
@@ -699,7 +763,9 @@ async function onRefresh() {
 // 例如创建者点开始比赛，POST 成功后自己拉一次，广播到达又拉一次，白跑两个请求。
 watch(lastMessage, (msg) => {
   const t = msg?.type
-  if (t === 'registration_updated' || t === 'tournament_started' || t === 'tournament_finished') {
+  // schedule_updated：赛中追加了比赛（总场次变了，本页要跟着刷）
+  if (t === 'registration_updated' || t === 'tournament_started'
+      || t === 'tournament_finished' || t === 'schedule_updated') {
     refreshBothIfNotJustRefreshed()
   }
   // 取消记录弹层开着时跟着刷新：别人刚取消，这边列表要立刻变
@@ -779,6 +845,8 @@ onUnmounted(() => {
 .player-time { font-size: 10px; color: #bbb; }
 .player-chip.more { justify-content: center; font-size: 13px; color: #999; cursor: default; }
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
+/* 追加比赛弹层里的说明：说清为什么只能按倍数追加，以及不会动已有比赛 */
+.add-hint { margin: 12px 16px; font-size: 12px; color: #969799; line-height: 1.6; }
 .nav-block { margin: 8px 12px; }
 /* 导航栏右侧可能同时有「分享海报」和「删除」两个图标，拉开间距免得点错 */
 .nav-right { display: inline-flex; align-items: center; gap: 14px; }

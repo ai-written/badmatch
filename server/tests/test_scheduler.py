@@ -9,6 +9,7 @@ from app.engine.scheduler import (
     _quality,
     compute_match_count,
     compute_rounds,
+    fairness_step,
     generate_schedule,
 )
 
@@ -199,3 +200,82 @@ def test_quality_counts_duplicate_with_swapped_team_order():
     assert _quality(dup)[0] == 1
     distinct = [((1, 2), (3, 4), None, None), ((1, 3), (2, 4), None, None)]
     assert _quality(distinct)[0] == 0
+
+
+# ---- 赛中追加比赛：把已有赛程的搭档/对手/对局喂给排程器当惩罚 ----
+
+def test_fairness_step_divides_slots_evenly_and_is_minimal():
+    """追加场次的步长：4K 必须能被 N 整除，且 step 是最小的那个 K。"""
+    for n in range(4, 13):
+        step = fairness_step(n)
+        assert (4 * step) % n == 0, f"n={n} step={step}：每人场次没法均分"
+        assert all((4 * k) % n != 0 for k in range(1, step)), f"n={n} 的步长不是最小"
+
+
+def test_generate_schedule_empty_history_matches_no_history():
+    """传空历史 == 不传历史：老调用方（开赛、退赛重排）的结果一点都不能变。"""
+    players = list(range(8))
+    assert generate_schedule(players, 22) == generate_schedule(players, 22, {}, {}, {})
+
+
+def test_new_batch_avoids_repeating_existing_matchups():
+    """追加的比赛不能与已有赛程出现完全相同的对局（同 4 人 + 同分组）。"""
+    players = list(range(8))
+    first = generate_schedule(players, compute_match_count(8))
+    match_history = Counter(_match_sig(m) for m in first)
+
+    second = generate_schedule(players, fairness_step(8), {}, {}, match_history)
+
+    overlap = [k for k in (_match_sig(m) for m in second) if match_history.get(k)]
+    assert not overlap, f"追加的比赛与已有对局重复：{overlap}"
+
+
+def test_new_batch_avoids_repeating_partnerships():
+    """搭档历史同样要生效：追加的场次不该把已经合作过的搭档再配一遍。"""
+    players = list(range(8))
+    first = generate_schedule(players, 2)
+    partner_history = Counter()
+    for (a, b), (c, d), *_ in first:
+        for pair in (_pair_key(a, b), _pair_key(c, d)):
+            partner_history[pair] += 1
+            partner_history[pair[::-1]] += 1
+
+    second = generate_schedule(players, 2, partner_history)
+
+    repeated = [
+        pair
+        for (a, b), (c, d), *_ in second
+        for pair in (_pair_key(a, b), _pair_key(c, d))
+        if partner_history.get(pair)
+    ]
+    assert not repeated, f"追加的比赛重复了搭档：{repeated}"
+
+
+def test_new_batch_keeps_equal_play_with_history():
+    """带历史排追加场次，每人场次仍然必须完全相等（人数不整除 4 的组合也要成立）。"""
+    for n in (6, 7, 9, 12):
+        players = list(range(n))
+        step = fairness_step(n)
+        first = generate_schedule(players, step * 2)
+        partner_history = Counter()
+        opponent_history = Counter()
+        match_history = Counter()
+        for (a, b), (c, d), *_ in first:
+            t1, t2 = _pair_key(a, b), _pair_key(c, d)
+            for pair in (t1, t2):
+                partner_history[pair] += 1
+                partner_history[pair[::-1]] += 1
+            match_history[_match_key(t1, t2)] += 1
+            for u in t1:
+                for v in t2:
+                    opponent_history[_pair_key(u, v)] += 1
+
+        second = generate_schedule(players, step, partner_history,
+                                   opponent_history, match_history)
+
+        played = Counter()
+        for (a, b), (c, d), *_ in first + second:
+            for p in (a, b, c, d):
+                played[p] += 1
+        assert len(played) == n, f"n={n}：有人一场没打 {sorted(set(players) - set(played))}"
+        assert len(set(played.values())) == 1, f"n={n} 带历史追加后场次不等：{dict(played)}"

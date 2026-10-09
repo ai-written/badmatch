@@ -12,6 +12,7 @@ from app.models.tournament import (
 )
 from app.core.websocket import manager
 from app.core.mailer import send_tournament_invite
+from app.engine.scheduler import fairness_step
 from app.core.config import get_settings
 from app.schemas.tournament import (
     TournamentCreate, TournamentBrief, TournamentListOut, TournamentDetail,
@@ -634,10 +635,10 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
 @router.get("/match-options/{num_players}")
 async def match_options(num_players: int, user: User = Depends(require_user)):
     """Return valid match counts for given number of players."""
-    import math
     if num_players < 4:
         return {"options": [], "per_person": 0}
-    step = num_players // math.gcd(4, num_players)
+    # 步长与开赛/追加比赛的判据同一个来源（N/gcd(4,N)）
+    step = fairness_step(num_players)
     start = step
     while start < 6:
         start += step

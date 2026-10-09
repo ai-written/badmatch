@@ -7,6 +7,7 @@
 每场比赛从「剩余场次没打满的人」里挑 4 个，评分同时惩罚三件事：
 重复搭档、重复对手、以及**完全相同的对局**（同 4 人 + 同分组）。
 """
+import math
 import random
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -98,7 +99,32 @@ def _match_key(t1, t2) -> tuple:
     return (t1, t2) if t1 <= t2 else (t2, t1)
 
 
-def generate_schedule(players, total_matches, partner_history=None):
+def fairness_step(num_players: int) -> int:
+    """「每人场次相同」所允许的最小场次步长。
+
+    4K 个上场名额要被 N 人均分，故 K 必须是 N/gcd(4,N) 的倍数：
+    8 人 → 2 场、6 人 → 3 场、9 人 → 9 场。
+
+    开赛、赛中追加比赛、以及前端的可选项列表都必须用同一个来源，否则会出现
+    「界面让选、提交却被拒」或者反过来「能排但每人场次不等」。
+    """
+    return num_players // math.gcd(4, num_players)
+
+
+def generate_schedule(players, total_matches, partner_history=None,
+                      opponent_history=None, match_history=None):
+    """排一份（新增的）赛程。
+
+    partner_history / opponent_history / match_history 是**已有赛程**里的重复统计，
+    用来让新排出来的比赛尽量避开已经出现过的东西：
+      - partner_history  —— 重复搭档（键为 _pair_key，两个方向各记一次）
+      - opponent_history —— 重复对手
+      - match_history    —— 完全相同的对局（同 4 人 + 同分组）
+    三者缺省都为空，因此老调用方的行为完全不变。
+
+    注意这三者只影响**评分**，不改变目标场次：每人还是打 target 场，
+    只是"跟谁打、怎么分组"会更偏向没出现过的组合。
+    """
     N = len(players)
     target = (4 * total_matches) // N
 
@@ -120,7 +146,8 @@ def generate_schedule(players, total_matches, partner_history=None):
     for attempt in range(ATTEMPTS):
         rng = random.Random(attempt) if attempt else None
         try:
-            schedule = _greedy_build(players, total_matches, target, dict(partner_history), rng)
+            schedule = _greedy_build(players, total_matches, target, dict(partner_history), rng,
+                                     opponent_history, match_history)
         except ValueError as e:
             # 死路：必须继续换序重试，不受 quality_attempts 限制
             last_error = e
@@ -138,13 +165,15 @@ def generate_schedule(players, total_matches, partner_history=None):
     return best
 
 
-def _greedy_build(players, total_matches, target, partner_history, rng=None):
+def _greedy_build(players, total_matches, target, partner_history, rng=None,
+                  opponent_history=None, match_history=None):
     played = {p: 0 for p in players}
     # partner_history 的键来自库里的 RoundPairing（方向不保证），
     # 所以查询时两个方向都查一次，兼容历史数据
     partner_count = defaultdict(int, partner_history)
-    opponent_count = defaultdict(int)
-    match_count = defaultdict(int)
+    # 同理：对手/对局历史来自库里已有的比赛，用来避开"又跟同一拨人、同样的分组打一次"
+    opponent_count = defaultdict(int, opponent_history or {})
+    match_count = defaultdict(int, match_history or {})
     cool_down = {p: 0 for p in players}
     schedule = []
 

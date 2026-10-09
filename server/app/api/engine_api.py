@@ -1,6 +1,8 @@
 """
-引擎触发 API: 开始赛事、退赛重排
+引擎触发 API: 开始赛事、退赛重排、追加比赛
 """
+from collections import Counter
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +16,13 @@ from app.models.tournament import Tournament, TournamentStatus, Registration, Pl
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
 from app.models.round import MatchSupport
 from pydantic import BaseModel
-from app.engine.scheduler import generate_schedule, compute_match_count, compute_rounds
+from app.engine.scheduler import (
+    generate_schedule, compute_match_count, compute_rounds,
+    fairness_step, _pair_key, _match_key,
+)
+
+# 总场次上限：与开赛时的校验同一个数（原先是硬编码两处，追加比赛也要用同一个上限）
+MAX_TOTAL_MATCHES = 100
 
 
 class StartRequest(BaseModel):
@@ -64,8 +72,11 @@ async def start_tournament(
     # 这里与 withdraw 的重排逻辑保持一致：不整除就按当前人数重算。
     if body and body.total_matches is not None:
         requested = body.total_matches
-        if requested < 1 or requested > 100 or (4 * requested) % len(player_ids) != 0:
-            raise HTTPException(status_code=400, detail="总场次需在 1-100 之间且保证每名选手场次相同")
+        if requested < 1 or requested > MAX_TOTAL_MATCHES or (4 * requested) % len(player_ids) != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"总场次需在 1-{MAX_TOTAL_MATCHES} 之间且保证每名选手场次相同",
+            )
         tournament.total_matches = requested
         M = requested
     elif tournament.total_matches and (4 * tournament.total_matches) % len(player_ids) == 0:
@@ -149,6 +160,223 @@ async def start_tournament(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
+
+
+class AddMatchesBody(BaseModel):
+    matches: int
+
+
+async def _active_player_ids(db: AsyncSession, tournament_id: int) -> list[int]:
+    """在场选手 id（按 PlayerStats.id，即开赛时的报名顺序）。
+
+    顺序必须固定：这个列表会直接喂给排程算法，顺序不同排出来的对阵也不同
+    （与 withdraw 重排用的是同一个口径）。
+    """
+    rows = await db.execute(
+        select(PlayerStats.user_id)
+        .where(
+            PlayerStats.tournament_id == tournament_id,
+            PlayerStats.is_active == True,
+        )
+        .order_by(PlayerStats.id)
+    )
+    return [uid for (uid,) in rows.all()]
+
+
+async def _load_history(db: AsyncSession, tournament_id: int):
+    """已有赛程的搭档/对手/对局统计，交给排程器做重复惩罚。
+
+    取**全部轮次**而不只是打过的：追加比赛时，还没开打的比赛也已经排在那里了，
+    跟它排成一模一样同样是"重复"。
+    """
+    partner_history: Counter = Counter()
+    opponent_history: Counter = Counter()
+    match_history: Counter = Counter()
+
+    pairing_rows = await db.execute(
+        select(RoundPairing)
+        .join(Round, Round.id == RoundPairing.round_id)
+        .where(Round.tournament_id == tournament_id)
+    )
+    pairings: dict[int, RoundPairing] = {}
+    for p in pairing_rows.scalars().all():
+        key = _pair_key(p.player_a_id, p.player_b_id)
+        # 库里搭档键的方向不保证（见 scheduler 的说明），两个方向各记一次
+        partner_history[key] += 1
+        partner_history[key[::-1]] += 1
+        pairings[p.id] = p
+
+    match_rows = await db.execute(
+        select(Match).where(Match.tournament_id == tournament_id)
+    )
+    for m in match_rows.scalars().all():
+        pa, pb = pairings.get(m.pairing_a_id), pairings.get(m.pairing_b_id)
+        if not pa or not pb:
+            continue
+        t1 = _pair_key(pa.player_a_id, pa.player_b_id)
+        t2 = _pair_key(pb.player_a_id, pb.player_b_id)
+        match_history[_match_key(t1, t2)] += 1
+        for u in t1:
+            for v in t2:
+                opponent_history[_pair_key(u, v)] += 1
+
+    return partner_history, opponent_history, match_history
+
+
+@router.get("/extra-match-options")
+async def extra_match_options(
+    tournament_id: int,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """「追加比赛」的可选项。
+
+    约束是"每人新增场次相同"：追加数只能是 fairness_step(N) 的倍数。
+    可选项由服务端算、前端只负责展示，免得「界面能选、提交却被接口拒」。
+    """
+    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    tournament = t.scalar_one_or_none()
+    if not tournament:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+
+    players = await _active_player_ids(db, tournament_id)
+    n = len(players)
+    current = tournament.total_matches or 0
+    if tournament.status != TournamentStatus.ONGOING or n < 4:
+        return {"players": n, "step": 0, "current_total": current,
+                "remaining": 0, "options": []}
+
+    step = fairness_step(n)
+    options = []
+    added = step
+    # 最多给 10 个档位：8 人时 step=2，够选到 +20 场，再多也没人点
+    while current + added <= MAX_TOTAL_MATCHES and len(options) < 10:
+        total = current + added
+        options.append({
+            "added": added,
+            "per_person_added": (4 * added) // n,
+            "total": total,
+            # 每人总场次：已有的场次本身是均分的（开赛/重排都按同一约束生成）
+            "per_person_total": (4 * total) // n,
+        })
+        added += step
+
+    return {
+        "players": n,
+        "step": step,
+        "current_total": current,
+        "remaining": max(0, MAX_TOTAL_MATCHES - current),
+        "options": options,
+    }
+
+
+@router.post("/add-matches")
+async def add_matches(
+    tournament_id: int,
+    request: Request,
+    body: AddMatchesBody,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """进行中的赛事再追加几场（开场次排少了、还有时间）。
+
+    只追加、不动已有比赛：新比赛接在最后一个轮次之后，没开打的旧轮次原样保留。
+    """
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
+    tournament = t.scalar_one_or_none()
+    if not tournament:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有赛事创建者、管理员或超级管理员可以追加比赛")
+    if tournament.status != TournamentStatus.ONGOING:
+        raise HTTPException(status_code=400, detail="只有进行中的赛事可以追加比赛")
+
+    players = await _active_player_ids(db, tournament_id)
+    n = len(players)
+    if n < 4:
+        raise HTTPException(status_code=400, detail="在场选手不足 4 人，无法再排比赛")
+
+    if body.matches < 1:
+        raise HTTPException(status_code=400, detail="追加场次至少 1 场")
+    step = fairness_step(n)
+    if body.matches % step != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前 {n} 人在场，追加场次必须是 {step} 的倍数，否则每人场次会不一样",
+        )
+    current = tournament.total_matches or 0
+    if current + body.matches > MAX_TOTAL_MATCHES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"总场次上限 {MAX_TOTAL_MATCHES} 场（现有 {current} 场）",
+        )
+
+    partner_history, opponent_history, match_history = await _load_history(db, tournament_id)
+
+    # 贪心排程在个别组合下会走入死路（开赛那边也有同样的兜底）：按步长往上试，
+    # 宁可多排一点也不要给用户一个 500。实际追加数会返回给前端提示。
+    schedule = None
+    added = body.matches
+    while current + added <= MAX_TOTAL_MATCHES:
+        try:
+            schedule = generate_schedule(players, added, partner_history,
+                                         opponent_history, match_history)
+            break
+        except ValueError:
+            added += step
+    if schedule is None:
+        raise HTTPException(status_code=400, detail="当前人数排不出更多场次，请减少追加场次后重试")
+
+    last_num_row = await db.execute(
+        select(func.max(Round.round_number)).where(Round.tournament_id == tournament_id)
+    )
+    last_num = last_num_row.scalar() or 0
+
+    rounds_data = compute_rounds(schedule, 2)
+    for round_idx, round_matches in enumerate(rounds_data, start=1):
+        r = Round(tournament_id=tournament_id, round_number=last_num + round_idx)
+        db.add(r)
+        await db.flush()
+
+        for match_data in round_matches:
+            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+            pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
+            pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
+            db.add(pairing_a)
+            db.add(pairing_b)
+            await db.flush()
+            db.add(Match(
+                tournament_id=tournament_id,
+                round_id=r.id,
+                pairing_a_id=pairing_a.id,
+                pairing_b_id=pairing_b.id,
+                court_id=court_id,
+                time_slot_id=slot_id,
+            ))
+
+    total = current + added
+    tournament.total_matches = total
+    # 先提交再广播再审计（全仓统一）：订阅者收到 schedule_updated 后回查赛程，
+    # 未提交的话读到的是追加前的旧赛程，这一次实时更新就被吞掉
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "schedule_updated"})
+    await audit(
+        user=user, action="tournament_add_matches",
+        target_type="tournament", target_id=tournament_id,
+        detail={"added": added, "requested": body.matches, "total_matches": total,
+                "players": n, "rounds": len(rounds_data)},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return {
+        "ok": True,
+        "added": added,
+        "requested": body.matches,
+        "total_matches": total,
+        "rounds": len(rounds_data),
+        "per_person_added": (4 * added) // n,
+    }
 
 
 class WithdrawBody(BaseModel):
