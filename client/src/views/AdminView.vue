@@ -521,7 +521,9 @@ useResumeRefresh(() => fetchUsers(true))
 .user-group { margin-bottom: 4px; }
 /* 副标题固定一行：名字很长时用省略号收尾，不要折成两行把列表撑散 */
 .user-group :deep(.van-cell__label) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.user-more { color: #c8c9cc; font-size: 18px; }
+/* 「…」入口：Vant 默认只给 4px 左间距，和状态标签几乎贴在一起 —— 拉开到 12px，
+   两行之间也留出视觉呼吸（标签本身在 value 列右对齐，间距加在图标侧） */
+.user-more { color: #c8c9cc; font-size: 18px; margin-left: 12px; }
 .audit-filter { margin-bottom: 8px; }
 .audit-count { padding: 4px 16px 8px; color: #969799; font-size: 12px; }
 .audit-scroll { padding-top: 0; }
