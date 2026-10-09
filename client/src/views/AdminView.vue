@@ -7,20 +7,27 @@
         <div class="admin-scroll">
           <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
             <div class="pull-inner">
-              <van-cell-group inset v-for="u in users" :key="u.id" style="margin-bottom:4px">
-                <van-cell :title="u.username" :label="`ID:${u.id}  ${roleLabel(u.role)}  ${u.gender === 'M' ? '男' : u.gender === 'F' ? '女' : '-'}${u.invited_by_username ? ` 邀请人：${u.invited_by_username}` : ''}`">
+              <van-cell-group inset v-for="u in users" :key="u.id" class="user-group">
+                <!-- 行内只留「状态」（已禁用/管理员），操作全部收进右侧动作面板：
+                     之前把三四个按钮排在 value 里，窄屏必然折行、挤出格子，还盖住状态标签 -->
+                <van-cell
+                  :title="u.username"
+                  :label="userMeta(u)"
+                  center
+                  :clickable="userSheetActionsFor(u).length > 0"
+                  @click="openUserSheet(u)"
+                >
                   <template #icon>
                     <van-image lazy-load round width="36" height="36" :src="u.avatar || defaultAvatar" class="user-avatar" />
                   </template>
                   <template #value>
-                    <!-- 已禁用：名单里标出来，否则和正常账号看不出区别 -->
-                    <van-tag v-if="u.is_active === false" type="danger" style="margin-right:6px">已禁用</van-tag>
-                    <van-button v-if="isSuper && u.role !== 'superadmin' && u.id !== auth.user?.id" size="small" type="warning" @click="toggleRole(u)">{{ u.role === 'admin' ? '取消管理员' : '设为管理员' }}</van-button>
-                    <van-button v-if="canToggleActive(u)" size="small" :type="u.is_active === false ? 'primary' : 'default'" style="margin-left:6px" @click="doToggleActive(u)">{{ u.is_active === false ? '恢复' : '禁用' }}</van-button>
-                    <van-button v-if="canModerateUser(u)" size="small" type="danger" style="margin-left:6px" @click="doDelete(u)">删除</van-button>
+                    <van-tag v-if="u.is_active === false" type="danger">已禁用</van-tag>
+                    <van-tag v-else-if="u.role !== 'user'" plain type="primary">{{ roleLabel(u.role) }}</van-tag>
+                  </template>
+                  <template #right-icon>
+                    <van-icon v-if="userSheetActionsFor(u).length > 0" name="ellipsis" class="user-more" />
                   </template>
                 </van-cell>
-                <van-cell v-if="isSuper && u.id !== auth.user?.id" title="重置密码" is-link @click="openResetPwd(u)" />
               </van-cell-group>
             </div>
           </van-pull-refresh>
@@ -82,6 +89,15 @@
     </van-dialog>
 
     <van-action-sheet v-model:show="showActionSheet" :actions="actionOptions" cancel-text="取消" @select="onActionSelect" />
+    <!-- 用户管理：一行的操作都在这个面板里（点行或右侧「…」打开） -->
+    <van-action-sheet
+      v-model:show="showUserSheet"
+      :title="userSheetTarget ? `管理「${userSheetTarget.username}」` : ''"
+      :actions="userSheetActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="onUserSheetSelect"
+    />
     <van-calendar v-model:show="showCalendar" type="range" color="#1989fa" :max-range="90" @confirm="onCalendarConfirm" />
     <van-dialog v-model:show="showAuditDetail" title="操作详情" :show-confirm-button="false">
       <div class="audit-detail">
@@ -154,6 +170,58 @@ function canModerateUser(u: any) {
 // 禁用/恢复：再排除超级管理员（后端也挡，避免把管理入口锁死）
 function canToggleActive(u: any) {
   return canModerateUser(u) && u.role !== 'superadmin'
+}
+
+/* ---------------- 用户操作面板 ----------------
+ * 一行的操作收进动作面板，而不是并排塞在 cell 的 value 里：
+ * 「设为管理员 + 禁用 + 删除 + 已禁用标签」在 393px 宽的屏幕上必然折行、挤出格子，
+ * 还会把状态标签挤到看不见。现在行内只留状态，操作按"点行 → 选一项"走。
+ */
+const showUserSheet = ref(false)
+const userSheetTarget = ref<any>(null)
+
+/** 副标题：ID / 邀请人。
+ *  只留最常用的两项：角色由右侧标签表达（普通用户不显示标签即是「用户」），
+ *  性别在管理员列表里用处最小 —— 少两项副标题才能稳定保持一行。 */
+function userMeta(u: any) {
+  return `ID:${u.id}` + (u.invited_by_username ? ` · 邀请人：${u.invited_by_username}` : '')
+}
+
+/** 该用户当前可执行的操作；顺序即面板顺序，破坏性操作标红 */
+function userSheetActionsFor(u: any): { name: string; value: string; color?: string }[] {
+  if (!u) return []
+  const list: { name: string; value: string; color?: string }[] = []
+  // 角色调整：只有超管能改，且不能改自己/其他超管（后端同一套规则）
+  if (isSuper.value && u.role !== 'superadmin' && u.id !== auth.user?.id) {
+    list.push({ name: u.role === 'admin' ? '取消管理员' : '设为管理员', value: 'role' })
+  }
+  if (canToggleActive(u)) {
+    list.push(u.is_active === false
+      ? { name: '恢复账号', value: 'active' }
+      : { name: '禁用账号（禁止登录）', value: 'active', color: '#ee0a24' })
+  }
+  if (isSuper.value && u.id !== auth.user?.id) list.push({ name: '重置密码', value: 'reset' })
+  if (canModerateUser(u)) list.push({ name: '删除用户', value: 'delete', color: '#ee0a24' })
+  return list
+}
+
+const userSheetActions = computed(() => userSheetActionsFor(userSheetTarget.value))
+
+function openUserSheet(u: any) {
+  // 自己那一行没有任何可执行操作：不弹空面板（行的 clickable 也已关掉）
+  if (userSheetActionsFor(u).length === 0) return
+  userSheetTarget.value = u
+  showUserSheet.value = true
+}
+
+function onUserSheetSelect(action: { value: string }) {
+  const u = userSheetTarget.value
+  if (!u) return
+  // close-on-click-action 会先关面板；确认框与请求交给原有的那几个函数
+  if (action.value === 'role') toggleRole(u)
+  else if (action.value === 'active') doToggleActive(u)
+  else if (action.value === 'reset') openResetPwd(u)
+  else if (action.value === 'delete') doDelete(u)
 }
 
 async function toggleRole(u: any) {
@@ -449,6 +517,11 @@ useResumeRefresh(() => fetchUsers(true))
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
 .user-avatar { margin-right: 10px; flex-shrink: 0; }
+/* 每个用户一块；状态标签与「…」都靠右，行高一致，不再有折行的按钮簇 */
+.user-group { margin-bottom: 4px; }
+/* 副标题固定一行：名字很长时用省略号收尾，不要折成两行把列表撑散 */
+.user-group :deep(.van-cell__label) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-more { color: #c8c9cc; font-size: 18px; }
 .audit-filter { margin-bottom: 8px; }
 .audit-count { padding: 4px 16px 8px; color: #969799; font-size: 12px; }
 .audit-scroll { padding-top: 0; }

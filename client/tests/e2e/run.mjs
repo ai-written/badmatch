@@ -15,7 +15,7 @@
  *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）」开关（默认「或」、可持久化）
  *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
  *   9 赛事详情：进行中「追加比赛」（档位来自服务端、按倍数追加、非创建者看不到入口）
- *  10 管理面板：禁用 / 恢复账号（标记、确认框、请求体、普通 admin 仍能看到已禁用账号）
+ *  10 管理面板：用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程、权限收窄的菜单
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1094,18 +1094,17 @@ async function scenarioAddMatches(page) {
   assert('不会弹出空档位列表', !(await page.ev(`!!document.querySelector('.add-hint')`)))
 }
 
-/** 场景 10：管理面板禁用 / 恢复账号 */
-async function scenarioAdminDisableUser(page) {
-  console.log('10) 管理面板：禁用 / 恢复账号')
+/** 场景 10：管理面板用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程 */
+async function scenarioAdminUserActions(page) {
+  console.log('10) 管理面板：用户行布局 + 禁用/恢复账号')
   const me = { id: 1, username: 'root', avatar: '', gender: 'M', role: 'superadmin', invite_code: '' }
   let users = [
     { id: 2, username: '张三', avatar: '', gender: 'M', role: 'user', is_active: true, invited_by: 1, invited_by_username: 'root' },
     { id: 3, username: '李四', avatar: '', gender: 'M', role: 'user', is_active: false, invited_by: 1, invited_by_username: 'root' },
   ]
-  const adminMock = (path, entry) => {
-    if (/auth\/me$/.test(path)) return me
-    if (/admin\/users$/.test(path)) return users
-    if (/admin\/selectable-users$/.test(path)) return users
+  const mockFor = (who) => (path, entry) => {
+    if (/auth\/me$/.test(path)) return who
+    if (/admin\/(users|selectable-users)$/.test(path)) return users
     if (/set-active$/.test(path)) {
       const body = JSON.parse(entry?.body || '{}')
       users = users.map(u => (u.id === body.user_id ? { ...u, is_active: body.is_active } : u))
@@ -1115,7 +1114,7 @@ async function scenarioAdminDisableUser(page) {
     if (/has-users/.test(path)) return { exists: true }
     return {}
   }
-  await page.enableMock(adminMock)
+  await page.enableMock(mockFor(me))
   await page.setToken()
   await page.goto('/admin', 2400)
 
@@ -1123,25 +1122,55 @@ async function scenarioAdminDisableUser(page) {
     const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes(${JSON.stringify(name)}))
     return cell ? (cell.textContent || '').replace(/\\s+/g, ' ').trim() : ''
   })()`)
-  const clickBtnIn = (name, text) => page.ev(`(() => {
+  const clickRow = (name) => page.ev(`(() => {
     try {
       const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes(${JSON.stringify(name)}))
       if (!cell) return 'NOCELL'
-      const b = [...cell.querySelectorAll('.van-button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(text)})
-      if (!b) return 'NOBTN'
-      b.click(); return 'OK'
+      cell.click(); return 'OK'
     } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+  const sheetTitle = () => page.ev(`(document.querySelector('.van-action-sheet__header')?.textContent || '').trim()`)
+  const sheetActions = () => page.ev(`[...document.querySelectorAll('.van-action-sheet__item')].map(e => (e.textContent || '').trim())`)
+  const sheetVisible = () => page.ev(`[...document.querySelectorAll('.van-action-sheet')].some(el => getComputedStyle(el).display !== 'none')`)
+  const sheetActionClick = async (text) => {
+    const r = await page.ev(`(() => {
+      try {
+        const el = [...document.querySelectorAll('.van-action-sheet__item')].find(e => (e.textContent || '').trim() === ${JSON.stringify(text)})
+        if (!el) return 'NOTFOUND'
+        el.click(); return 'OK'
+      } catch (e) { return 'ERR:' + (e && e.message) } })()`)
+    await sleep(400)
+    return r
+  }
   const toast = () => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
   const setActivePosts = () => page.requests.filter((r) => r.method === 'POST' && /set-active$/.test(r.path))
+  const moreIcons = () => page.ev(`document.querySelectorAll('.user-more').length`)
 
-  assert('已禁用的账号在名单里标出来', (await rowText('李四')).includes('已禁用'), await rowText('李四'))
-  assert('可用账号有「禁用」按钮', (await rowText('张三')).includes('禁用'), await rowText('张三'))
-  assert('已禁用账号有「恢复」按钮', (await rowText('李四')).includes('恢复'))
+  // ---- 布局：行内只留状态，不再堆按钮 ----
+  assert('已禁用的账号在行内标出来', (await rowText('李四')).includes('已禁用'), await rowText('李四'))
+  assert('行内不再有按钮簇（全部收进动作面板）',
+    (await page.ev(`document.querySelectorAll('.van-cell .van-button').length`)) === 0,
+    `实际 ${await page.ev(`document.querySelectorAll('.van-cell .van-button').length`)}`)
+  assert('每一行右侧有「…」入口', (await moreIcons()) === 2, `实际 ${await moreIcons()}`)
+  assert('行内不再有单独一行「重置密码」', !(await rowText('张三')).includes('重置密码'))
 
-  // 先取消一次：不能只靠「点了就禁用」
-  page.requests = []
-  assert('点「禁用」', (await clickBtnIn('张三', '禁用')) === 'OK')
+  // ---- 超管的面板：四项，破坏性操作标红 ----
+  assert('点整行能打开操作面板', (await clickRow('张三')) === 'OK')
   await sleep(500)
+  assert('面板标题写明是谁', (await sheetTitle()).includes('张三'), await sheetTitle())
+  const actions = await sheetActions()
+  assert('超管看到全部四项（顺序固定）',
+    JSON.stringify(actions) === JSON.stringify(['设为管理员', '禁用账号（禁止登录）', '重置密码', '删除用户']),
+    JSON.stringify(actions))
+  assert('破坏性操作标红', await page.ev(`(() => {
+    const el = [...document.querySelectorAll('.van-action-sheet__item')].find(e => (e.textContent || '').includes('禁用账号'))
+    if (!el) return false
+    const color = el.style.color || el.querySelector('.van-action-sheet__name')?.style.color || ''
+    return /238/.test(color)
+  })()`))
+
+  // ---- 取消不生效 ----
+  page.requests = []
+  assert('点「禁用账号」', (await sheetActionClick('禁用账号（禁止登录）')) === 'OK')
   const d = await page.dialog()
   assert('先弹确认框（标题写明是禁用）', d?.标题 === '确认禁用', d?.标题)
   assert('确认框写明后果（无法登录、数据保留）',
@@ -1150,9 +1179,11 @@ async function scenarioAdminDisableUser(page) {
   await sleep(400)
   assert('取消后不发请求', setActivePosts().length === 0, `实际 ${setActivePosts().length}`)
 
+  // ---- 确认禁用 ----
   page.requests = []
-  assert('再次点「禁用」', (await clickBtnIn('张三', '禁用')) === 'OK')
+  assert('再次打开面板', (await clickRow('张三')) === 'OK')
   await sleep(500)
+  assert('再点「禁用账号」', (await sheetActionClick('禁用账号（禁止登录）')) === 'OK')
   await page.confirmDialog()
   const posts = setActivePosts()
   assert('恰好 1 个 set-active 请求', posts.length === 1, `实际 ${posts.length}`)
@@ -1160,41 +1191,48 @@ async function scenarioAdminDisableUser(page) {
     /"user_id":2/.test(posts[0]?.body || '') && /"is_active":false/.test(posts[0]?.body || ''),
     posts[0]?.body)
   assert('提示已禁用', (await toast()) === '已禁用', await toast())
-  assert('刷新后该用户显示为已禁用', (await rowText('张三')).includes('已禁用'), await rowText('张三'))
+  assert('刷新后该行显示已禁用', (await rowText('张三')).includes('已禁用'), await rowText('张三'))
+  assert('面板已关闭', (await sheetVisible()) === false)
 
-  // 恢复
-  page.requests = []
-  assert('点「恢复」', (await clickBtnIn('李四', '恢复')) === 'OK')
+  // ---- 恢复 ----
+  assert('打开李四的面板', (await clickRow('李四')) === 'OK')
   await sleep(500)
-  const d2 = await page.dialog()
-  assert('恢复也要确认', d2?.标题 === '确认恢复', d2?.标题)
+  assert('已禁用账号的面板里是「恢复账号」',
+    (await sheetActions()).includes('恢复账号'), JSON.stringify(await sheetActions()))
+  page.requests = []
+  assert('点「恢复账号」', (await sheetActionClick('恢复账号')) === 'OK')
   await page.confirmDialog()
   const posts2 = setActivePosts()
   assert('恢复请求 is_active=true',
     posts2.length === 1 && /"is_active":true/.test(posts2[0]?.body || ''), posts2[0]?.body)
   assert('提示已恢复', (await toast()) === '已恢复', await toast())
 
-  // 普通 admin：名单请求必须带 include_disabled=true，
-  // 否则一旦禁用了自己邀请的人，就再也找不到、无法恢复
-  await page.enableMock((path) => {
-    if (/auth\/me$/.test(path)) return { ...me, id: 9, username: 'adm', role: 'admin' }
-    if (/admin\/selectable-users$/.test(path)) return users
-    if (/unread-count/.test(path)) return { count: 0 }
-    if (/has-users/.test(path)) return { exists: true }
-    return {}
-  })
+  // ---- 普通 admin：只能管自己邀请的普通用户，菜单也随之收窄 ----
+  users = [
+    { id: 2, username: '张三', avatar: '', gender: 'M', role: 'user', is_active: false, invited_by: 9, invited_by_username: 'adm' },
+    { id: 3, username: '李四', avatar: '', gender: 'M', role: 'user', is_active: true, invited_by: 1, invited_by_username: 'root' },
+  ]
+  await page.enableMock(mockFor({ ...me, id: 9, username: 'adm', role: 'admin' }))
   await page.goto('/admin', 2400)
   const listReqs = page.requests.filter((r) => r.path === '/api/auth/admin/selectable-users')
   assert('普通 admin 的名单请求带上 include_disabled=true',
     listReqs.some((r) => (r.search || '').includes('include_disabled=true')),
     JSON.stringify(listReqs.map((r) => r.search)))
-  // 此时张三已被禁用（李四在前面被恢复了），他必须仍然出现在名单里，否则无法恢复
   assert('普通 admin 也能看到已禁用账号（才能恢复）', (await rowText('张三')).includes('已禁用'), await rowText('张三'))
-  assert('普通 admin 看不到超管专属的重置密码入口', !(await rowText('张三')).includes('重置密码'))
+  assert('别人邀请的用户没有操作入口', (await moreIcons()) === 1, `实际 ${await moreIcons()}`)
+  assert('点「李四」那一行不会弹面板',
+    (await clickRow('李四')) === 'OK' && (await sheetVisible()) === false)
+  assert('打开自己邀请的用户', (await clickRow('张三')) === 'OK')
+  await sleep(500)
+  const adminActions = await sheetActions()
+  assert('普通 admin 的菜单里没有超管专属项（角色 / 重置密码）',
+    !adminActions.includes('设为管理员') && !adminActions.includes('重置密码'), JSON.stringify(adminActions))
+  assert('普通 admin 能恢复 / 删除自己邀请的人',
+    adminActions.includes('恢复账号') && adminActions.includes('删除用户'), JSON.stringify(adminActions))
 }
 
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminDisableUser]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)
