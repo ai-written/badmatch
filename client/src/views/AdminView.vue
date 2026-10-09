@@ -143,9 +143,13 @@ async function fetchUsers(skipLoading = false) {
   users.value = res.data
 }
 
-// 能否对该用户执行管理操作（与原「删除」按钮的条件一致，后端 delete_user 同一套规则）
+// 能否对该用户执行管理操作。后端规则：超管可操作任意人；普通 admin 只能操作
+// 自己邀请来的**普通用户**（role==='user'）—— 少了后半个条件就会出现
+// "按钮点得动、接口必 403"（删除接口也一样，所以这里一并收紧）
 function canModerateUser(u: any) {
-  return u.id !== auth.user?.id && (isSuper.value || u.invited_by === auth.user?.id)
+  if (u.id === auth.user?.id) return false
+  if (isSuper.value) return true
+  return u.invited_by === auth.user?.id && u.role === 'user'
 }
 // 禁用/恢复：再排除超级管理员（后端也挡，避免把管理入口锁死）
 function canToggleActive(u: any) {
@@ -163,7 +167,8 @@ async function toggleRole(u: any) {
 async function doToggleActive(u: any) {
   const disable = u.is_active !== false
   const message = disable
-    ? `禁用后「${u.username}」无法登录，也不会再被选为参赛人员/房主；比赛记录与战绩全部保留。确定禁用？`
+    ? `禁用后「${u.username}」无法登录，也不会再被选为参赛人员；比赛记录与战绩全部保留。`
+      + `他名下的赛事房主会自动转给其他选手。确定禁用？`
     : `恢复后「${u.username}」可以重新登录。确定恢复？`
   try {
     await showConfirmDialog({ title: disable ? '确认禁用' : '确认恢复', message })

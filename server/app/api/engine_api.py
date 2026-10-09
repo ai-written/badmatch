@@ -272,7 +272,12 @@ async def extra_match_options(
 
     players = await _active_player_ids(db, tournament_id)
     n = len(players)
-    current = tournament.total_matches or 0
+    # 「现有场次」按库里真实的 matches 行数算，不用 tournaments.total_matches：
+    # 那个字段在退赛重排后不写回（重排只删未开打的轮次、已结束的保留），
+    # 拿它当前值会让弹层显示、100 场上限和审计里的数字都偏小
+    current = (await db.execute(
+        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+    )).scalar() or 0
     if tournament.status != TournamentStatus.ONGOING or n < 4:
         return {"players": n, "step": 0, "current_total": current,
                 "remaining": 0, "options": []}
@@ -337,7 +342,12 @@ async def add_matches(
             status_code=400,
             detail=f"当前 {n} 人在场，追加场次必须是 {step} 的倍数，否则每人场次会不一样",
         )
-    current = tournament.total_matches or 0
+    # 「现有场次」= 库里真实的 matches 行数（不是 tournaments.total_matches）：
+    # 退赛重排只删未开打的轮次、保留已结束的，且从不写回该字段；拿它当"现有场次"
+    # 会让上限判断与界面/审计里的数字都偏小（实际可超出 100 场）
+    current = (await db.execute(
+        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+    )).scalar() or 0
     if current + body.matches > MAX_TOTAL_MATCHES:
         raise HTTPException(
             status_code=400,
@@ -680,6 +690,14 @@ async def withdraw_player(
             type="schedule_changed",
             message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
         ))
+
+    # 把重排后的真实总场次写回 tournaments.total_matches：
+    # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，
+    # 也不再等于原来的值。不写回的话，赛事详情页的「共 N 场」会一直停在旧数字，
+    # 而追加比赛/上限判断（另一处已改成直接数 matches）也会被带偏。
+    tournament.total_matches = (await db.execute(
+        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+    )).scalar() or new_M
 
     # 先提交再广播再审计：这里重排了赛程、通知了原裁判，订阅者收到后若立刻拉赛程，
     # 未提交的话会读到重排前的旧轮次；审计随后（见 auth.update_profile 的说明）

@@ -79,7 +79,10 @@ async def register(
             raise HTTPException(status_code=429, detail="邀请码尝试次数过多，请稍后再试")
         inviter = await db.execute(select(User).where(User.invite_code == req.invite_code))
         inviter_user = inviter.scalar_one_or_none()
-        if not inviter_user:
+        # 已禁用的账号不能再拿自己的邀请码拉人：否则"禁用"就漏了一个还能继续产生影响
+        # 的入口，而且新账号的 invited_by 会指向一个禁用账号（普通 admin 谁也管不了，
+        # 只有超管能处理）。文案与"邀请码无效"保持一致，不额外暴露是谁被禁用了。
+        if not inviter_user or not inviter_user.is_active:
             invite_limiter.record_failure(ip)
             raise HTTPException(status_code=400, detail="邀请码无效")
         invited_by_id = inviter_user.id
@@ -932,6 +935,120 @@ async def set_role(
     return {"ok": True, "user_id": target_user.id, "role": target_user.role}
 
 
+async def _transfer_ownership_from(db: AsyncSession, user_id: int) -> int:
+    """把 user_id 名下的「报名中 / 进行中」赛事房主转给一个未禁用的选手。
+
+    禁用某人时用：他登录不进来，房主徽标却还挂在他名下，而「代别人退赛」只有房主能做。
+    候选人规则与「房主退赛」一致（在场/已报名 + 账号可用）；一个都找不到就保持原样
+    （开始比赛、追加比赛、提前结束这些管理员也能做，不至于彻底卡死）。
+    """
+    from app.models.tournament import (
+        Registration, Tournament, TournamentStatus, PlayerStats,
+    )
+
+    rows = await db.execute(
+        select(Tournament).where(
+            Tournament.creator_id == user_id,
+            Tournament.status.in_([TournamentStatus.OPEN, TournamentStatus.ONGOING]),
+        )
+    )
+    moved = 0
+    for t in rows.scalars().all():
+        if t.status == TournamentStatus.ONGOING:
+            # 进行中：优先在场选手里还没被禁用的
+            candidate_stmt = (
+                select(PlayerStats.user_id)
+                .join(User, User.id == PlayerStats.user_id)
+                .where(
+                    PlayerStats.tournament_id == t.id,
+                    PlayerStats.is_active == True,
+                    PlayerStats.user_id != user_id,
+                    User.is_active == True,
+                )
+                .order_by(PlayerStats.id)
+                .limit(1)
+            )
+        else:
+            # 报名中：还没有 PlayerStats，用活跃报名记录
+            candidate_stmt = (
+                select(Registration.user_id)
+                .join(User, User.id == Registration.user_id)
+                .where(
+                    Registration.tournament_id == t.id,
+                    Registration.is_active == True,
+                    Registration.user_id != user_id,
+                    User.is_active == True,
+                )
+                .order_by(Registration.created_at, Registration.id)
+                .limit(1)
+            )
+        candidate = (await db.execute(candidate_stmt)).scalar_one_or_none()
+        if candidate:
+            t.creator_id = candidate
+            moved += 1
+    return moved
+
+
+async def _notify_creators_about_disabled(db: AsyncSession, user_id: int, username: str) -> int:
+    """给「被禁用者仍留在名单/赛程里」的赛事房主发站内消息。
+
+    禁用刻意不动报名与 PlayerStats（那是「退赛」的语义），所以他还留在名单和已排好的
+    赛程里：报名中的赛事在开赛时会自动取消他的报名，进行中的则需要房主用「退赛」
+    把他移出（未开打的轮次会自动重排）。不提醒的话，房主只会看到名单里多了一个
+    不来了的人，不知道该做什么。
+    """
+    from app.models.round import Notification
+    from app.models.tournament import (
+        Registration, Tournament, TournamentStatus, PlayerStats,
+    )
+
+    affected: dict[int, str] = {}
+    ongoing = await db.execute(
+        select(Tournament.id, Tournament.title)
+        .join(PlayerStats, PlayerStats.tournament_id == Tournament.id)
+        .where(
+            PlayerStats.user_id == user_id,
+            PlayerStats.is_active == True,
+            Tournament.status == TournamentStatus.ONGOING,
+        )
+    )
+    for tid, title in ongoing.all():
+        affected[tid] = title
+    open_regs = await db.execute(
+        select(Tournament.id, Tournament.title)
+        .join(Registration, Registration.tournament_id == Tournament.id)
+        .where(
+            Registration.user_id == user_id,
+            Registration.is_active == True,
+            Tournament.status == TournamentStatus.OPEN,
+        )
+    )
+    for tid, title in open_regs.all():
+        affected.setdefault(tid, title)
+    if not affected:
+        return 0
+
+    creators = await db.execute(
+        select(Tournament.id, Tournament.creator_id).where(Tournament.id.in_(list(affected)))
+    )
+    notified = 0
+    for tid, creator_id in creators.all():
+        # 房主就是他自己的情况在 _transfer_ownership_from 之后已经不存在了，
+        # 这里再兜一层：不给自己发消息
+        if not creator_id or creator_id == user_id:
+            continue
+        db.add(Notification(
+            user_id=creator_id,
+            tournament_id=tid,
+            type="player_disabled",
+            message=(f"选手「{username}」已被管理员禁用，但仍留在赛事「{affected[tid]}」的"
+                     f"名单/赛程里。报名中的赛事会在开赛时自动取消他的报名；"
+                     f"进行中的赛事请用「退赛」把他移出（未开打的轮次会自动重排）。"),
+        ))
+        notified += 1
+    return notified
+
+
 @router.post("/admin/set-active")
 async def set_user_active(
     body: AdminSetActive,
@@ -949,7 +1066,11 @@ async def set_user_active(
     """
     if admin.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403)
-    u = await db.execute(select(User).where(User.id == body.user_id))
+    # 行锁：与「状态没变就不动 token_version」的判断配合，避免两个管理员并发
+    # 下发相反操作时都通过判断、终态取决于落库顺序（界面显示与实际不一致）
+    u = await db.execute(
+        select(User).where(User.id == body.user_id).with_for_update()
+    )
     user = u.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -971,6 +1092,7 @@ async def set_user_active(
     from datetime import datetime
     from app.models.round import Match, MatchStatus
 
+    username = user.username
     user.is_active = body.is_active
     if not body.is_active:
         # 禁用即失效：自增版本号让所有已签发的 token 立刻作废，
@@ -991,22 +1113,34 @@ async def set_user_active(
         )
         released_count = released.rowcount or 0
         await db.flush()
+        # 他可能是房主：把赛事交给一个未禁用的选手，否则房主徽标挂在一个登录不进来
+        # 的人名下，而且"代别人退赛"这类只有房主能做的操作没人能做
+        ownership_transferred = await _transfer_ownership_from(db, user.id)
+        # 他还留在名单/赛程里 —— 提醒房主怎么处理（开赛前没有别的入口能把别人移出）
+        notified = await _notify_creators_about_disabled(db, user.id, username)
         from app.core.websocket import manager
         from app.core.ws_ticket import revoke_user
         await manager.kick_user(user.id)
         revoke_user(user.id)
     else:
         released_count = 0
+        ownership_transferred = 0
+        notified = 0
         await db.flush()
 
-    username = user.username
     is_active = user.is_active
     await db.commit()
     await audit(
         user=admin,
         action="admin_disable_user" if not is_active else "admin_enable_user",
         target_type="user", target_id=user.id,
-        detail={"username": username, "released_referee_matches": released_count},
+        detail={
+            "username": username,
+            "released_referee_matches": released_count,
+            # 禁用时顺带做了两件"善后"：转走他名下的赛事房主、给受影响的房主发提醒
+            "ownership_transferred": ownership_transferred,
+            "notified_tournaments": notified,
+        },
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "changed": True, "user_id": user.id, "is_active": is_active}
