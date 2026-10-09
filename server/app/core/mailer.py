@@ -84,17 +84,27 @@ def send_tournament_invite(
     start_date: str,
     location: str,
     url: str,
+    court: str | None = None,
 ) -> bool:
+    """预选参赛的邀请邮件。
+
+    court 是「场地号」（赛事的第一个/全部场地名）。它和地点一样是到场必需信息，
+    邮件里少了它，收件人还得点进详情页才能确认在哪个场 —— 所以有就展示。
+    和其他字段一样必须 escape：场地号是创建者随手填的自由文本。
+    """
     date_only = start_date[:10]
     title_esc = escape(tournament_title)
     location_esc = escape(location or "待定")
     url_esc = escape(url)
+    # 没有场地号的赛事（如还没定场）不显示这一行，而不是显示「场地号：待定」
+    court_line = f"<p><strong>场地号：</strong>{escape(court)}</p>" if court else ""
     html = (
         f"<div style='font-family:sans-serif;line-height:1.6'>"
         f"<h2>您已被预选加入赛事</h2>"
         f"<p><strong>赛事名称：</strong>{title_esc}</p>"
         f"<p><strong>开始时间：</strong>{start_date}</p>"
         f"<p><strong>地点：</strong>{location_esc}</p>"
+        f"{court_line}"
         f"<p>点击查看赛事详情：<a href='{url_esc}'>{url_esc}</a></p>"
         f"<p>如果不需要参加，可在赛事详情页取消报名。</p>"
         f"</div>"

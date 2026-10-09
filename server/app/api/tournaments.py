@@ -251,6 +251,9 @@ async def _create_tournament(
 
     settings = get_settings()
     start_text = data.start_date.strftime("%Y-%m-%d %H:%M")
+    # 邮件里带上场地号（与赛事详情页「场地号X」同一来源：赛事的第一个/全部场地名）。
+    # 场地号是创建者随手填的自由文本，可能为空 —— 空就不显示那一行，交给 mailer 判断。
+    court_text = "、".join(c.name for c in data.courts if c.name) or None
     for uid in preselected:
         db.add(Registration(tournament_id=t.id, user_id=uid, is_active=True))
         db.add(Notification(
@@ -269,6 +272,7 @@ async def _create_tournament(
                 start_text,
                 data.location,
                 invite_url,
+                court_text,
             )
             if email_tasks is None:
                 background_tasks.add_task(send_tournament_invite, *task_args)
