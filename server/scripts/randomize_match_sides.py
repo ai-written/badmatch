@@ -61,6 +61,18 @@ from sqlalchemy import case, select, update  # noqa: E402
 
 from app.core.audit import audit  # noqa: E402
 from app.core.database import async_session_factory, engine  # noqa: E402
+
+# 独立脚本必须把这些模型模块**全部导入**：SQLAlchemy 的关系是按类名字符串解析的
+# （Match.referee -> "User"、Tournament.creator -> "User"、Round.tournament -> "Tournament"…），
+# 只导入"用到的表"，第一次 execute 配置 mapper 时就会报
+#   InvalidRequestError: expression 'User' failed to locate a name
+# （应用侧不会有这个问题：main.py 把 routers 全导进来，模型顺带全注册了）。
+# 用 `import app.models.x` 而非 `from app.models import x`，避免 `audit` 模块名
+# 覆盖上面这个 core.audit 的 audit 函数。
+import app.models.user        # noqa: E402,F401
+import app.models.tournament  # noqa: E402,F401
+import app.models.round       # noqa: E402,F401
+
 from app.models.round import (  # noqa: E402
     Match, MatchStatus, MatchSupport, RoundPairing,
 )
