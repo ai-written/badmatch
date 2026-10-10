@@ -25,7 +25,10 @@ class Round(Base):
     __tablename__ = "rounds"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
+    # 索引见 core/startup_migration._FK_INDEXES（老库由启动迁移补同名索引）
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id"), nullable=False, index=True
+    )
     round_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[RoundStatus] = mapped_column(
         SAEnum(RoundStatus), default=RoundStatus.PENDING
@@ -43,7 +46,8 @@ class RoundPairing(Base):
     __tablename__ = "round_pairings"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    round_id: Mapped[int] = mapped_column(ForeignKey("rounds.id"), nullable=False)
+    # 索引见 core/startup_migration._FK_INDEXES（老库由启动迁移补同名索引）
+    round_id: Mapped[int] = mapped_column(ForeignKey("rounds.id"), nullable=False, index=True)
     player_a_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     player_b_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
 
@@ -61,8 +65,14 @@ class Match(Base):
     __tablename__ = "matches"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
-    round_id: Mapped[int] = mapped_column(ForeignKey("rounds.id"), nullable=False)
+    # index=True：这一列是全站最常见的过滤条件（对阵表、场次统计、赛事详情页的
+    # pending_referee_count、开赛/结束时的判定都按它查）。早期建表时外键列都没有索引，
+    # 只能顺序扫描。新库由 create_all 建索引，老库由 core/startup_migration._FK_INDEXES
+    # 补同名索引（两边名字必须一致，否则会出现两条等价索引）。
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id"), nullable=False, index=True
+    )
+    round_id: Mapped[int] = mapped_column(ForeignKey("rounds.id"), nullable=False, index=True)
     pairing_a_id: Mapped[int] = mapped_column(ForeignKey("round_pairings.id"), nullable=False)
     pairing_b_id: Mapped[int] = mapped_column(ForeignKey("round_pairings.id"), nullable=False)
     court_id: Mapped[int | None] = mapped_column(ForeignKey("courts.id"), nullable=True)
@@ -103,8 +113,11 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
+    # 索引见 core/startup_migration._FK_INDEXES（老库由启动迁移补同名索引）
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id"), nullable=False, index=True
+    )
     type: Mapped[str] = mapped_column(String(32), default="schedule_changed")
     message: Mapped[str] = mapped_column(String(512))
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)

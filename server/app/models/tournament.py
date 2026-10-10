@@ -67,8 +67,12 @@ class PlayerStats(Base):
     __tablename__ = "player_stats"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    # 两列都经常作为过滤条件：积分榜按 tournament_id 查、个人战绩按 user_id 查。
+    # 加索引的理由与名字约定见 core/startup_migration._FK_INDEXES（老库由启动迁移补）
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id"), nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     matches_played: Mapped[int] = mapped_column(Integer, default=0)
     matches_won: Mapped[int] = mapped_column(Integer, default=0)
     matches_lost: Mapped[int] = mapped_column(Integer, default=0)
