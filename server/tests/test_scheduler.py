@@ -1,4 +1,5 @@
 """engine/scheduler 单元测试。"""
+import random
 from collections import Counter
 
 import pytest
@@ -11,6 +12,7 @@ from app.engine.scheduler import (
     compute_rounds,
     fairness_step,
     generate_schedule,
+    shuffle_sides,
 )
 
 
@@ -279,3 +281,53 @@ def test_new_batch_keeps_equal_play_with_history():
                 played[p] += 1
         assert len(played) == n, f"n={n}：有人一场没打 {sorted(set(players) - set(played))}"
         assert len(set(played.values())) == 1, f"n={n} 带历史追加后场次不等：{dict(played)}"
+
+
+# ---- 落库前的左右随机翻边：抹掉「名单第一人永远站左队」 ----
+
+def test_shuffle_sides_only_swaps_the_two_teams():
+    """翻边只改 A/B 队归属：对阵双方、场次顺序、场地/时间槽都必须原样。"""
+    schedule = generate_schedule(list(range(8)), 22)
+    shuffled = shuffle_sides(schedule, random.Random(20261010))
+
+    assert len(shuffled) == len(schedule)
+    for (t1, t2, court, slot), (u1, u2, court2, slot2) in zip(schedule, shuffled):
+        assert {t1, t2} == {u1, u2}, "对阵双方必须保持不变"
+        assert (u1, u2) in ((t1, t2), (t2, t1)), "只能整队对调，不能拆散搭档"
+        assert (court, slot) == (court2, slot2), "场地/时间槽不能被翻边改掉"
+
+
+def test_shuffle_sides_flips_some_but_not_all():
+    """既不能全翻也不能全不翻 —— 两者都是另一种「固定」。"""
+    schedule = generate_schedule(list(range(8)), 22)
+    shuffled = shuffle_sides(schedule, random.Random(1))
+    flipped = sum(1 for a, b in zip(schedule, shuffled) if (b[0], b[1]) == (a[1], a[0]))
+    assert 0 < flipped < len(schedule), f"翻边数异常：{flipped}/{len(schedule)}"
+
+
+def test_shuffle_sides_removes_first_player_left_bias():
+    """名单第一人不再永远站左队；多种子平均后应接近 50%。
+
+    不翻边时这个比例是 100%（见 scheduler.shuffle_sides 的说明），所以这里看的是
+    「平均」而不是单次：单次掷硬币本来就可能偏，重要的是不再有系统性偏置。
+    """
+    players = list(range(8))
+    schedule = generate_schedule(players, 22)
+    left = plays = 0
+    for seed in range(200):
+        for (t1, t2, *_rest) in shuffle_sides(schedule, random.Random(seed)):
+            if players[0] in t1 or players[0] in t2:
+                plays += 1
+            if players[0] in t1:
+                left += 1
+    ratio = left / plays
+    assert 0.45 <= ratio <= 0.55, f"名单第一人站左队仍系统性偏置：{ratio:.3f}（{left}/{plays}）"
+
+
+def test_shuffle_sides_edge_cases():
+    """空赛程不炸；rng 缺省时用模块级 random，结果仍是合法对阵。"""
+    assert shuffle_sides([]) == []
+    schedule = generate_schedule(list(range(6)), 3)
+    for (u1, u2, *_), (t1, t2, *_) in zip(schedule, shuffle_sides(schedule)):
+        assert {u1, u2} == {t1, t2}
+

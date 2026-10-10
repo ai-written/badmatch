@@ -17,7 +17,7 @@ from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatu
 from app.models.round import MatchSupport
 from pydantic import BaseModel
 from app.engine.scheduler import (
-    generate_schedule, compute_match_count, compute_rounds,
+    generate_schedule, compute_match_count, compute_rounds, shuffle_sides,
     fairness_step, _pair_key, _match_key,
 )
 
@@ -139,6 +139,9 @@ async def start_tournament(
         M = adjusted_M
 
     matches_per_round = 2
+    # 左右随机：排程本身是确定性的（见 scheduler），并列时总是让名单靠前的人进 A 队，
+    # 不翻边的话名单第一人会在自己每一场里都站左边。翻边只改 A/B 队归属，不动对阵。
+    schedule = shuffle_sides(schedule)
     rounds_data = compute_rounds(schedule, matches_per_round)
 
     for round_idx, round_matches in enumerate(rounds_data, start=1):
@@ -375,7 +378,7 @@ async def add_matches(
     )
     last_num = last_num_row.scalar() or 0
 
-    rounds_data = compute_rounds(schedule, 2)
+    rounds_data = compute_rounds(shuffle_sides(schedule), 2)
     for round_idx, round_matches in enumerate(rounds_data, start=1):
         r = Round(tournament_id=tournament_id, round_number=last_num + round_idx)
         db.add(r)
@@ -648,6 +651,9 @@ async def withdraw_player(
     else:
         new_M = compute_match_count(remaining_count)
     new_schedule = generate_schedule(remaining, new_M, partner_history)
+    # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
+    # 的确定性偏置（remaining 仍是按报名顺序的名单），不翻边就会把偏置带进新赛程
+    new_schedule = shuffle_sides(new_schedule)
     new_rounds_data = compute_rounds(new_schedule, 2)
 
     last_num_result = await db.execute(

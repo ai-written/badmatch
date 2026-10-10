@@ -277,6 +277,8 @@ const ACTION_LABELS: Record<string, string> = {
   admin_disable_user: '禁用用户', admin_enable_user: '恢复用户',
   tournament_delete: '删除赛事', tournament_start: '开始赛事', tournament_end: '结束赛事',
   tournament_add_matches: '追加比赛',
+  // 由运维脚本 scripts/randomize_match_sides.py 写入（存量赛事对阵左右随机翻边）
+  match_sides_randomized: '重置对阵左右',
   tournament_withdraw: '退赛', registration: '报名', cancel_registration: '取消报名',
   round_start: '开始轮次', match_force_end: '结束比赛', match_score_update: '记分',
   match_swap_sides: '交换场地',

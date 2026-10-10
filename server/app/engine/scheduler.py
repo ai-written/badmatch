@@ -165,6 +165,27 @@ def generate_schedule(players, total_matches, partner_history=None,
     return best
 
 
+def shuffle_sides(schedule, rng=None):
+    """把排好的对阵左右对调：**谁跟谁打完全不变**，只改哪一队算 A 队（界面左侧）。
+
+    为什么需要它：`_greedy_build` 打分并列时取「先枚举到的那一组」，而 `_splits`
+    的第一种分法总是把组合首位的人放进 A 队；名单第一人（报名最早的）因此在
+    **自己参加的每一场**里都站左队 —— 实测 8 人 28 场：14/14 场排在最左，
+    界面上看就是「有一个人一直在最左边」。名单靠前的人也有同向的梯度偏置
+    （8 人 28 场：第 2/3 名 8/14、第 4/5 名 6/14…），所以这里对**每一场**独立
+    掷一次硬币，而不是「只翻含某人的场次」—— 后者只是把偏置转给名单里的下一个人。
+
+    rng 缺省用模块级 random（真随机，每次开赛的左右都不同）；传
+    `random.Random(seed)` 可固定下来便于复现/测试。返回新列表，不原地修改。
+    """
+    if rng is None:
+        rng = random
+    return [
+        (t2, t1, court, slot) if rng.getrandbits(1) else (t1, t2, court, slot)
+        for t1, t2, court, slot in schedule
+    ]
+
+
 def _greedy_build(players, total_matches, target, partner_history, rng=None,
                   opponent_history=None, match_history=None):
     played = {p: 0 for p in players}
