@@ -1,13 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from datetime import datetime
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.api.matches import load_writable_tournament
+from app.api.engine_api import _active_player_ids
+from app.engine.referee_assign import assign_referees, can_assign
 from app.models.user import User
-from app.models.round import Match, MatchStatus, Notification
+from app.models.round import Match, MatchStatus, Notification, Round, RoundPairing
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["referee"])
 
@@ -114,3 +117,172 @@ async def release_referee(
     await audit(user=user, action="referee_release", target_type="match", target_id=match_id,
                 detail={"tournament_id": tournament_id}, ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
+
+
+class AutoAssignBody(BaseModel):
+    """scope:
+    - current：只分「当前要打的那一批」——对阵表筛选行那个按钮，任何在场选手可点；
+    - all：把**全部**还没打完、还没裁判的场次一次分完——赛事详情页「一次性分配裁判」，
+      房主/管理员/超管可点（他们可能不是参赛选手）。
+
+    注意：不带 body / `null` / `{}` 都会当成 current（后端不区分「没传」和「传了空」）；
+    这个参数只认 body，写成 `?scope=all` 是无效的（会被忽略）。
+    """
+    scope: str = "current"
+
+
+@router.post("/auto-assign-referees")
+async def auto_assign_referees(
+    tournament_id: int,
+    request: Request,
+    body: AutoAssignBody | None = None,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """随机指派裁判（手动点一次）。
+
+    规则：
+    - scope=current：最早一个**还有比赛没打完**的轮次；scope=all：全部这样的轮次都分完；
+    - 候选人 = 本赛事在场选手（未退赛、账号未禁用）里**不参加该场**的人，**真随机**
+      （不按执裁次数加权）—— 注意同一批里另一场的选手也算"不在这一场"，8 人局里
+      两场互为对方的候选人池；
+    - **同一批里**一个人最多当一场的裁判（人不能分身；跨批次当然可以重复当）；
+    - **只填空缺**：已经有在任裁判的场次不动（想换裁判请用「顶替」/认领）；
+    - 在场人不够（例如在场只剩这一场的 4 人）时跳过该场，并在响应里告诉前端有几场跳过。
+    """
+    # body 缺省（不带 body 的 POST）就是 scope=current：对阵表那个按钮原来就没带 body，
+    # 参数写成 `AutoAssignBody | None = None`（同 engine_api.start_tournament 的写法），
+    # 避免 FastAPI 把 body 当必填而回 422
+    scope = body.scope if body else "current"
+    if scope not in ("current", "all"):
+        raise HTTPException(status_code=400, detail="scope 只能是 current 或 all")
+    tournament = await load_writable_tournament(db, tournament_id)   # 必须进行中；已结束=只读
+
+    candidates = await _active_player_ids(db, tournament_id)
+    if not can_assign(scope, user_id=user.id, role=user.role,
+                      creator_id=tournament.creator_id, candidate_ids=candidates):
+        raise HTTPException(status_code=403, detail=(
+            "只有房主、管理员或超级管理员可以一次性分配裁判" if scope == "all"
+            else "只有本赛事在场选手可以分配裁判"))
+
+    r_stmt = (
+        select(Round)
+        .where(Round.tournament_id == tournament_id)
+        .where(Round.matches.any(Match.status != MatchStatus.FINISHED))
+        .order_by(Round.round_number)
+    )
+    if scope == "current":
+        r_stmt = r_stmt.limit(1)
+    rounds_to_do = (await db.execute(r_stmt)).scalars().all()
+    if not rounds_to_do:
+        return {"ok": True, "scope": scope, "assigned": [], "skipped": [],
+                "message": "没有还没打完的场次"}
+
+    # 「第 N 场」的编号必须与前端 withGlobalIndex 一致：轮次顺序 + 轮内 Match.id 顺序。
+    # 界面上只有「第 N 场」、没有「第 N 轮」（轮次只是内部概念，对阵表并不显示），
+    # 所以所有面向用户的文案一律用场次编号。
+    id_rows = await db.execute(
+        select(Match.id).join(Round, Round.id == Match.round_id)
+        .where(Match.tournament_id == tournament_id)
+        .order_by(Round.round_number, Match.id)
+    )
+    ordinal = {mid: i + 1 for i, (mid,) in enumerate(id_rows.all())}
+
+    def fmt_nums(nums) -> str:
+        """把场次编号拼成「3、4」（太多时省略成「3、4、5 等 6」）。"""
+        out = [str(n) for n in nums]
+        return "、".join(out[:3]) + (f" 等 {len(out)}" if len(out) > 3 else "")
+
+    def no_of(match_ids) -> str:
+        return fmt_nums([ordinal.get(mid, "?") for mid in match_ids])
+
+    picks: list[tuple[int, int]] = []
+    skipped: list[int] = []
+    by_id: dict[int, Match] = {}
+    already_ok: list[int] = []          # 本来就有裁判的场次（用于「无需再次分配」文案）
+    for rnd in rounds_to_do:
+        # 先赛事（load_writable_tournament 的 FOR SHARE）再比赛行，与 claim/记分同一加锁顺序
+        m_res = await db.execute(
+            select(Match).where(Match.round_id == rnd.id).order_by(Match.id).with_for_update()
+        )
+        round_matches = m_res.scalars().all()
+        live = [m for m in round_matches if m.status != MatchStatus.FINISHED]
+        need = [m for m in live if not m.has_active_referee]
+        already_ok.extend(m.id for m in live if m.has_active_referee)
+        if not need:
+            continue
+
+        # 本场 4 名选手：用来把"参加这场的人"排除出候选人
+        pairing_ids = {pid for m in need for pid in (m.pairing_a_id, m.pairing_b_id)}
+        p_res = await db.execute(select(RoundPairing).where(RoundPairing.id.in_(pairing_ids)))
+        pairings = {p.id: p for p in p_res.scalars().all()}
+        round_targets: list[tuple[int, set[int]]] = []
+        for m in need:
+            pa, pb = pairings.get(m.pairing_a_id), pairings.get(m.pairing_b_id)
+            if pa is None or pb is None:
+                continue    # 数据不完整（正常不会发生）：跳过而不是 500
+            by_id[m.id] = m
+            round_targets.append((m.id, {pa.player_a_id, pa.player_b_id,
+                                         pb.player_a_id, pb.player_b_id}))
+
+        # 同一批里已经在执裁的人，不能再分给别的场次；跨批次重新计算（每轮各自一份 busy）
+        busy_ids = {m.referee_id for m in live
+                    if m.has_active_referee and m.referee_id is not None}
+        round_picks = assign_referees(round_targets, candidates, busy_ids=busy_ids)
+        picked_map = dict(round_picks)
+        picks.extend(round_picks)
+        skipped.extend(mid for mid, _players in round_targets if mid not in picked_map)
+
+    if not picks:
+        if skipped:
+            return {"ok": True, "scope": scope, "assigned": [], "skipped": skipped,
+                    "message": f"第 {no_of(skipped)} 场没有可用的场下人员"}
+        return {"ok": True, "scope": scope, "assigned": [], "skipped": [],
+                "message": f"第 {no_of(already_ok)} 场已有裁判，无需再次分配"}
+
+    u_res = await db.execute(select(User).where(User.id.in_({uid for _m, uid in picks})))
+    users_map = {u.id: u for u in u_res.scalars().all()}
+
+    assigned = []
+    for mid, uid in picks:
+        m = by_id[mid]
+        m.referee_id = uid
+        m.referee_released_at = None   # 与 claim_referee 同一形态：指派即恢复在任
+        assigned.append({"match_id": mid, "match_number": ordinal.get(mid, 0),
+                         "referee_id": uid,
+                         "username": users_map[uid].username if uid in users_map else ""})
+
+    # 站内消息按人合并成一条：scope=all 一次可能给同一人分到十几场，
+    # 一场一条会把消息列表刷屏（而且这种通知本质是「你今天要执裁哪几场」）
+    per_user: dict[int, list[int]] = {}
+    for mid, uid in picks:
+        per_user.setdefault(uid, []).append(ordinal.get(mid, 0))
+    for uid, nums in per_user.items():
+        nums.sort()
+        db.add(Notification(
+            user_id=uid,
+            tournament_id=tournament_id,
+            type="referee_assigned",
+            # 只提「第 N 场」：界面上的编号就是对阵表的编号，没有「第 N 轮」这个概念
+            message=f"您被随机分配为第 {fmt_nums(nums)} 场的裁判，请到记分页执裁。",
+        ))
+
+    # 先提交再广播再审计（全仓统一）：订阅者收到 referee_claimed 后会回查赛程，
+    # 先提交再广播再审计（全仓统一）：订阅者收到广播后会回查赛程/比赛，
+    # 未提交的话卡片上的「裁 X」还是空的，这次实时更新就被吞掉。
+    # **只广播一条汇总事件**：scope=all 一次可能分掉上百场，逐场广播会让每个在线端
+    # 把整份赛程回拉 N 次（含 pairing、应援头像，几十~上百 KB/次），手机上明显卡顿；
+    # 认领/卸任这种单场操作仍走 referee_claimed（见 claim_referee / release_referee）。
+    await db.commit()
+    from app.core.websocket import manager
+    await manager.broadcast(tournament_id, {
+        "type": "referees_assigned", "count": len(picks),
+    })
+    await audit(
+        user=user, action="referee_auto_assign",
+        target_type="tournament", target_id=tournament_id,
+        detail={"scope": scope, "assigned": assigned, "skipped": skipped},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, "scope": scope,
+            "assigned": assigned, "skipped": skipped, "message": ""}

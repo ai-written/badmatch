@@ -83,6 +83,13 @@
       <div class="creator-block" v-if="canManage && tournament.status === 'ongoing'">
         <!-- 开场次排少了 / 还有时间：可以再追加几场（后端只为每人新增场次相等的组合放行） -->
         <van-button plain type="primary" block round :loading="submitting" :disabled="submitting" @click="openAddMatches">追加比赛</van-button>
+        <!-- 一次性把全部还没裁判的场次分完（房主/管理员/超管）。分完后还剩 0 场，
+             这个入口和对阵表里的「分配裁判」按钮都会自动消失，所以实际上只能点一次 -->
+        <van-button v-if="tournament.pending_referee_count > 0" plain type="primary" block round
+                    :loading="submitting" :disabled="submitting" style="margin-top:10px"
+                    @click="doAssignReferees">
+          一次性分配裁判（{{ tournament.pending_referee_count }} 场）
+        </van-button>
         <van-button type="danger" block round :loading="submitting" :disabled="submitting" style="margin-top:10px" @click="doEndTournament">提前结束赛事</van-button>
       </div>
 
@@ -680,6 +687,32 @@ async function doAddMatches(added: number) {
     const actual = Number(res.data?.added ?? added)
     // 服务端排不出请求的场次时会按步长往上试，实际追加数要如实告知
     showToast(actual === added ? `已追加 ${actual} 场比赛` : `所选场次排不出，已追加 ${actual} 场`)
+    await fetchDetail()
+  })
+}
+
+/** 一次性分配裁判：把**全部**还没打完、还没裁判的场次一次分完。
+ *  房主/管理员/超管可点（后端同一套判据）；分完后 pending_referee_count 归零，
+ *  这个入口和对阵表里的「分配裁判」按钮都会自动消失。 */
+async function doAssignReferees() {
+  const n = tournament.value?.pending_referee_count || 0
+  try {
+    await showConfirmDialog({
+      title: '一次性分配裁判',
+      message: `给全部 ${n} 场还没裁判的比赛随机分配场下人员？被分配到的人会收到站内消息。`,
+      confirmButtonText: '分配',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return   // 取消
+  }
+  await withSubmitting(async () => {
+    const res = await api.post(`/tournaments/${route.params.id}/auto-assign-referees`, { scope: 'all' })
+    const assigned = res.data?.assigned?.length ?? 0
+    const skipped = res.data?.skipped?.length ?? 0
+    if (assigned === 0) showToast(res.data?.message || '没有需要分配的场次')
+    else if (skipped > 0) showToast(`已分配 ${assigned} 场；${skipped} 场没有可用的场下人员`)
+    else showToast(`已分配 ${assigned} 场裁判`)
     await fetchDetail()
   })
 }

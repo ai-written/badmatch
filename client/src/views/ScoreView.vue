@@ -639,6 +639,10 @@ watch(lastMessage, (msg) => {
   ) {
     fetchMatch().catch(() => {})
   }
+  // 一次性分配裁判只发一条汇总事件（不带 match_id）：刷一次就好，不必判断是不是本场
+  if (msg.type === 'referees_assigned') {
+    fetchMatch().catch(() => {})
+  }
   // 赛事被别处结束：立刻刷新切成只读（配合 readOnly 的 watch 退出修正模式）。
   // 本页常停在"已结束的比赛"上，而 30 秒校准只在比赛进行中才跑，不接这个广播可能长期不刷新。
   if (msg.type === 'tournament_finished') {

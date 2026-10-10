@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.models.user import User
+from app.models.round import Match, MatchStatus
 from app.models.tournament import (
     Tournament, TournamentStatus, Registration, PlayerStats, Court, TimeSlot,
 )
@@ -362,7 +363,8 @@ async def delete_tournament(
 
     # delete related courts and time slots
     # delete match supports, matches, pairings, rounds
-    from app.models.round import Round, RoundPairing, Match, MatchSupport, Notification
+    # （Match / MatchStatus 现在在文件顶部导入，这里只补其余几个）
+    from app.models.round import Round, RoundPairing, MatchSupport, Notification
     matches = await db.execute(select(Match.id).where(Match.tournament_id == tournament_id))
     for (mid,) in matches.all():
         await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
@@ -586,6 +588,18 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
     )
     cancelled_count = cancelled_result.scalar() or 0
 
+    # 还没裁判的场次数（未打完 + 没有在任裁判）：详情页据此决定要不要显示「一次性分配裁判」。
+    # 与 /auto-assign-referees 判「这场需不需要裁判」的条件完全一致
+    # （无 referee_id，或已卸任 referee_released_at 非空）。
+    pending_referee_result = await db.execute(
+        select(func.count(Match.id)).where(
+            Match.tournament_id == t.id,
+            Match.status != MatchStatus.FINISHED,
+            or_(Match.referee_id.is_(None), Match.referee_released_at.is_not(None)),
+        )
+    )
+    pending_referee_count = pending_referee_result.scalar() or 0
+
     courts_result = await db.execute(
         select(Court).where(Court.tournament_id == t.id).order_by(Court.sort_order)
     )
@@ -637,6 +651,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         courts=court_outs,
         registered_count=registered_count,
         cancelled_count=cancelled_count,
+        pending_referee_count=pending_referee_count,
         is_registered=is_registered,
         created_at=t.created_at.isoformat() if t.created_at else "",
     )

@@ -22,7 +22,10 @@
     </div>
 
     <template v-else>
-      <!-- 按人筛选：只看某些人（可多选）/ 排除一个或多个人（可多选，可叠加）。条件会记住（见下方 FILTER_KEY） -->
+      <!-- 按人筛选：只看某些人（可多选）/ 排除一个或多个人（可多选，可叠加）。条件会记住（见下方 FILTER_KEY）
+           「分配裁判」并进这一行：原先单独占一条 bar，顶部太空。
+           注意本行**不能加 margin-top** —— e2e 基线断言「滚动内容首元素距容器顶 12px」
+           （见 tests/e2e/run.mjs 的 baseline） -->
       <div class="filter-bar">
         <div class="filter-chip" :class="{ on: filterActive }" @click="openFilter">
           <van-icon name="filter-o" size="14" />
@@ -32,6 +35,14 @@
         <span v-if="myPlayerId != null" class="filter-mini"
               :class="{ on: onlyMeActive }" @click="toggleOnlyMe">只看我</span>
         <span v-if="filterActive" class="filter-mini clear" @click="clearFilter">清除</span>
+        <!-- 有场次缺裁判时才出现（赛事进行中 + 我是本赛事在场选手）；数字 = 待分配的场次数。
+             没活干时整块不显示：后端只填空缺、不会重新分配，留着点了也没反应。
+             点开后用「第 N 场」说明要分哪几场（与列表里的编号一致） -->
+        <span v-if="canAutoAssign" class="filter-mini assign assign-todo"
+              :class="{ busy: assigning }"
+              :title="`第 ${fmtMatchNo(pendingMatchNo)} 场还没裁判`" @click="doAutoAssign">
+          分配裁判 {{ pendingMatchNo.length }}
+        </span>
       </div>
 
       <!-- 赛事已提前结束：所有比赛只读 -->
@@ -82,17 +93,21 @@
             </div>
 
             <div class="match-mid">
-              <template v-if="m.status === 'finished'">
-                <span class="score-num" :class="{ red: m.score_a > m.score_b }">{{ m.score_a }}</span>
-                <span class="score-div">:</span>
-                <span class="score-num" :class="{ red: m.score_b > m.score_a }">{{ m.score_b }}</span>
-              </template>
-              <template v-else-if="m.score_a != null || m.score_b != null">
-                <span class="score-num">{{ m.score_a }}</span>
-                <span class="score-div">:</span>
-                <span class="score-num">{{ m.score_b }}</span>
-              </template>
-              <span v-else class="vs-badge">VS</span>
+              <div class="mid-main">
+                <template v-if="m.status === 'finished'">
+                  <span class="score-num" :class="{ red: m.score_a > m.score_b }">{{ m.score_a }}</span>
+                  <span class="score-div">:</span>
+                  <span class="score-num" :class="{ red: m.score_b > m.score_a }">{{ m.score_b }}</span>
+                </template>
+                <template v-else-if="m.score_a != null || m.score_b != null">
+                  <span class="score-num">{{ m.score_a }}</span>
+                  <span class="score-div">:</span>
+                  <span class="score-num">{{ m.score_b }}</span>
+                </template>
+                <span v-else class="vs-badge">VS</span>
+              </div>
+              <!-- 场次编号放在 VS/比分的正下方（e2e 按 .match-card .match-num 取编号，class 不能改） -->
+              <span class="match-num">第{{ m.globalIdx }}场</span>
             </div>
 
             <div class="match-side" :class="{ win: m.winner_pairing_id === m.pairing_b.id }">
@@ -115,7 +130,6 @@
             </div>
 
             <div class="match-info">
-              <span class="match-num">第{{ m.globalIdx }}场</span>
               <span v-if="m.status === 'finished' && m.duration_seconds != null" class="match-dur">{{ fmtDuration(m.duration_seconds) }}</span>
               <span v-if="m.referee" class="foot-ref has">裁 {{ m.referee.username }}<template v-if="!m.active_referee">（已卸任）</template></span>
               <van-button v-if="m.can_referee" size="mini" type="primary" round @click.stop="claimReferee(m)">裁判</van-button>
@@ -201,6 +215,8 @@ const loadFailed = ref(false)
 // 复用到另一个赛事（路由未重建组件），也不会拿"新赛事的名单"去剪"旧赛事的条件"
 const roundsLoadedFor = ref<number | null>(null)
 const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
+// 赛事详情（只用于判断「我是不是本赛事在场选手」= is_registered，见 fetchDetail）
+const detail = ref<any>(null)
 
 function isMyMatch(m: any) {
   if (!auth.user) return false
@@ -271,7 +287,10 @@ watch(lastMessage, (msg) => {
   // tournament_finished：比赛全部打完自动结束时后端只发这一个事件，
   //   少了它就看不到「赛事已结束」的只读横幅。
   // schedule_updated：赛中追加了比赛，新排出来的轮次要立刻出现。
+  // referees_assigned：一次分了很多场裁判（详情页的「一次性分配」只发这一条汇总事件），
+  //   收到就重拉一次赛程，卡片上的「裁 X」和「分配裁判 N」一起更新。
   if (t === 'match_updated' || t === 'referee_claimed' || t === 'referee_released'
+      || t === 'referees_assigned'
       || t === 'registration_updated' || t === 'schedule_updated'
       || t === 'tournament_finished') {
     fetchRounds(true).catch(() => {})
@@ -279,9 +298,22 @@ watch(lastMessage, (msg) => {
 })
 // 锁屏/后台返回时补一次刷新（冻结期间 WebSocket 可能已断，不再收得到广播）
 useResumeRefresh(async () => { await fetchRounds(true) })
+
+/** 详情只用来判断「我是不是本赛事在场选手」（真正的权限在后端）。
+ *  刻意不让它的失败影响赛程：拿不到就保持 null，isParticipant 退化为按赛程推断。 */
+async function fetchDetail() {
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}`, { skipLoading: true } as any)
+    detail.value = res.data
+  } catch {
+    /* 忽略：见上面的说明 */
+  }
+}
+
 async function onRefresh() {
   try {
     await fetchRounds(true)
+    await fetchDetail()
   } catch {
     // 失败态已由 fetchRounds 置位；拦截器也已提示
   } finally {
@@ -298,6 +330,88 @@ const showAllFinished = ref(false)
 const tournamentEnded = computed(() =>
   rounds.value.some((r: any) => (r.matches || []).some((m: any) => m.tournament_status === 'finished'))
 )
+
+// --- 自动分配裁判（当前要打的那一批）---
+// 范围 = 最早一个「还有比赛没打完」的轮次，与后端 /auto-assign-referees 同一套判断
+// （那边才是权威，这里只用来决定按钮显不显示、提示哪几场）。
+// 文案一律说**第几场**：界面上只有对阵表的「第 N 场」编号，没有「第 N 轮」这个概念
+// （轮次只是后端分组，列表里并不显示），说「第 N 轮」用户对不上号。
+// **只在真有场次缺裁判时出现**（赛事进行中 + 我是本赛事在场选手 + 当前这一批还有缺口）：
+// 没活干时后端也不会重新分配，留一个点了没反应的按钮只会让人困惑；
+// 当前这批打完后自动轮到下一批，有缺口时它自己就回来。
+const assigning = ref(false)
+// 用带 globalIdx 的编号副本：号码必须与列表里显示的「第 N 场」完全一致
+const currentRound = computed(() =>
+  numberedRounds.value.find((r: any) => (r.matches || []).some((m: any) => m.status !== 'finished')) || null
+)
+/** 当前轮次里还没打完的场次编号 */
+const liveMatchNo = computed(() =>
+  (currentRound.value?.matches || [])
+    .filter((m: any) => m.status !== 'finished').map((m: any) => m.globalIdx)
+)
+/** 其中「还没有在任裁判」的场次编号 */
+const pendingMatchNo = computed(() =>
+  (currentRound.value?.matches || [])
+    .filter((m: any) => m.status !== 'finished' && !m.active_referee).map((m: any) => m.globalIdx)
+)
+/** [3,4] → 「3、4」；太多时省略成「3、4、5 等 6」 */
+function fmtMatchNo(nums: number[]) {
+  if (!nums.length) return ''
+  return nums.slice(0, 3).join('、') + (nums.length > 3 ? ` 等 ${nums.length}` : '')
+}
+// 拿不到详情时退化为「我出现在赛程里」：宁愿少显示，也不要给外人一个点了必 403 的按钮
+const isParticipant = computed(() => {
+  if (detail.value) return !!detail.value.is_registered
+  return rounds.value.some((r: any) => (r.matches || []).some((m: any) =>
+    [m.pairing_a?.player_a?.id, m.pairing_a?.player_b?.id,
+     m.pairing_b?.player_a?.id, m.pairing_b?.player_b?.id].includes(auth.user?.id)))
+})
+// 只有**进行中**的赛事才显示：报名中还没赛程、已结束整场只读（后端也会拒）。
+// 优先用详情接口的状态（权威），详情拿不到时退化为「赛程里没有『赛事已结束』的标记」
+const isOngoing = computed(() =>
+  detail.value ? detail.value.status === 'ongoing' : !tournamentEnded.value
+)
+// 只有在**真的有场次要分配**时才显示这个按钮：没活干时它点了也不会重新分配
+// （后端只填空缺、从不覆盖已有裁判），留一个点了没反应的按钮只会让人困惑。
+// 当前这一批打完后会自动轮到下一批，有缺口时按钮自己就回来了。
+const canAutoAssign = computed(() =>
+  !!auth.token && isParticipant.value && isOngoing.value && pendingMatchNo.value.length > 0
+)
+async function doAutoAssign() {
+  if (assigning.value) return
+  const n = pendingMatchNo.value.length
+  if (!n) {
+    // 本端数据恰好被别的端补齐了（广播还没到）：别弹一个点了也没用的确认框
+    showToast(`第 ${fmtMatchNo(liveMatchNo.value)} 场已有裁判，无需再次分配`)
+    return
+  }
+  try {
+    await showConfirmDialog({
+      title: '自动分配裁判',
+      message: `给第 ${fmtMatchNo(pendingMatchNo.value)} 场随机分配场下人员？被分配到的人会收到站内消息。`,
+      confirmButtonText: '分配',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return // 取消
+  }
+  assigning.value = true
+  try {
+    const res = await api.post(`/tournaments/${route.params.id}/auto-assign-referees`, { scope: 'current' })
+    const assigned = res.data?.assigned?.length ?? 0
+    const skipped = res.data?.skipped?.length ?? 0
+    const nums = (res.data?.assigned || []).map((a: any) => a.match_number).filter((x: any) => !!x)
+    const label = nums.length ? `第 ${fmtMatchNo(nums)} 场` : `${assigned} 场`
+    if (assigned === 0) showToast(res.data?.message || '没有需要分配的场次')
+    else if (skipped > 0) showToast(`已分配${label}；${skipped} 场没有可用的场下人员`)
+    else showToast(`已分配${label}的裁判`)
+    await fetchRounds(true)
+  } catch {
+    // 失败提示由 axios 拦截器统一弹；这里只负责别让按钮一直转
+  } finally {
+    assigning.value = false
+  }
+}
 
 // --- 按人筛选：只看某些人（可多选）/ 排除一个或多个人（可多选） ---
 // 条件按赛事记住（同一台手机上回到这个赛事时还在），因此状态串存在 localStorage 里。
@@ -548,6 +662,8 @@ onUnmounted(() => {
 
 onMounted(() => {
   fetchRounds().catch(() => {})
+  // 「自动分配裁判」要知道我是不是本赛事在场选手（详情接口的 is_registered）
+  fetchDetail()
   // 直接打开/刷新本页时 store 里还没有 user（fetchMe 由我的/详情/记分/积分榜各页自己调，
   // 本页原先漏了），而「我」角标、卡片 .my 高亮、以及筛选栏的「只看我」都依赖它 ——
   // 表现为分享出去的赛程链接打开后看不到自己的比赛。
@@ -577,6 +693,15 @@ onMounted(() => {
 
 /* 导航栏右侧的积分榜入口 */
 .nav-link { font-size: 14px; color: #1989fa; }
+
+/* --- 自动分配裁判 --- */
+/* 并入筛选行（原先是顶部单独一条 bar，太占空间）：沿用 .filter-mini 的胶囊样式。
+   只在**有场次缺裁判**时出现；没活干时整块隐藏（后端只填空缺、不会重新分配）。
+   刻意**不复用 .on**：e2e 用 document.querySelectorAll('.filter-mini.on').length
+   判断「只看我」是否生效（断言恰好 1 / 0），这里加 .on 会把它数进去。 */
+.filter-mini.assign { white-space: nowrap; }
+.filter-mini.assign.assign-todo { background: #e8f3ff; color: #1989fa; font-weight: 500; }
+.filter-mini.assign.busy { opacity: .5; pointer-events: none; }
 
 /* --- 按人筛选 --- */
 /* 筛选栏是滚动内容的第一块：顶部留白仍由 .schedule-scroll 的 padding-top 负责，
@@ -680,8 +805,10 @@ onMounted(() => {
 
 .match-mid {
   width: 64px; text-align: center; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
 }
+/* 比分/VS 是同一行：不能直接挂在 .match-mid 上，否则列布局会把 11 / : / 5 拆成三行 */
+.mid-main { display: flex; align-items: center; justify-content: center; }
 .score-num { font-size: 20px; font-weight: 800; color: #222; font-variant-numeric: tabular-nums; }
 .score-num.red { color: #e74c3c; }
 .score-div { font-size: 16px; color: #ccc; margin: 0 2px; }

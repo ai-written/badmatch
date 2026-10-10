@@ -132,6 +132,8 @@ class TournamentDetail(BaseModel):
     registered_count: int = 0
     # 取消过报名的人数：>0 时详情页才显示「取消报名记录」入口，避免平时多一次请求
     cancelled_count: int = 0
+    # 还没裁判的场次数（未打完 + 没有在任裁判）：>0 时赛事详情页才显示「一次性分配裁判」
+    pending_referee_count: int = 0
     total_matches: int | None = None
     points_to_win: int = 11
     registration_open_at: datetime | None = None
