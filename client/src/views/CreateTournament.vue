@@ -171,9 +171,12 @@ const { goBack } = useGoBack()
 const submitting = ref(false)
 const halfCourt = ref(false)
 
+// 默认地点：本群固定在这个馆打球，省得每场都手输（仍可改）
+const DEFAULT_LOCATION = '奥体中心'
+
 const form = reactive({
   title: '',
-  location: '',
+  location: DEFAULT_LOCATION,
   court: '',
   start_date: '',
   end_date: '',
@@ -300,12 +303,17 @@ function onOpenTimeConfirm() {
 }
 
 const defaultTitle = ref('')
+// 连改两次日期会有两个并发请求：只有最后一次的结果能落地。否则先发的后到，
+// 而守卫比较的 defaultTitle 已被先到的响应改写，标题会被改回上一个日期
+let titleSeq = 0
 
 async function fetchDefaultTitle() {
   const d = selectedDate.value
   const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const seq = ++titleSeq
   try {
     const res = await api.get('/tournaments/default-title', { params: { date: iso } })
+    if (seq !== titleSeq) return
     const title = res.data.title
     if (!form.title || form.title === defaultTitle.value) form.title = title
     defaultTitle.value = title

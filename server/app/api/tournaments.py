@@ -1,5 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import date as date_cls, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 from sqlalchemy import select, func, delete, or_
@@ -284,36 +285,51 @@ async def _create_tournament(
     return t
 
 
+def default_title_for(d: date_cls, existing: Iterable[str] = ()) -> str:
+    """默认赛事名称：`10月16日养生局`（跟着创建页选中的日期走）。
+
+    老格式是「十月第N次养生局」：按月累计计数，同一天排两场时反而看不出是哪天，
+    跨月/跨年后序号还会继续涨。改为直接写日期。
+
+    同一天排不止一场是常事（上午场 + 下午场、临时再加一场），默认名撞车时加序号，
+    否则列表里两行一模一样、报名海报也分不清是哪一场。只影响「默认建议」这一层：
+    用户在表单里改过名字就不会被覆盖（前端只在没动过时回填）。
+    """
+    base = f"{d.month}月{d.day}日养生局"
+    used = set(existing)
+    if base not in used:
+        return base
+    n = 2
+    while f"{base}（{n}）" in used:
+        n += 1
+    return f"{base}（{n}）"
+
+
 @router.get("/default-title")
 async def default_title(
     date: str | None = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    from datetime import date as date_cls
-
     d = date_cls.today()
     if date:
         try:
             d = date_cls.fromisoformat(date)
         except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式不正确")
+            raise HTTPException(status_code=400, detail="日期格式不正确") from None
 
-    month_names = [
-        "一月", "二月", "三月", "四月", "五月", "六月",
-        "七月", "八月", "九月", "十月", "十一月", "十二月",
-    ]
-    prefix = month_names[d.month - 1]
-    count_result = await db.execute(
-        select(func.count(Tournament.id)).where(
-            or_(
-                Tournament.title.like(f"{prefix}%友谊赛"),
-                Tournament.title.like(f"{prefix}%养生局"),
-            )
+    # 候选名要同时卡住「日期」和「名字前缀」，光看名字会跨年串味：
+    # 「10月16日养生局」里没有年份，去年那场同名赛事会被算成"已占用"，
+    # 于是今年 10/16 的默认名直接变成（2）、明年（3）——正是老格式那个越涨越大的毛病。
+    # 标题里的日期就是表单里选的开始日期（start_date），所以用它来限定同一天。
+    base = f"{d.month}月{d.day}日养生局"
+    result = await db.execute(
+        select(Tournament.title).where(
+            Tournament.title.like(f"{base}%"),
+            func.date(Tournament.start_date) == d,
         )
     )
-    count = (count_result.scalar() or 0) + 1
-    return {"title": f"{prefix}第{count}次养生局"}
+    return {"title": default_title_for(d, result.scalars().all())}
 
 
 @router.get("/{tournament_id}", response_model=TournamentDetail)
