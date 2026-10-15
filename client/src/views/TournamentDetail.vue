@@ -221,6 +221,7 @@
       :file-name="POSTER_FILE"
       :share-title="tournament?.title || '羽毛球局'"
       :tip="posterTip"
+      :notice="posterNotice"
       @close="closePoster"
     />
 
@@ -237,6 +238,7 @@ import { useGoBack } from '@/composables/useGoBack'
 import { copyText } from '@/utils/clipboard'
 import { renderSignupPoster, POSTER_FILE } from '@/utils/poster'
 import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
+import { detectIsIOS, isWeChatUA } from '@/utils/shareEnv'
 import { showToast, showConfirmDialog, showLoadingToast, showFailToast } from 'vant'
 
 const route = useRoute()
@@ -440,7 +442,9 @@ async function copyTournamentLink() {
  */
 const posterUrl = ref('')
 const posterFile = ref<File | null>(null)
-const isWeChat = /MicroMessenger/i.test(navigator.userAgent)
+const isWeChat = isWeChatUA(navigator.userAgent)
+// iPhone/iPad 的保存/分享路径与安卓完全不同（见 components/ShareImageOverlay.vue）
+const isIOS = detectIsIOS(navigator.userAgent, navigator.platform, navigator.maxTouchPoints)
 
 /** 发起人取房主昵称；报名列表还没加载出来时拿不到，海报就整行不画 */
 const hostName = computed(() => {
@@ -487,14 +491,18 @@ const posterPlaceText = computed(() => {
 // 邀请码只有管理员能生成（见 auth.generate_invite），普通成员的海报里就没有邀请码：
 // 这种情况下必须说清楚，否则新球友扫码后卡在注册表单前，发海报的人只会以为功能坏了
 const hasInviteCode = computed(() => !!auth.user?.invite_code)
+// 邀请码只对「拉新报名」有意义，进行中的海报不必再提这件事。
+// 它跟「怎么保存/分享」无关，所以走 notice（单独一行），不去顶掉遮罩里那套
+// 「iOS 要选存储图像」「微信内为什么不能一键分享」的提示语
+const posterNotice = computed(() =>
+  tournament.value?.status === 'open' && !hasInviteCode.value
+    ? '本场报名页需要登录：你还没有邀请码（仅管理员可生成），新球友请先向管理员索取'
+    : ''
+)
 const posterTip = computed(() => {
-  // 邀请码只对「拉新报名」有意义，进行中的海报不必再提这件事
-  if (tournament.value?.status === 'open' && !hasInviteCode.value) {
-    return '长按图片保存发给球友；本场报名页需要登录，你还没有邀请码（仅管理员可生成），新球友请先向管理员索取'
-  }
-  // 微信内没有一键分享图片（iOS 微信把文件交给自己的分享扩展必然失败，见
-  // ShareImageOverlay），提示语必须说清"长按保存再回群里发"；其余环境用组件默认文案
-  if (!isWeChat) return undefined
+  // iOS 不覆盖：遮罩里有专门的 iOS 文案（安卓的「保存图片」在 iPhone 上只会落进
+  // 「文件」App，长按菜单也不叫「保存」），这里插一句反而把 iOS 用户引错
+  if (isIOS || !isWeChat) return undefined
   return isStarted.value
     ? '长按图片保存，回到微信群发给球友；球友扫码可直接看对阵表'
     : '长按图片保存，回到微信群发给球友；球友扫码即可报名'
