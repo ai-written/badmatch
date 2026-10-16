@@ -154,7 +154,9 @@ def _history_collision(schedule, partner_history, opponent_history, match_histor
     score = 0
     for (a, b), (c, d), *_ in schedule:
         t1, t2 = _pair_key(a, b), _pair_key(c, d)
-        # 搭档历史两个方向都查（库里的键方向不固定，与 _greedy_build 一致）
+        # 搭档历史两个方向都查（与 _greedy_build 同一口径：_load_history 把每个搭档对
+        # 两个方向各记一次，所以这里查到的值实际是"出现次数 ×2" —— 三个权重的**相对**
+        # 大小才决定避重优先级，这个共同倍数不影响结论）
         for p in (t1, t2):
             score += PARTNER_PENALTY * (partner_history.get(p, 0)
                                         + partner_history.get(p[::-1], 0))
