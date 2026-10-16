@@ -155,11 +155,13 @@
       </div>
       <div class="vh-sheet-body filter-panel-body">
         <div class="filter-label">只看某人的比赛（可多选）</div>
-        <!-- 多选匹配方式：默认「或」（任意一人），可切成「且」（必须同场）。
+        <!-- 多选匹配方式：默认「或」（任意一人），可切成「且」（必须同场）或
+             「搭档」（正好 2 人，看这两人是不是同一队）。
              刻意不用 .pick-row 这个类名：e2e 是按 .pick-row 的下标定位选手行的（0=只看、1=排除） -->
         <div class="mode-row">
           <span class="pick" :class="{ on: draftMode === 'any' }" @click="draftMode = 'any'">或（任意一人）</span>
           <span class="pick" :class="{ on: draftMode === 'all' }" @click="draftMode = 'all'">且（必须同场）</span>
+          <span class="pick" :class="{ on: draftMode === 'partner' }" @click="draftMode = 'partner'">搭档（同一队）</span>
         </div>
         <div class="pick-row">
           <span class="pick" :class="{ on: draftOnlyIds.length === 0 }" @click="clearDraftOnly()">全部</span>
@@ -170,6 +172,10 @@
           「且」要求所选的人出现在同一场里，而 2v2 一场只有 4 人 —— 现在选了 {{ draftOnlyIds.length }} 人，
           筛不出任何比赛。
         </div>
+        <div v-if="draftMode === 'partner' && draftOnlyIds.length > 0 && draftOnlyIds.length !== 2" class="filter-hint warn">
+          「搭档」看的是「这两个人是不是同一队」，要正好选 2 个人（现在选了 {{ draftOnlyIds.length }} 个）。
+          2v2 一队只有 2 人，选 1 个或 3 个以上都筛不出比赛。
+        </div>
 
         <div class="filter-label">排除（可多选）</div>
         <div class="pick-row">
@@ -178,7 +184,8 @@
                 @click="toggleDraftExclude(p.id)">{{ p.username }}</span>
         </div>
         <div class="filter-hint">
-          「或」= 选中的人里任意一位参加的比赛（默认）；「且」= 这些人必须出现在同一场里（2v2 一场只有 4 人）。
+          「或」= 选中的人里任意一位参加的比赛（默认）；「且」= 这些人必须出现在同一场里（2v2 一场只有 4 人）；
+          「搭档」= 正好选 2 个人，只看他们「同一队」的比赛（同场但互为对手的场次不算，这是它和「且」的区别）。
           排除是并集：排除谁，谁参加的比赛就都不显示。两者可叠加：
           例如「只看张三、李四」并「排除王五」= 张三或李四参加、且王五不参加的比赛。
         </div>
@@ -474,15 +481,20 @@ function pruneMissingIds(f: ScheduleFilter): ScheduleFilter {
 // playerOptions 每次赛程刷新都会重新计算（含 WebSocket 广播触发的静默刷新），
 // 因此这一个 watch 同时覆盖「刚进页面加载完」和「比赛进行中有人退赛」两种情况。
 watch(playerOptions, () => {
-  const next = pruneMissingIds(activeFilter.value)
-  if (next === activeFilter.value) return   // 没变化（含"没加载好/零场次"）就什么都不做
+  const before = activeFilter.value
+  const next = pruneMissingIds(before)
+  if (next === before) return   // 没变化（含"没加载好/零场次"）就什么都不做
   activeFilter.value = next
   persistFilter()
-  // 剪枝是破坏性的（会覆盖 localStorage），不能静默：告诉用户条件被收窄了
-  const kept = activeFilter.value.onlyPlayerIds.length + activeFilter.value.excludePlayerIds.length
-  showToast(kept > 0
+  // 剪枝是破坏性的（会覆盖 localStorage），不能静默：告诉用户条件被收窄了。
+  // 「搭档」被剪到不是 2 个人时会降级成「或」（见 pruneFilter），这件事更要说清楚，
+  // 否则用户只会发现"我筛的搭档怎么变成别人的场次了"
+  const kept = next.onlyPlayerIds.length + next.excludePlayerIds.length
+  const modeNote = before.onlyMode === 'partner' && next.onlyMode !== 'partner'
+    ? '；「搭档」需要正好 2 人，已改回「或」' : ''
+  showToast((kept > 0
     ? `已移除不在赛程中的筛选条件（还剩 ${kept} 人）`
-    : '筛选条件里的人已不在赛程，已自动清除')
+    : '筛选条件里的人已不在赛程，已自动清除') + modeNote)
   // 面板正开着时，草稿也要跟着剪：否则草稿里留着一个面板上没有 chip 的 id，
   // 会让「全部」chip 也不高亮，看起来"什么都没选"（点确定虽然会自愈，但视觉上自相矛盾）
   const ids = new Set(playerOptions.value.map((p) => p.id))
@@ -510,10 +522,14 @@ const filterSummary = computed(() => {
   const onlyText = only.length <= 2
     ? only.map(nameOf).join('、')
     : `${nameOf(only[0])} 等 ${only.length} 人`
-  // 「且」模式用「同场」开头：一眼能看出这次筛的是"必须一起打"，而不是"任一人"
-  const prefix = f.onlyMode === 'all' ? '同场' : '只看'
-  if (f.excludePlayerIds.length === 0) return `${prefix} ${onlyText}`
-  return `${prefix} ${onlyText} · 排除 ${f.excludePlayerIds.length} 人`
+  // 「且」模式用「同场」开头、「搭档」用「搭档」开头：一眼能看出这次筛的是
+  // "必须一起打"还是"必须是队友"，而不是"任一人"
+  const prefix = f.onlyMode === 'all' ? '同场' : f.onlyMode === 'partner' ? '搭档' : '只看'
+  // 「搭档」要正好 2 个人才有结果：人数不对时把原因写在摘要里 —— 比如选中的一方
+  // 退赛后条件被剪成一个 id，列表空着，不打开面板就看不出为什么
+  const need2 = f.onlyMode === 'partner' && only.length !== 2 ? '（需选 2 人）' : ''
+  if (f.excludePlayerIds.length === 0) return `${prefix} ${onlyText}${need2}`
+  return `${prefix} ${onlyText}${need2} · 排除 ${f.excludePlayerIds.length} 人`
 })
 
 const showFilter = ref(false)
@@ -843,7 +859,7 @@ onMounted(() => {
 .score-foot .van-button { margin-top: 2px; }
 /* 裁判行（右列内）：名字已按 4 个字截断（shortRefereeName），这里只保证
    ① 名字那一节不换行、放不下就省略号；② 「（已卸任）」整块不拆开 */
-.foot-ref { max-width: 100%; font-size: 11px; line-height: 1.3; }
+.foot-ref { max-width: 100%; font-size: 11px; line-height: 1.3; text-align: center; }
 .foot-ref-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .foot-ref-state { white-space: nowrap; }
 .foot-ref.has { color: #07c160; font-weight: 500; }

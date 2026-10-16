@@ -63,14 +63,22 @@ export function renderRounds(rounds: any[], hiddenIds: Set<number>): any[] {
 
 // ---------------------------------------------------------------- 按人筛选
 
-/** 「只看」多个人的匹配方式：any=任意一人参加就显示（并集，默认）；all=这些人必须同场 */
-export type OnlyMode = 'any' | 'all'
+/**
+ * 「只看」多个人的匹配方式：
+ * - `any`（默认，或）：任意一人参加就显示（并集）；
+ * - `all`（且，同场）：这些人必须都在这一场的 4 人里；
+ * - `partner`（搭档，同一队）：**正好选 2 个人**，看他们是不是同一队的队友 ——
+ *   2v2 一队只有 2 人，所以选 1 个或 3 个以上都筛不出比赛（面板里有红字提示）。
+ *   与 `all` 的区别是实打实的：同场但分属两队的两个人，`all` 能看到（他们在同一场），
+ *   `partner` 看不到（他们是对手）。
+ */
+export type OnlyMode = 'any' | 'all' | 'partner'
 
 /** 筛选条件：只看某些人（空数组=不限制，可多选）+ 排除若干人（可多选），两者叠加 */
 export interface ScheduleFilter {
   onlyPlayerIds: number[]
   excludePlayerIds: number[]
-  /** 只看多选时的匹配方式，默认 'any'（或）。'all' 是"必须同场"（且） */
+  /** 只看多选时的匹配方式，默认 'any'（或）。'all' = 必须同场，'partner' = 必须同一队 */
   onlyMode: OnlyMode
 }
 
@@ -103,7 +111,7 @@ function isPlayerId(x: any): x is number {
  *   直接「是数组就优先」会让 `{onlyPlayerIds: [], onlyPlayerId: 5}` 静默丢掉用户条件
  * - 同一人既「只看」又「排除」是自相矛盾的（结果必为空），这里以「只看」优先，
  *   把他从排除列表里去掉
- * - onlyMode：只认 'all'，其余（含旧数据里没有这个字段）一律回落 'any'（或）
+ * - onlyMode：只认 'all' / 'partner'，其余（含旧数据里没有这个字段）一律回落 'any'（或）
  */
 export function normalizeFilter(input: any): ScheduleFilter {
   const rawOnly: any[] = Array.isArray(input?.onlyPlayerIds) && input.onlyPlayerIds.length > 0
@@ -112,7 +120,8 @@ export function normalizeFilter(input: any): ScheduleFilter {
   const only = [...new Set(rawOnly.filter(isPlayerId))]
   const raw: any[] = Array.isArray(input?.excludePlayerIds) ? input.excludePlayerIds : []
   const exclude = [...new Set(raw.filter(isPlayerId))].filter((id) => !only.includes(id))
-  const onlyMode: OnlyMode = input?.onlyMode === 'all' ? 'all' : 'any'
+  const onlyMode: OnlyMode =
+    input?.onlyMode === 'all' ? 'all' : input?.onlyMode === 'partner' ? 'partner' : 'any'
   return { onlyPlayerIds: only, excludePlayerIds: exclude, onlyMode }
 }
 
@@ -120,6 +129,14 @@ export function normalizeFilter(input: any): ScheduleFilter {
 export function matchPlayers(m: any): any[] {
   return [m?.pairing_a?.player_a, m?.pairing_a?.player_b, m?.pairing_b?.player_a, m?.pairing_b?.player_b]
     .filter(Boolean)
+}
+
+/** 一场比赛的两支队伍（每队两人；数据不全的那队不返回） */
+function pairingPairs(m: any): number[][] {
+  return [
+    [m?.pairing_a?.player_a?.id, m?.pairing_a?.player_b?.id],
+    [m?.pairing_b?.player_a?.id, m?.pairing_b?.player_b?.id],
+  ].filter(([a, b]) => a != null && b != null) as number[][]
 }
 
 /** 赛程里出现过的所有选手（按首次出现顺序去重），供筛选面板列选项 */
@@ -138,19 +155,30 @@ export function playersInRounds(rounds: any[]): { id: number; username: string; 
 /**
  * 这场比赛是否该显示。
  *
- * 「只看」有两种匹配方式（`onlyMode`）：
+ * 「只看」有三种匹配方式（`onlyMode`）：
  * - `any`（默认，或）：选中的人里**任意一位**在场就显示 —— 2v2 循环赛里两人同场的机会很少，
  *   而这正是"我想看这几个人分别打哪些场"的诉求；
  * - `all`（且，同场）：选中的**所有人**都必须在这场的 4 人里。2v2 一场只有 4 人，
- *   所以选超过 4 人时永远为空（面板里有提示）。
+ *   所以选超过 4 人时永远为空（面板里有提示）；
+ * - `partner`（搭档，同一队）：**正好选 2 个人**，看他们是不是同一队的队友（"这两人的
+ *   配合打得怎么样"）。只有 2 个人时语义才成立，所以选 1 个/3 个以上一律为空
+ *   （面板里有红字提示）——比"随便凑一对也算"更不容易让人误读结果。
  *
  * 「排除」始终是并集：场上任何一位被排除的人出现就隐藏这场比赛。两者叠加时取交集。
  */
 export function matchVisible(m: any, filter: ScheduleFilter): boolean {
   const ids = matchPlayers(m).map((p) => p.id)
   if (filter.onlyPlayerIds.length > 0) {
-    const present = filter.onlyPlayerIds.filter((id) => ids.includes(id)).length
-    if (filter.onlyMode === 'all' ? present < filter.onlyPlayerIds.length : present === 0) return false
+    if (filter.onlyMode === 'partner') {
+      if (filter.onlyPlayerIds.length !== 2) return false
+      const [x, y] = filter.onlyPlayerIds
+      const sameTeam = pairingPairs(m).some(([a, b]) =>
+        (a === x && b === y) || (a === y && b === x))
+      if (!sameTeam) return false
+    } else {
+      const present = filter.onlyPlayerIds.filter((id) => ids.includes(id)).length
+      if (filter.onlyMode === 'all' ? present < filter.onlyPlayerIds.length : present === 0) return false
+    }
   }
   const excluded = new Set(filter.excludePlayerIds)
   return !ids.some((id) => excluded.has(id))
@@ -185,8 +213,12 @@ export function pruneFilter(f: ScheduleFilter, playerIds: number[]): ScheduleFil
   const exclude = f.excludePlayerIds.filter((id) => ids.has(id))
   // 没有可剪的就原样返回（保持引用：调用方据此判断"有没有变化"来决定是否落盘/提示）
   if (only.length === f.onlyPlayerIds.length && exclude.length === f.excludePlayerIds.length) return f
-  // onlyMode 必须原样带走：漏掉它会在剪枝时把用户选的「且（同场）」悄悄重置成「或」
-  return normalizeFilter({ onlyPlayerIds: only, excludePlayerIds: exclude, onlyMode: f.onlyMode })
+  // onlyMode 必须原样带走：漏掉它会在剪枝时把用户选的「且（同场）」悄悄重置成「或」。
+  // 唯一的例外是「搭档」被剪到不是 2 个人时：那个条件此后恒为空（列表永远空着，
+  // 人也不在面板上了，用户只能手动清），所以回落到「或」——与 nextOnlyMeFilter 同一套
+  // 处理。调用方会把这次降级写进提示（剪枝本来就不许静默）
+  const onlyMode: OnlyMode = f.onlyMode === 'partner' && only.length !== 2 ? 'any' : f.onlyMode
+  return normalizeFilter({ onlyPlayerIds: only, excludePlayerIds: exclude, onlyMode })
 }
 
 /**
@@ -196,9 +228,14 @@ export function pruneFilter(f: ScheduleFilter, playerIds: number[]): ScheduleFil
  * 不能只看「我在不在选中集合里」：多选下我可能只是集合的一员，那时按钮并不代表
  * 「只看我」。反过来说，这个判定为真时排除列表必定为空 —— 所以「再点一下取消筛选」
  * 不可能丢掉用户设过的排除（那些排除在第一次点击时就已经被收敛掉了）。
+ *
+ * 「搭档」不算生效：它要求正好 2 个人，只有我一个人时列表恒为空，按钮亮着却什么都
+ * 看不到会让人以为坏了。让判定为假，点一下就会收敛成真正的「只看我」（见
+ * nextOnlyMeFilter）。
  */
 export function isOnlyMeFilter(f: ScheduleFilter, uid: number | null): boolean {
   return uid != null
+    && f.onlyMode !== 'partner'
     && f.onlyPlayerIds.length === 1 && f.onlyPlayerIds[0] === uid
     && f.excludePlayerIds.length === 0
 }
@@ -210,11 +247,13 @@ export function isOnlyMeFilter(f: ScheduleFilter, uid: number | null): boolean {
  * - 已经正好是「只看我一个人」→ 取消筛选，回到全部比赛（保留开关键手感）
  */
 export function nextOnlyMeFilter(f: ScheduleFilter, uid: number): ScheduleFilter {
-  return isOnlyMeFilter(f, uid)
-    ? emptyFilter()
-    // 只有一个选中者时 onlyMode 不影响结果，但保留用户选过的模式：
-    // 之后在面板里再加一个人时，他不会发现自己设的「且」被悄悄改回「或」了
-    : normalizeFilter({ onlyPlayerIds: [uid], excludePlayerIds: [], onlyMode: f.onlyMode })
+  if (isOnlyMeFilter(f, uid)) return emptyFilter()
+  // 只有一个选中者时「且」与「或」结果等价，所以保留用户选过的模式：
+  // 之后在面板里再加一个人时，他不会发现自己设的「且」被悄悄改回「或」了。
+  // 「搭档」是例外：它要求正好 2 个人，只剩我一个人时恒为空 —— 点「只看我」却一场都
+  // 看不到会让人以为功能坏了，所以这里必须落回「或」。
+  const onlyMode: OnlyMode = f.onlyMode === 'partner' ? 'any' : f.onlyMode
+  return normalizeFilter({ onlyPlayerIds: [uid], excludePlayerIds: [], onlyMode })
 }
 
 /**

@@ -12,7 +12,7 @@
  *   3 布局：各页首元素相对滚动容器顶边的距离（改动前逐像素基线，别随手改 CSS）
  *     + 对阵表首条高亮不被裁剪（裁剪边界到卡片顶 ≥ 11px）
  *   4 邀请码那行：副标题只占一行；文案变长时省略号截断、右侧邀请码仍完整
- *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）」开关（默认「或」、可持久化）
+ *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）/ 搭档（同一队）」开关（默认「或」、可持久化）
  *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
  *   9 赛事详情：进行中「追加比赛」（档位来自服务端、按倍数追加、非创建者看不到入口）
  *  10 管理面板：用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程、权限收窄的菜单
@@ -812,9 +812,9 @@ async function scenarioFilterWithFinished(page) {
   assert('收尾已清掉持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
 }
 
-/** 场景 7：对阵表「只看」多选的匹配方式开关（默认「或」，可切「且（同场）」） */
+/** 场景 7：对阵表「只看」多选的匹配方式开关（默认「或」，可切「且（同场）」「搭档（同一队）」） */
 async function scenarioScheduleOnlyMode(page) {
-  console.log('7) 对阵表：只看多选的「或（任意一人）/ 且（必须同场）」开关')
+  console.log('7) 对阵表：只看多选的「或（任意一人）/ 且（必须同场）/ 搭档（同一队）」开关')
   // 第1场 p1 p2 | p3 p4 ；第2场 p5 p6 | p7 p8 ；第3场（第2轮）p1 p3 | p5 p7
   // p2 与 p6 从不同场 → 用来区分「或」（看得见）与「且」（看不见）
   const rounds = [
@@ -878,7 +878,7 @@ async function scenarioScheduleOnlyMode(page) {
   // 01. 默认必须是「或」（老用户升级后行为不变）
   await openPanel()
   assert('筛选面板默认选中「或（任意一人）」', (await activeMode()) === '或（任意一人）', await activeMode())
-  assert('「或」和「且」两个开关都在', (await page.ev(`document.querySelectorAll('.mode-row .pick').length`)) === 2)
+  assert('「或」「且」「搭档」三个开关都在', (await page.ev(`document.querySelectorAll('.mode-row .pick').length`)) === 3)
 
   // 02. 「或」：p2 与 p6 从不同场，但并集下两场都出来
   await pickIn(0, 'p2')
@@ -944,6 +944,91 @@ async function scenarioScheduleOnlyMode(page) {
   await clear()
   assert('收尾清除后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
   assert('收尾已清掉持久化条件', (await page.ev(`localStorage.getItem('schedule-filter:2')`)) === null)
+
+  // 07. 「搭档（同一队）」：只看这两个人是不是队友
+  //     第1场 p1 p2 | p3 p4 → p1、p2 是队友
+  await openPanel()
+  assert('能切到「搭档（同一队）」', (await setMode('搭档（同一队）')) === 'OK')
+  await pickIn(0, 'p1')
+  await pickIn(0, 'p2')
+  await confirm()
+  assert('「搭档」：p1、p2 是第1场的队友 → 只剩第1场',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场']), JSON.stringify(await shown()))
+  assert('「搭档」的摘要以「搭档」开头（区别于「只看」「同场」）',
+    (await summary()) === '搭档 p1、p2', await summary())
+
+  // 同场但分属两队（第3场 p1 p3 | p5 p7 里 p3 与 p7 是对手）：
+  // 「且（同场）」看得到，「搭档」必须看不到 —— 这是新开关存在的意义
+  await openPanel()
+  await pickIn(0, 'p1')
+  await pickIn(0, 'p2')
+  await pickIn(0, 'p3')
+  await pickIn(0, 'p7')
+  await confirm()
+  assert('「搭档」：同场但互为对手 → 0 场（不是「且（同场）」）',
+    (await count()) === 0, `实际 ${await count()}`)
+  await openPanel()
+  await setMode('且（必须同场）')
+  await confirm()
+  assert('同一对人在「且（同场）」下能看到那场（证明两个开关确实不同）',
+    JSON.stringify(await shown()) === JSON.stringify(['第3场']), JSON.stringify(await shown()))
+
+  // 选的人数不是 2 个时提前给红字提示（否则只会看到空列表）
+  await openPanel()
+  await setMode('搭档（同一队）')
+  await pickIn(0, 'p7')
+  assert('「搭档」选 1 个人时给出红字提示', await page.ev(`!!document.querySelector('.filter-hint.warn')`))
+  assert('提示写明要正好选 2 个人',
+    ((await page.ev(`(document.querySelector('.filter-hint.warn')?.textContent || '')`))).includes('正好选 2 个人'))
+  await pickIn(0, 'p3')
+  await pickIn(0, 'p5')
+  await pickIn(0, 'p6')
+  await pickIn(0, 'p1')   // 凑到 3 个人
+  assert('「搭档」选 3 个人时也给提示', await page.ev(`!!document.querySelector('.filter-hint.warn')`))
+  await confirm()
+  assert('「搭档」选 3 个人筛不出比赛', (await count()) === 0, `实际 ${await count()}`)
+  assert('人数不对时筛选栏摘要写明原因（不用打开面板就知道为什么空）',
+    (await summary()) === '搭档 p1 等 3 人（需选 2 人）', await summary())
+
+  // 08. 「搭档」也要跟着条件一起记住
+  await openPanel()
+  await page.clickText('重置')
+  await sleep(400)
+  await setMode('搭档（同一队）')
+  await pickIn(0, 'p1')
+  await pickIn(0, 'p2')
+  await confirm()
+  await page.goto('/tournament/2/schedule', 2200)
+  assert('刷新后仍是「搭档」', (await summary()) === '搭档 p1、p2', await summary())
+  assert('持久化的条件里 onlyMode = partner',
+    (await page.ev(`JSON.parse(localStorage.getItem('schedule-filter:2') || '{}').onlyMode`)) === 'partner')
+
+  await clear()
+  assert('搭档条件清除后回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
+
+  // 09. 在「搭档」下点「只看我」：必须落回「或」——「搭档」要求正好 2 人，
+  //     收敛成我一个人时如果还留着 partner，会一场都筛不出来（曾经就是这样）
+  await openPanel()
+  await setMode('搭档（同一队）')
+  await pickIn(0, 'p1')
+  await pickIn(0, 'p2')
+  await confirm()
+  assert('先摆好「搭档 p1、p2」', (await summary()) === '搭档 p1、p2', await summary())
+  const clickOnlyMe = () => page.ev(`(() => {
+    const el = [...document.querySelectorAll('.filter-bar .filter-mini')].find(e => (e.textContent || '').trim() === '只看我')
+    if (!el) return 'NOTFOUND'
+    el.click(); return 'OK'
+  })()`)
+  assert('「只看我」按钮在', (await clickOnlyMe()) === 'OK')
+  await sleep(700)
+  assert('「只看我」落回「或」：摘要变成「只看 p1」', (await summary()) === '只看 p1', await summary())
+  assert('「只看我」能看自己参加的场次（不是空列表）',
+    JSON.stringify(await shown()) === JSON.stringify(['第1场', '第3场']), JSON.stringify(await shown()))
+  assert('持久化的 onlyMode 也跟着回到 any',
+    (await page.ev(`JSON.parse(localStorage.getItem('schedule-filter:2') || '{}').onlyMode`)) === 'any')
+  await clickOnlyMe()
+  await sleep(700)
+  assert('再点一次取消筛选，回到全部比赛', (await count()) === 3, `实际 ${await count()}`)
 }
 
 /** 场景 8：对阵表右侧那行「裁 X」：被顶替后必须显示新裁判 */

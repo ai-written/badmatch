@@ -93,12 +93,14 @@ test('matchVisible：只看 + 排除叠加 = 两个条件同时满足', () => {
   assert.equal(matchVisible(M([9, 5, 6, 7]), f), false, '没有只看的人 → 隐藏')
 })
 
-// ------------------------------------------------ 「或 / 且」两种只看模式
+// ------------------------------------------------ 「或 / 且 / 搭档」三种只看模式
 
-test('normalizeFilter：onlyMode 只认 all，其余一律回落 any', () => {
+test('normalizeFilter：onlyMode 只认 all / partner，其余一律回落 any（或）', () => {
   assert.equal(normalizeFilter({ onlyPlayerIds: [1] }).onlyMode, 'any', '旧数据没有这个字段')
   assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'all' }).onlyMode, 'all')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1, 2], onlyMode: 'partner' }).onlyMode, 'partner')
   assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'ALL' }).onlyMode, 'any', '不认大小写变体')
+  assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'wat' }).onlyMode, 'any', '没见过的值')
   assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: true }).onlyMode, 'any', '脏类型')
   assert.equal(normalizeFilter({ onlyPlayerIds: [1], onlyMode: null }).onlyMode, 'any')
   assert.equal(emptyFilter().onlyMode, 'any', '默认必须是「或」')
@@ -145,6 +147,37 @@ test('pruneFilter / nextOnlyMeFilter 必须保留 onlyMode', () => {
   // 剪枝没有变化时保持同一个引用（调用方据此判断要不要落盘/提示）
   const keep = normalizeFilter({ onlyPlayerIds: [1], onlyMode: 'all' })
   assert.equal(pruneFilter(keep, [1, 2]), keep)
+})
+
+test('nextOnlyMeFilter：在「搭档」下点「只看我」必须落回「或」（否则恒为空）', () => {
+  const partner = normalizeFilter({ onlyPlayerIds: [1, 2], onlyMode: 'partner' })
+  const me = nextOnlyMeFilter(partner, 7)
+  assert.deepEqual(me, { onlyPlayerIds: [7], excludePlayerIds: [], onlyMode: 'any' },
+    '搭档要求正好 2 人，只剩一个人时恒为空 —— 点「只看我」不能一场都看不到')
+  // 用一场"我参加的比赛"验证：收敛后必须看得到
+  assert.equal(matchVisible(M([7, 2, 3, 4]), me), true)
+  // 「且」仍然保留用户选过的模式（与「或」结果等价，不必改）
+  assert.equal(nextOnlyMeFilter(normalizeFilter({ onlyPlayerIds: [1, 2], onlyMode: 'all' }), 7).onlyMode, 'all')
+})
+
+test('pruneFilter：搭档被剪到不是 2 个人时降级成「或」（否则条件恒为空）', () => {
+  const partner = normalizeFilter({ onlyPlayerIds: [1, 2], onlyMode: 'partner' })
+  // 2 号退赛（赛程里只剩 1）→ 「搭档」不可能再成立，回落到「或」，否则列表永远空着
+  assert.deepEqual(pruneFilter(partner, [1, 3, 4]),
+    { onlyPlayerIds: [1], excludePlayerIds: [], onlyMode: 'any' })
+  // 剪完还是 2 个人 → 模式原样保留（没有变化时连引用都不变）
+  assert.equal(pruneFilter(partner, [1, 2, 3]), partner)
+  assert.equal(pruneFilter(partner, [1, 2, 3]).onlyMode, 'partner')
+  // 两人都不在赛程里 → 只看集合空了，模式也不再有意义
+  assert.equal(pruneFilter(partner, [3, 4]).onlyMode, 'any')
+})
+
+test('isOnlyMeFilter：搭档模式不算「只看我」（按钮亮着却什么都看不到）', () => {
+  const partnerMe = normalizeFilter({ onlyPlayerIds: [7], onlyMode: 'partner' })
+  assert.equal(isOnlyMeFilter(partnerMe, 7), false)
+  // 点一下应该收敛成真正的「只看我」，而不是把它清掉
+  assert.deepEqual(nextOnlyMeFilter(partnerMe, 7),
+    { onlyPlayerIds: [7], excludePlayerIds: [], onlyMode: 'any' })
 })
 
 test('filterRounds：未启用筛选时不重建数组，启用后保留轮次结构', () => {
@@ -257,6 +290,51 @@ test('shortRefereeName：空值不炸（详情还没加载出来时是 null）',
   assert.equal(shortRefereeName(undefined), '')
 })
 
-test('shortRefereeName：按码点截断，emoji 不会被劈成半个', () => {
+test('shortRefereeName：按码点截断，代理对（emoji）不会被劈成两半', () => {
   assert.equal(shortRefereeName('🏸🏸🏸🏸🏸'), '🏸🏸🏸🏸…')
+})
+
+test('只看「搭档」：同一队的两人看得到，同场但分属两队看不到', () => {
+  const m = M([1, 2, 3, 4])          // A 队：1、2；B 队：3、4
+  const f = (ids, mode = 'partner') => normalizeFilter({ onlyPlayerIds: ids, onlyMode: mode })
+
+  assert.equal(matchVisible(m, f([1, 2])), true, 'A 队两人')
+  assert.equal(matchVisible(m, f([3, 4])), true, 'B 队两人')
+  assert.equal(matchVisible(m, f([2, 1])), true, '顺序无关')
+  assert.equal(matchVisible(m, f([1, 3])), false, '分属两队 = 对手，不是搭档')
+  assert.equal(matchVisible(m, f([1, 5])), false, '5 号不在这一场')
+
+  // 与「且（同场）」的关键差别：1 和 3 在同一场（是对手），「且」看得到、「搭档」看不到
+  assert.equal(matchVisible(m, f([1, 3], 'all')), true, '「且」只看同场')
+  assert.equal(matchVisible(m, f([1, 3], 'any')), true, '「或」只看有没有人参加')
+})
+
+test('只看「搭档」：必须正好 2 个人（1 个或 3 个以上都筛不出）', () => {
+  const m = M([1, 2, 3, 4])
+  const f = (ids) => normalizeFilter({ onlyPlayerIds: ids, onlyMode: 'partner' })
+  assert.equal(matchVisible(m, f([1])), false)
+  assert.equal(matchVisible(m, f([1, 2, 3])), false)
+  assert.equal(matchVisible(m, f([1, 2, 3, 4])), false)
+})
+
+test('只看「搭档」可以和「排除」叠加', () => {
+  const m = M([1, 2, 3, 4])
+  const hit = normalizeFilter({ onlyPlayerIds: [1, 2], excludePlayerIds: [9], onlyMode: 'partner' })
+  assert.equal(matchVisible(m, hit), true)
+  const blocked = normalizeFilter({ onlyPlayerIds: [1, 2], excludePlayerIds: [4], onlyMode: 'partner' })
+  assert.equal(matchVisible(m, blocked), false, '排除的人在场 → 整场不显示')
+})
+
+test('filterRounds 在「搭档」下只留这两人同队的场次', () => {
+  const rounds = [{
+    id: 11,
+    matches: [
+      { ...M([1, 2, 3, 4]), id: 101 },   // 1、2 一队；1 与 3 是此场的对手
+      { ...M([1, 3, 5, 6]), id: 102 },   // 1、3 一队
+    ],
+  }]
+  const asPair = filterRounds(rounds, normalizeFilter({ onlyPlayerIds: [1, 2], onlyMode: 'partner' }))
+  assert.deepEqual(asPair[0].matches.map((m) => m.id), [101])
+  const asRivals = filterRounds(rounds, normalizeFilter({ onlyPlayerIds: [1, 3], onlyMode: 'partner' }))
+  assert.deepEqual(asRivals[0].matches.map((m) => m.id), [102], '只留他们同队那场，对手那场不算')
 })
