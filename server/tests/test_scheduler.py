@@ -374,21 +374,103 @@ def test_try_schedule_relaxes_history_before_changing_the_match_count():
 
     这是开赛 / 追加比赛 / 重排共用的兜底策略，也是"实测 5 人 5 场会被顶成 10 场"那个坑的
     修复依据：带历史排不出来时，必须先在**同一档位**上退到不带历史。
+
+    注意：历史退出贪心打分之后（见 generate_schedule），带历史本身已经不会再让排程走死路，
+    所以这里用"第一级必定失败"的替身来钉住**兜底顺序**，不再依赖某个具体输入。
     """
+    import app.api.engine_api as engine_api
     from app.api.engine_api import _try_schedule
 
     players = [1, 2, 3, 4, 5]
-    dead_end = _history_of([generate_schedule(players, 5), generate_schedule([3, 1, 2, 4, 5], 5)])
+    real = engine_api.generate_schedule
+    calls: list[tuple] = []
 
-    schedule, level = _try_schedule(players, 5, (dead_end, ({}, {}, {})))
+    def fake(pl, m, *hist):
+        calls.append((tuple(pl), m, hist))
+        if len(calls) == 1:
+            raise ValueError("第一级排不出来")     # 模拟"带历史走死路"
+        return real(pl, m)
+
+    engine_api.generate_schedule = fake
+    try:
+        schedule, level = _try_schedule(players, 5, (({"x": 1}, {}, {}), ({}, {}, {})))
+    finally:
+        engine_api.generate_schedule = real
+
     assert schedule is not None and len(schedule) == 5
     assert level == 1, "带历史排不出来时应当在同一档位上退到不带历史"
+    assert [c[1] for c in calls] == [5, 5], "两级都在同一档位上试，不能先改档位"
 
     # 第一级就够用时不退级
-    assert _try_schedule(players, 5, ({}, {}, {}))[1] == 0
+    assert _try_schedule(players, 5, (({}, {}, {}),))[1] == 0
 
     # 所有级都排不出来 → (None, None)，由调用方决定换档位还是报错
-    assert _try_schedule(players, 5, (dead_end,))[0] is None
+    engine_api.generate_schedule = lambda *a, **k: (_ for _ in ()).throw(ValueError("都不行"))
+    try:
+        assert _try_schedule(players, 5, (({}, {}, {}),))[0] is None
+    finally:
+        engine_api.generate_schedule = real
+
+
+# ---- 场内公平：每个人遇到的对手次数都要均衡（跨赛事避重不能破坏它）----
+
+def _pair_and_opponent_counts(schedule):
+    partners, opponents = Counter(), Counter()
+    for (a, b), (c, d), *_ in schedule:
+        t1, t2 = _pair_key(a, b), _pair_key(c, d)
+        partners[t1] += 1
+        partners[t2] += 1
+        for u in t1:
+            for v in t2:
+                opponents[_pair_key(u, v)] += 1
+    return partners, opponents
+
+
+@pytest.mark.parametrize("shuffle_seed", [None, 1, 2, 3, 7, 99])
+def test_opponents_are_perfectly_even_for_14_matches(shuffle_seed):
+    """8 人 14 场：每对搭档恰好 1 次、每对相遇恰好 2 次 —— 这是数学最优（56 个名额 / 28 对）。"""
+    players = list(range(1, 9))
+    if shuffle_seed is not None:
+        random.Random(shuffle_seed).shuffle(players)
+    schedule = generate_schedule(players, 14)
+    partners, opponents = _pair_and_opponent_counts(schedule)
+    all_pairs = [_pair_key(i, j) for i in players for j in players if i < j]
+    assert [partners.get(p, 0) for p in all_pairs] == [1] * 28
+    assert [opponents.get(p, 0) for p in all_pairs] == [2] * 28
+
+
+def test_history_does_not_break_opponent_balance():
+    """跨赛事避重不能破坏场内公平：带着最近几场的历史排，仍然每对搭档 1 次、每对相遇 2 次。"""
+    players = list(range(1, 9))
+    prev = [generate_schedule(list(players), 14) for _ in range(3)]
+    ph, oh, mh = _history_of(prev)
+    schedule = generate_schedule(list(players), 14, ph, oh, mh)
+    partners, opponents = _pair_and_opponent_counts(schedule)
+    all_pairs = [_pair_key(i, j) for i in players for j in players if i < j]
+    assert [partners.get(p, 0) for p in all_pairs] == [1] * 28
+    assert [opponents.get(p, 0) for p in all_pairs] == [2] * 28
+
+    # 而且确实在避重：与历史里那 42 场不重复（或最多剩 1 场，见 _quality_attempts 的实测）
+    used = {_match_key(_pair_key(*t1), _pair_key(*t2)) for s in prev for t1, t2, *_ in s}
+    repeated = sum(1 for t1, t2, *_ in schedule
+                   if _match_key(_pair_key(*t1), _pair_key(*t2)) in used)
+    assert repeated <= 1, repeated
+
+
+def test_opponent_balance_holds_across_sizes():
+    """其它规模也不能出现"某对打很多次、某对一次没打"：极差 ≤3（12 人 33 场的最好成绩就是 3）。"""
+    for n, m in ((5, 5), (6, 6), (7, 7), (8, 16), (8, 22), (9, 18), (12, 33)):
+        schedule = generate_schedule(list(range(1, n + 1)), m)
+        _partners, opponents = _pair_and_opponent_counts(schedule)
+        counts = [opponents.get(_pair_key(i, j), 0)
+                  for i in range(1, n + 1) for j in range(i + 1, n + 1)]
+        assert max(counts) - min(counts) <= 3, (n, m, counts)
+        # 每个人都打同样的场次（构造保证，顺手复验）
+        played = Counter()
+        for (a, b), (c, d), *_ in schedule:
+            for p in (a, b, c, d):
+                played[p] += 1
+        assert set(played.values()) == {4 * m // n}, (n, m, played)
 
 
 # ---- 落库前的左右随机翻边：抹掉「名单第一人永远站左队」 ----

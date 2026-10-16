@@ -22,31 +22,45 @@ from itertools import combinations
 #                           等权重或更高会把搭档多样性挤掉（实测 8 人 16 场：搭档重复 6 → 8）
 PARTNER_PENALTY = 3
 OPPONENT_PENALTY = 2
-# 20 而不是 10：跨赛事避重（见 engine_api 的 RECENT_EVENT_HISTORY）靠它兜住。
-# base（-played_sum + cool_sum）在 8 人局里的波动可达 ±10 上下，权重 10 时"久等的人先上"
-# 偶尔会压过"别跟上一场重复"：实测 600 组比较里 72 次（12%）与上一场出现 1 场重复；
-# 调到 20 后是 0 次，而其它指标一点没退化（8 人 28 场：相同对局 0 / 重复搭档 28 /
-# 重复对手 84 与原来完全相同；上场间隔平均 2.00、最大 3 场也不变）。
-# 再往上（30/50/100）结果与 20 相同，所以取最小的 20。
+# 20 而不是 10：它在两个地方起作用 ——
+# ① 赛程内部：贪心自带的计数保证一份赛程里不出现"同 4 人 + 同分组"的重复；
+# ② 挑候选（_history_collision）：跨赛事避重的优先级由这三个权重的**相对大小**决定 ——
+#    先避开"上周那一场 4 人 + 同样分组"（20），其次重复搭档（3），最后重复对手（2）。
 DUPLICATE_PENALTY = 20
 
-# 换序重排的最大次数（第 0 次不洗牌，其余用固定种子，因此整体仍是确定性的）
-ATTEMPTS = 8
+# 换序重排的次数按人数分档，见 _quality_attempts（第 0 次不洗牌、其余用固定种子，
+# 因此同一批人 + 同样顺序的结果仍是确定的、可复现的）
 
 
 def _quality_attempts(num_players: int) -> int:
     """允许「多排几次挑最好」的次数。
 
-    单次排程成本约 O(M * C(N,4) * 3)，但带精确剪枝后只展开其中一小部分。
+    现在每次尝试要同时挑两件事：①场内均衡（`_quality`）②不跟最近几场撞（`_history_collision`）。
+    "既均衡、又完全不撞历史"的那一份未必是第一份，所以小规模给得足；单份成本随人数上涨，
+    大规格按档位收，沿用"最坏情况下开一次赛也在几秒内"的预算（并靠下面的提前收工兜住常态）。
+
+    实测（8 人 14 场、最近 3 场历史的稳态）：
+      K=8 → 挑出来的那份"完全不撞历史"占 44%；K=30 → 89%；K=60 → 97%（其余 1 场重复）。
+    实际上"场内均衡 + 完全不撞历史"往往头几份就命中，所以下面按人数分档主要是**兜住最坏情况**：
+    实测开赛一次 8 人 14 场 2ms、12 人 33 场 48ms、16 人 60 场 0.3s、24 人 96 场 2.7s、
+    32 人 96 场 2.6s、48 人 96 场 4.4s。
+
+    单次排程成本约 O(M * C(N,4) * 3)，带精确剪枝后只展开其中一小部分。
     实测单次：8 人 28 场 6ms、16 人 100 场 0.32s、24 人 96 场 0.33s、
     32 人 96 场 0.77s、48 人 96 场 4.3s、64 人 64 场 13.3s。
-    按这个量级分档，保证最坏情况下开一次赛也在几秒内（多数情况会提前收工）。
     注意死路重试不受这个限制 —— 排不出来就得换序一直试（见 generate_schedule）。
+
+    注意 N > 48 时只排一份：没有挑选余地，那一档仍让历史参与贪心打分（见 generate_schedule），
+    否则跨赛事避重在这种规模上会整个失效。
     """
+    if num_players <= 12:
+        return 60
+    if num_players <= 20:
+        return 16
     if num_players <= 24:
-        return ATTEMPTS
+        return 6
     if num_players <= 32:
-        return 4
+        return 3
     if num_players <= 48:
         return 2
     return 1
@@ -57,23 +71,32 @@ def _quality(schedule) -> tuple:
 
     1. 完全相同的对局数 —— 玩家一眼就能看出来的重复，最优先
     2. 重复搭档数 —— 搭档是最稀缺的资源，其次
-    3. 重复对手数 —— 最后
+    3. 重复对手数 —— 再其次
+    4. 对手次数极差 —— 场内公平的硬指标。光看第 3 项看不出"某对碰 4 次、另一对只碰 1 次"：
+       28 对全都碰过时 Σ(v-1) 恒等于 56-28=28，与分布无关；本项把**没碰过的对按 0 算**，
+       所以"从没遇到过"也会被计入（实测带上它之后，8 人 14 场回到"每对恰好相遇 2 次"）。
     """
     matches = Counter()
     partners = Counter()
     opponents = Counter()
+    players: set = set()
     for (a, b), (c, d), *_ in schedule:
         t1, t2 = _pair_key(a, b), _pair_key(c, d)
         matches[_match_key(t1, t2)] += 1
         partners[t1] += 1
         partners[t2] += 1
+        players.update((a, b, c, d))
         for u in t1:
             for v in t2:
                 opponents[_pair_key(u, v)] += 1
+    ordered = sorted(players)
+    counts = [opponents.get(_pair_key(x, y), 0)
+              for i, x in enumerate(ordered) for y in ordered[i + 1:]]
     return (
         sum(v - 1 for v in matches.values()),
         sum(v - 1 for v in partners.values()),
         sum(v - 1 for v in opponents.values()),
+        (max(counts) - min(counts)) if counts else 0,
     )
 
 
@@ -117,6 +140,31 @@ def fairness_step(num_players: int) -> int:
     return num_players // math.gcd(4, num_players)
 
 
+def _history_collision(schedule, partner_history, opponent_history, match_history) -> int:
+    """这份赛程跟给定历史"撞"了多少（越小越该选）。
+
+    历史**不再参与贪心打分**：一旦参与，它会把贪心推出"场内均衡"的结构（实测 8 人 14 场，
+    对手对相遇次数极差 4~5 的赛事占 91%，而不带历史时 100% 是"每对搭档 1 次、每对相遇 2 次"）。
+    改成：贪心始终不带历史地排出**场内均衡**的候选，再在若干候选里挑一份最不撞历史的。
+    计分口径与贪心里的历史项一致（同一套权重），只是整份赛程累加。
+    """
+    partner_history = partner_history or {}
+    opponent_history = opponent_history or {}
+    match_history = match_history or {}
+    score = 0
+    for (a, b), (c, d), *_ in schedule:
+        t1, t2 = _pair_key(a, b), _pair_key(c, d)
+        # 搭档历史两个方向都查（库里的键方向不固定，与 _greedy_build 一致）
+        for p in (t1, t2):
+            score += PARTNER_PENALTY * (partner_history.get(p, 0)
+                                        + partner_history.get(p[::-1], 0))
+        score += DUPLICATE_PENALTY * match_history.get(_match_key(t1, t2), 0)
+        for u in t1:
+            for v in t2:
+                score += OPPONENT_PENALTY * opponent_history.get(_pair_key(u, v), 0)
+    return score
+
+
 def generate_schedule(players, total_matches, partner_history=None,
                       opponent_history=None, match_history=None):
     """排一份（新增的）赛程。
@@ -132,8 +180,10 @@ def generate_schedule(players, total_matches, partner_history=None,
     （跨赛事避重，见那边的 RECENT_EVENT_HISTORY）—— 同一群体每周固定打球时，
     这能避免"上周那场 4 人、同样分组"原样再来一次。
 
-    注意这三者只影响**评分**，不改变目标场次：每人还是打 target 场，
-    只是"跟谁打、怎么分组"会更偏向没出现过的组合。
+    **这三者不参与贪心打分**（那会把贪心推出场内均衡的结构），而是用来在若干份
+    "场内同样均衡"的候选赛程里挑一份最不撞历史的 —— 于是"每个人对手都公平"与
+    "跨赛事避重"能一起拿到；详见函数体的注释与 _history_collision。
+    它们也不改变目标场次：每人还是打 target 场。
     """
     N = len(players)
     target = (4 * total_matches) // N
@@ -141,33 +191,54 @@ def generate_schedule(players, total_matches, partner_history=None,
     if partner_history is None:
         partner_history = defaultdict(int)
 
-    # 第 0 次尝试不带 rng（不洗牌）→ 结果完全确定；后 7 次用固定种子，
+    # 第 0 次尝试不带 rng（不洗牌）→ 结果完全确定；后几次用固定种子，
     # 所以整个函数是**可复现**的：同一批人、同样顺序永远排出同一份赛程。
     #
-    # 贪心是"一次成型"的，不同的候选顺序会走出不同结果（有的会撞死路，有的会留下
-    # 完全相同的对局）。所以这里不再"第一次成功就返回"，而是把 8 次都排出来按
-    # _quality 挑最好的一份；已经达到「没有相同对局 + 搭档不重复到理论下限」就提前收工。
+    # 贪心是"一次成型"的，不同的候选顺序会走出不同结果（有的会撞死路，有的留下完全相同的
+    # 对局、或者跟最近几场撞得更多）。所以这里把 K 次都排出来，
+    # 按「①场内质量（_quality）②跟历史的碰撞（_history_collision）」字典序挑最好的一份。
+    #
+    # **历史不参与贪心**：这是"每个人对手都公平"的关键 —— 不带历史时贪心稳定排出场内均衡
+    # 的赛程（8 人 14 场实测 100% 做到"每对搭档恰好 1 次、每对相遇恰好 2 次"），
+    # 历史只用来在若干份同样均衡的候选里挑"最不跟最近几场撞"的那一份。
+    # 唯一例外：只排得起一份的规模（N > 48，见 _quality_attempts）没有挑选余地，
+    # 那一档仍把历史交给贪心，免得跨赛事避重在大规模上整个失效。
     partner_floor = max(0, 2 * total_matches - N * (N - 1) // 2)
     quality_attempts = _quality_attempts(N)
+    history_in_greedy = quality_attempts == 1
+    # 场内均衡的目标：8 人及以下把"对手次数极差 0"当目标（8 人 14 场实测 100% 做得到，
+    # 多试几份而已，单份成本毫秒级）；9 人以上结构上往往做不到 0（12 人 33 场不带任何历史时
+    # 的最好成绩就是 2~3），再拿 0 当收工条件就永远收不了工、白跑满份数（实测 1.5 秒）。
+    spread_goal = 0 if N <= 8 else 2
 
     best = None
     best_key = None
     last_error: ValueError | None = None
-    for attempt in range(ATTEMPTS):
+    for attempt in range(quality_attempts):
         rng = random.Random(attempt) if attempt else None
         try:
-            schedule = _greedy_build(players, total_matches, target, dict(partner_history), rng,
-                                     opponent_history, match_history)
+            if history_in_greedy:
+                schedule = _greedy_build(players, total_matches, target,
+                                         dict(partner_history), rng,
+                                         opponent_history, match_history)
+            else:
+                schedule = _greedy_build(players, total_matches, target, {}, rng, None, None)
         except ValueError as e:
             # 死路：必须继续换序重试，不受 quality_attempts 限制
             last_error = e
             continue
-        key = _quality(schedule)
+        quality = _quality(schedule)
+        collision = _history_collision(schedule, partner_history,
+                                       opponent_history, match_history)
+        key = (quality, collision)
         if best_key is None or key < best_key:
             best, best_key = schedule, key
-        if best_key[0] == 0 and best_key[1] <= partner_floor:
+        # 提前收工：场内已经达标（没有相同对局 + 搭档重复到理论下限 + 对手次数够均衡）
+        # **而且完全不撞历史**
+        if (quality[0] == 0 and quality[1] <= partner_floor
+                and quality[3] <= spread_goal and collision == 0):
             break
-        if best is not None and attempt + 1 >= quality_attempts:
+        if attempt + 1 >= quality_attempts:
             break
 
     if best is None:

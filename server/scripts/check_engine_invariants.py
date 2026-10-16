@@ -22,6 +22,8 @@
 11. **分配裁判是均衡轮转**：优先挑本赛事已安排执裁最少的人、并列才随机 ——
     一次分完整局后每人次数极差 ≤2、没人轮空（纯随机时极差常见 3~4、12.9% 的人轮空），
     同时"不吹自己那场 / 同一批不重复 / 只填空缺 / 已认领的算进计数"都要成立
+12. **场内公平（对手均衡）**：8 人 14 场必须每对搭档恰好 1 次、每对对手恰好相遇 2 次
+    —— 带跨赛事历史时也不许破（历史只用来在候选里挑，不参与贪心；以前会让极差到 4~5）
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -486,6 +488,67 @@ def active_referee_counts(info):
     return counts
 
 
+async def pair_counts(tid):
+    """(搭档对次数, 对手对次数)：从库里的配对表统计，用来验"场内公平"。"""
+    async with Session() as s:
+        round_ids = [r.id for r in (await s.execute(
+            select(Round).where(Round.tournament_id == tid))).scalars().all()]
+        pairings = {p.id: p for p in (await s.execute(
+            select(RoundPairing).where(RoundPairing.round_id.in_(round_ids)))).scalars().all()}
+        matches = (await s.execute(
+            select(Match).where(Match.tournament_id == tid))).scalars().all()
+    partners: Counter = Counter()
+    opponents: Counter = Counter()
+    for m in matches:
+        pa, pb = pairings[m.pairing_a_id], pairings[m.pairing_b_id]
+        t1 = tuple(sorted((pa.player_a_id, pa.player_b_id)))
+        t2 = tuple(sorted((pb.player_a_id, pb.player_b_id)))
+        partners[t1] += 1
+        partners[t2] += 1
+        for u in t1:
+            for v in t2:
+                opponents[tuple(sorted((u, v)))] += 1
+    return partners, opponents
+
+
+async def check_in_event_opponent_balance():
+    """场内公平：每个人遇到的对手次数必须均衡 —— "对手公平"的硬指标。
+
+    实测背景：只要跨赛事避重参与贪心打分，8 人 14 场里"某对相遇 4~5 次、另一对只 1 次"
+    的赛事会占 91%；把历史改成"只用来在候选里挑"之后回到数学最优
+    （每对搭档恰好 1 次、每对对手恰好相遇 2 次）。这条不变量守的就是它。
+    """
+    print("\n12) 场内公平：搭档/对手次数均衡（带跨赛事历史也必须成立）")
+    admin, ids = await mk_users("fair8", 8)
+    for idx in range(1, 5):                    # 连开 4 场：第 2 场起都带着前面几场的历史
+        tid = await seed_open(admin, ids)      # 同一批人、同样的报名顺序
+        async with Session() as s:
+            await start_tournament(tournament_id=tid, request=fake_request(),
+                                   body=StartRequest(total_matches=14),
+                                   user=await s.get(User, admin), db=s)
+        partners, opponents = await pair_counts(tid)
+        pairs = [tuple(sorted((a, b))) for i, a in enumerate(ids) for b in ids[i + 1:]]
+        pv = Counter(partners.get(p, 0) for p in pairs)
+        ov = Counter(opponents.get(p, 0) for p in pairs)
+        check(f"第 {idx} 场（8 人 14 场）：每对搭档恰好 1 次", set(pv) == {1}, dict(pv))
+        check(f"第 {idx} 场（8 人 14 场）：每对对手恰好相遇 2 次", set(ov) == {2}, dict(ov))
+
+    # 12 人 33 场：结构上做不到"人人 2 次"，但不带历史的最优极差就是 3
+    admin2, ids2 = await mk_users("fair12", 12)
+    tid2 = await seed_open(admin2, ids2)
+    async with Session() as s:
+        await start_tournament(tournament_id=tid2, request=fake_request(),
+                               body=StartRequest(total_matches=33),
+                               user=await s.get(User, admin2), db=s)
+    _partners2, opponents2 = await pair_counts(tid2)
+    pairs2 = [tuple(sorted((a, b))) for i, a in enumerate(ids2) for b in ids2[i + 1:]]
+    vals = [opponents2.get(p, 0) for p in pairs2]
+    check("12 人 33 场：对手次数极差 ≤3", max(vals) - min(vals) <= 3,
+          (max(vals), min(vals), dict(Counter(vals))))
+    app2 = await appearances(tid2)
+    check("12 人 33 场：每人场次相等（各 11 场）", set(app2.values()) == {11}, dict(app2))
+
+
 async def check_referee_balance():
     """分配裁判：均衡轮转 + 并列随机。
 
@@ -838,9 +901,12 @@ async def check_cross_event_avoidance():
         sigs.append(await match_sigs(tid))
 
     check("三场都排满 14 场", [len(x) for x in sigs] == [14, 14, 14], [len(x) for x in sigs])
-    check("第二场没有重复第一场的对局", not (sigs[1] & sigs[0]), sorted(sigs[1] & sigs[0]))
-    check("第三场没有重复前两场的对局（往前看 3 场）",
-          not (sigs[2] & (sigs[0] | sigs[1])), sorted(sigs[2] & (sigs[0] | sigs[1])))
+    # 容忍 1 场：历史改成"只在候选里挑"之后，8 人 14 场的实测分布是
+    # 完全不重复 97%、重复 1 场 3%（想要 100% 得把候选份数加到 200+，不值当）
+    check("第二场最多只跟第一场重复 1 场",
+          len(sigs[1] & sigs[0]) <= 1, sorted(sigs[1] & sigs[0]))
+    check("第三场最多只跟前两场重复 1 场（往前看 3 场）",
+          len(sigs[2] & (sigs[0] | sigs[1])) <= 1, sorted(sigs[2] & (sigs[0] | sigs[1])))
     for idx, tid in enumerate(tids, start=1):
         app = await appearances(tid)
         check(f"第 {idx} 场每人场次仍然相等（8 人 14 场 = 各 7 场）",
@@ -891,6 +957,7 @@ async def main() -> int:
     await check_reschedule_with_started_round()
     await check_cross_event_avoidance()
     await check_start_shuffle()
+    await check_in_event_opponent_balance()
     await check_referee_balance()
 
     await engine.dispose()
