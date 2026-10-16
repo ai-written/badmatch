@@ -15,6 +15,8 @@
 7. 已禁用账号的邀请码不能注册（正常账号的仍可）
 8. **跨赛事避重**：同一批人连开三场，后面的赛事不重复前面用过的「同 4 人 + 同分组」对局，
    且每人场次仍然相等（跨赛事历史只影响打分）
+9. **重排未打完的场次**：**只允许一场都没开打时**用（有比赛在打/已打完必须被 400 拦下），
+   用完全部换新、每人场次仍相等、写回真实总场次、被取消场次的在任裁判收到「请重新认领」通知
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -416,6 +418,95 @@ async def check_owner_and_invite():
     check("被禁用账号的邀请码没有产生任何新账号", rejected is None, rejected)
 
 
+async def started_match_count(tid):
+    """已经开打（在打 + 已打完）的场次数：重排只允许在它为 0 时使用。"""
+    async with Session() as s:
+        return (await s.execute(select(func.count(Match.id)).where(
+            Match.tournament_id == tid,
+            Match.status != MatchStatus.PENDING))).scalar() or 0
+
+
+async def pending_match_ids(tid):
+    async with Session() as s:
+        return {mid for (mid,) in (await s.execute(select(Match.id).where(
+            Match.tournament_id == tid, Match.status != MatchStatus.FINISHED))).all()}
+
+
+async def check_reschedule():
+    """重排未打完的场次：**只在一场都没开打时可用**，且用完全部换新、每人场次相等。
+
+    这是「换一份赛程」这条路的真库不变量（pytest 那套不连库测不到）：除了删轮次重建，
+    还要保证已开打的赛事被硬拦（不能把在打/已打完的比赛删掉）、写回真实总场次、
+    并把被取消场次的在任裁判通知到。
+    """
+    print("\n8) 重排未打完的场次：没开打才能用，用完全部换新、裁判被通知")
+    from app.api.engine_api import reschedule_schedule
+
+    admin, ids = await mk_users("resch", 8)
+    tid = await seed_ongoing(admin, ids, total=14, played_rounds=0)   # 一场都没开打
+
+    # 1) 已经有比赛打完（= 已经开打）时必须被拒
+    async with Session() as s:
+        m = (await s.execute(select(Match).where(Match.tournament_id == tid)
+                             .order_by(Match.id).limit(1))).scalar_one()
+        m.status = MatchStatus.FINISHED
+        m.score_a, m.score_b = 11, 5
+        await s.commit()
+    check("前置：库里已有 1 场开打", await started_match_count(tid) == 1, await started_match_count(tid))
+    async with Session() as s:
+        try:
+            await reschedule_schedule(tournament_id=tid, request=fake_request(),
+                                      user=await s.get(User, admin), db=s)
+            check("已经开打时重排被拒", False, "竟然重排成功了")
+        except HTTPException as e:
+            check("已经开打时重排被拒（400，且说明「开打」）",
+                  e.status_code == 400 and "开打" in e.detail, e.detail)
+    # 还原成"一场没开打"，再验成功路径
+    async with Session() as s:
+        m = (await s.execute(select(Match).where(Match.tournament_id == tid)
+                             .order_by(Match.id).limit(1))).scalar_one()
+        m.status = MatchStatus.PENDING
+        m.score_a = m.score_b = m.winner_pairing_id = None
+        await s.commit()
+
+    # 2) 给一场比赛挂上在任裁判：重排要把他卸任并通知
+    async with Session() as s:
+        m = (await s.execute(select(Match).where(
+            Match.tournament_id == tid,
+            Match.status == MatchStatus.PENDING).order_by(Match.id).limit(1))).scalar_one()
+        m.referee_id = ids[0]
+        await s.commit()
+
+    pending_before = await pending_match_ids(tid)
+    async with Session() as s:
+        res = await reschedule_schedule(tournament_id=tid, request=fake_request(),
+                                        user=await s.get(User, admin), db=s)
+
+    pending_after = await pending_match_ids(tid)
+    app = await appearances(tid)
+
+    check("没开打时可以重排，旧场次一个不剩",
+          not (pending_before & pending_after), sorted(pending_before & pending_after))
+    check("重排后场次数不变（仍是 14 场）", len(pending_after) == 14, len(pending_after))
+    check("每人场次仍然相等（8 人 14 场 = 各 7 场）",
+          len(app) == 8 and set(app.values()) == {7}, dict(app))
+    check("重排完仍然没有任何比赛开打", await started_match_count(tid) == 0,
+          await started_match_count(tid))
+    check("写回真实总场次（= 14）", res["total_matches"] == 14, res["total_matches"])
+    check("返回的 replaced_matches = 被删掉的场次数",
+          res["replaced_matches"] == len(pending_before),
+          (res["replaced_matches"], len(pending_before)))
+    check("被取消场次的在任裁判收到通知（1 人）",
+          res["released_referees"] == 1, res["released_referees"])
+    async with Session() as s:
+        notes = (await s.execute(select(Notification).where(
+            Notification.tournament_id == tid,
+            Notification.type == "schedule_changed"))).scalars().all()
+    check("通知内容说清「请重新认领」",
+          len(notes) == 1 and "重新认领" in notes[0].message,
+          [n.message for n in notes])
+
+
 async def check_cross_event_avoidance():
     """跨赛事避重：同一批人连开三场，后面的赛事不该重复前面的「同 4 人 + 同分组」对局。
 
@@ -423,7 +514,7 @@ async def check_cross_event_avoidance():
     数学必然；但"上周那一场 4 个人、同样的分组再来一次"是能避免的（实测不带历史时
     连续两周平均会重合 1 场）。这条不变量只有真库能验：历史是从**别的赛事**读出来的。
     """
-    print("\n6) 跨赛事避重：连开三场，后面的赛事不重复前面用过的对局")
+    print("\n9) 跨赛事避重：连开三场，后面的赛事不重复前面用过的对局")
     admin, ids = await mk_users("cross", 8)
     sigs: list[set] = []
     tids: list[int] = []
@@ -479,6 +570,7 @@ async def main() -> int:
     await check_start()
     await check_withdraw_and_totals()
     await check_owner_and_invite()
+    await check_reschedule()
     await check_cross_event_avoidance()
 
     await engine.dispose()

@@ -14,7 +14,8 @@
  *   4 邀请码那行：副标题只占一行；文案变长时省略号截断、右侧邀请码仍完整
  *   7 对阵表筛选：「只看」多选的「或（任意一人）/ 且（必须同场）/ 搭档（同一队）」开关（默认「或」、可持久化）
  *   8 对阵表右侧「裁 X」：被后来者顶替后显示新裁判、卸任后带「（已卸任）」、顶替前先确认
- *   9 赛事详情：进行中「追加比赛」（档位来自服务端、按倍数追加、非创建者看不到入口）
+ *   9 赛事详情：进行中「追加比赛」与「重排未打完的场次」（档位来自服务端、按倍数追加、
+ *     重排要先确认且取消不发请求、非创建者看不到入口）
  *  10 管理面板：用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程、权限收窄的菜单
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
@@ -1092,7 +1093,7 @@ async function scenarioScheduleRefereeRow(page) {
 
 /** 场景 9：赛中追加比赛（开场次排少了 / 还有时间，再排几场） */
 async function scenarioAddMatches(page) {
-  console.log('9) 赛事详情：进行中的赛事追加比赛')
+  console.log('9) 赛事详情：进行中的赛事追加比赛 / 重排未打完的场次')
   const players = Array.from({ length: 8 }, (_, i) => ({
     id: i + 1, user_id: i + 1, username: `p${i + 1}`, avatar: '', is_active: true,
     created_at: '2026-09-26T09:00:00',
@@ -1109,6 +1110,8 @@ async function scenarioAddMatches(page) {
     id: 2, creator_id: 1, title: 'T', location: 'L', status: 'ongoing', max_participants: 8,
     courts: [], registered_count: 8, cancelled_count: 0, total_matches: 22, points_to_win: 11,
     server_now: '2026-09-29T08:00:00', is_registered: true, created_at: '2026-09-26T09:00:00',
+    // 一场都没开打 → 才给「重排未打完的场次」入口（有比赛开打/打完就不给）
+    started_match_count: 0,
   }
   await page.enableMock((path) => {
     if (/auth\/me$/.test(path)) return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
@@ -1116,6 +1119,10 @@ async function scenarioAddMatches(page) {
     if (/add-matches$/.test(path)) {
       detail = { ...detail, total_matches: detail.total_matches + 2 }
       return { ok: true, added: 2, requested: 2, total_matches: detail.total_matches, rounds: 1, per_person_added: 1 }
+    }
+    if (/reschedule$/.test(path)) {
+      return { ok: true, players: 8, matches: 22, replaced_matches: 6, replaced_rounds: 3,
+               released_referees: 2, total_matches: 22 }
     }
     if (/\/registrations$/.test(path)) return players
     if (/\/tournaments\/2$/.test(path)) return detail
@@ -1164,10 +1171,42 @@ async function scenarioAddMatches(page) {
   assert('总场次刷新为新值（共 24 场）',
     await page.ev(`(document.body.textContent || '').includes('共 24 场')`))
 
+  // 重排未打完的场次：确认框要先说清"已打完的不动 + 裁判会被取消"，取消不发请求
+  assert('进行中：创建者能看到「重排未打完的场次」',
+    (await btnTexts()).includes('重排未打完的场次'), JSON.stringify(await btnTexts()))
+  const reschedulePosts = () => page.requests.filter((r) => r.method === 'POST' && /reschedule$/.test(r.path))
+  page.requests = []
+  assert('能点「重排未打完的场次」', (await page.clickText('重排未打完的场次')) === true)
+  await sleep(500)
+  const rd = await page.dialog()
+  assert('重排前先弹确认框', rd?.标题 === '重排未打完的场次', rd?.标题)
+  assert('确认框写清会整批换掉 + 裁判会被取消',
+    (rd?.正文 || '').includes('整批换掉') && (rd?.正文 || '').includes('裁判'), rd?.正文)
+  await page.cancelDialog()
+  await sleep(500)
+  assert('取消后不发重排请求', reschedulePosts().length === 0, `实际 ${reschedulePosts().length}`)
+
+  assert('再次点「重排未打完的场次」', (await page.clickText('重排未打完的场次')) === true)
+  await sleep(500)
+  await page.confirmDialog()
+  assert('确认后恰好 1 个 reschedule 请求', reschedulePosts().length === 1, `实际 ${reschedulePosts().length}`)
+  assert('重排提示写明重排了多少场 + 几位裁判要重新认领',
+    (await toast()) === '已重排 6 场，2 位裁判需重新认领', await toast())
+
   // 非创建者（也不是管理员）不该看到入口
   detail = { ...detail, creator_id: 2 }
   await page.goto('/tournament/2', 2200)
   assert('非创建者看不到「追加比赛」', !(await btnTexts()).includes('追加比赛'), JSON.stringify(await btnTexts()))
+  assert('非创建者看不到「重排未打完的场次」',
+    !(await btnTexts()).includes('重排未打完的场次'), JSON.stringify(await btnTexts()))
+
+  // 已经开打（有人打了/正在打）：重排入口必须消失 —— 重排会把未开打的场次整批删掉重排
+  detail = { ...detail, creator_id: 1, started_match_count: 2 }
+  await page.goto('/tournament/2', 2200)
+  assert('已有比赛开打时，创建者也看不到「重排未打完的场次」',
+    !(await btnTexts()).includes('重排未打完的场次'), JSON.stringify(await btnTexts()))
+  assert('开打后「追加比赛」仍在（那个入口允许赛中追加）',
+    (await btnTexts()).includes('追加比赛'), JSON.stringify(await btnTexts()))
 
   // 在场人数不足 4 人：给明确提示，而不是弹一个空列表
   detail = { ...detail, creator_id: 1 }

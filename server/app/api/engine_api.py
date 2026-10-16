@@ -1,6 +1,7 @@
 """
-引擎触发 API: 开始赛事、退赛重排、追加比赛
+引擎触发 API: 开始赛事、退赛重排、追加比赛、重排赛程
 """
+import random
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -469,6 +470,190 @@ async def add_matches(
 
 class WithdrawBody(BaseModel):
     new_creator_id: int | None = None
+
+
+@router.post("/reschedule")
+async def reschedule_schedule(
+    tournament_id: int,
+    request: Request,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """重排**未打完**的场次（赛事创建者 / 管理员 / 超管），且**只在一场都没开打时**允许。
+
+    用途：这份赛程不合适（比如跟上周撞得太多、或分组看着别扭）时换一份。
+    一旦有比赛在打或已打完就不能重排 —— 这个入口会把未打完的场次整批删掉重排，
+    那等于毁掉正在进行/已经产生的比分与历史（详情页也会据此不显示按钮，
+    但按钮的显隐是体验层，真正的边界在这里）。
+
+    与「退赛重排」是同一套机制，只有两点不同：
+
+    1. 人不减（名单仍是当前在场选手），所以它不需要退赛那套房主转让逻辑；
+    2. **故意引入随机**（洗牌名单顺序）。开赛/追加/退赛重排必须可复现，而"重排"这个
+       动作本身就是"再给我换一份"：算法是确定性的，沿用同一份输入会排出完全一样的结果，
+       点了就像没反应（这正是这个按钮最容易踩的坑）。
+
+    避重历史照旧：这份旧赛程（玩家已经看过那些对局）+ 最近 3 场赛事（见
+    RECENT_EVENT_HISTORY）都算"用过的"，新的一份尽量避开它们。
+    """
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
+    tournament = t.scalar_one_or_none()
+    if not tournament:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    if tournament.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有赛事创建者、管理员或超级管理员可以重排赛程")
+    if tournament.status != TournamentStatus.ONGOING:
+        raise HTTPException(status_code=400, detail="只有进行中的赛事可以重排赛程")
+
+    # 一场都不能开打：在打的（有人正在记分）和已打完的（历史/比分）都必须原样留着。
+    # 行锁已经拿到（FOR UPDATE 与比赛级接口的 FOR SHARE 互斥），所以这里判过之后
+    # 不会再有比赛在本次重排期间被打完。
+    started = (await db.execute(
+        select(func.count(Match.id)).where(
+            Match.tournament_id == tournament_id,
+            Match.status != MatchStatus.PENDING,
+        )
+    )).scalar() or 0
+    if started > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"已经有 {started} 场开打了，不能再重排赛程（重排只用于开赛前调整）",
+        )
+
+    # 先把「当前这份赛程」的重复统计记下来（含马上要删掉的未打场次）：它们是玩家已经
+    # 看到过的安排，新的一份要避开，否则重排后看起来"没变化"。再并上最近几场赛事的。
+    partner_history, opponent_history, match_history = await _load_history(db, [tournament_id])
+    recent_partner, recent_opponent, recent_match = await _load_history(
+        db, await _recent_tournament_ids(db, tournament_id))
+    partner_history.update(recent_partner)
+    opponent_history.update(recent_opponent)
+    match_history.update(recent_match)
+
+    # 至此可以断定：库里这个赛事的比赛**全都是 PENDING**（一场没开打），
+    # 所以下面直接整批删掉重排，不需要退赛那套"冻结已打完轮次"的处理
+    # （也不存在要保留下来的比分与历史）。
+    pending_rounds = await db.execute(
+        select(Round).where(
+            Round.tournament_id == tournament_id,
+            Round.status == RoundStatus.PENDING,
+        )
+    )
+    released_referees: set[int] = set()
+    replaced_rounds = 0
+    replaced_matches = 0
+    for r in pending_rounds.scalars().all():
+        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id != None))
+        for m in ms.scalars().all():
+            # 只通知在任裁判：已卸任者（referee_id 保留作历史）不需要重新认领
+            if m.has_active_referee:
+                released_referees.add(m.referee_id)
+        match_ids = await db.execute(select(Match.id).where(Match.round_id == r.id))
+        for (mid,) in match_ids.all():
+            await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
+            replaced_matches += 1
+        await db.execute(delete(Match).where(Match.round_id == r.id))
+        await db.execute(delete(RoundPairing).where(RoundPairing.round_id == r.id))
+        await db.execute(delete(Round).where(Round.id == r.id))
+        replaced_rounds += 1
+
+    players = await _active_player_ids(db, tournament_id)
+    n = len(players)
+    if n < 4:
+        raise HTTPException(status_code=400, detail="在场选手不足 4 人，无法重排赛程")
+
+    if tournament.total_matches and (4 * tournament.total_matches) % n == 0:
+        M = tournament.total_matches
+    else:
+        M = compute_match_count(n)
+
+    # 见 docstring：显式重排洗牌，保证"再点一次会换一份"
+    random.shuffle(players)
+
+    # 贪心在个别组合下会走死路（与开赛/追加同一层兜底）：先带着"避开旧赛程"排，
+    # 排不出来就只留跨赛事避重，再不行才报错 —— 用户点的是"换一份"，不该收到 500
+    try:
+        schedule = generate_schedule(players, M, partner_history, opponent_history, match_history)
+    except ValueError:
+        try:
+            schedule = generate_schedule(players, M, recent_partner, recent_opponent, recent_match)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
+
+    schedule = shuffle_sides(schedule)          # 与开赛/追加同口径，抹掉"名单靠前者总在左队"
+    rounds_data = compute_rounds(schedule, 2)
+
+    # 新轮次接在最大轮号之后。正常情况下待删的轮次就是全部（一场没开打），
+    # 所以 last_num 会是 0、新赛程从第 1 轮开始；照查不误是为了将来规则宽松时不用改这里。
+    last_num = (await db.execute(
+        select(Round.round_number)
+        .where(Round.tournament_id == tournament_id)
+        .order_by(Round.round_number.desc())
+        .limit(1)
+    )).scalar() or 0
+
+    for round_idx, round_matches in enumerate(rounds_data, start=1):
+        r = Round(tournament_id=tournament_id, round_number=last_num + round_idx,
+                  is_regenerated=True)
+        db.add(r)
+        await db.flush()
+
+        for match_data in round_matches:
+            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+
+            pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
+            pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
+            db.add(pairing_a)
+            db.add(pairing_b)
+            await db.flush()
+
+            db.add(Match(
+                tournament_id=tournament_id,
+                round_id=r.id,
+                pairing_a_id=pairing_a.id,
+                pairing_b_id=pairing_b.id,
+                court_id=court_id,
+                time_slot_id=slot_id,
+            ))
+
+    for ref_id in released_referees:
+        db.add(Notification(
+            user_id=ref_id,
+            tournament_id=tournament_id,
+            type="schedule_changed",
+            message="赛事赛程已重排，您之前认领的裁判场次已取消，请重新认领。",
+        ))
+
+    # 写回真实总场次（正常情况下就等于 M：一场都没开打，全部场次都是这次排出来的）。
+    # 仍然按库里的真实行数写，是为了万一将来放开"允许重排已开打的赛事"时这里不用改。
+    tournament.total_matches = (await db.execute(
+        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+    )).scalar() or M
+
+    # 先提交再广播再审计（全仓统一）：订阅者收到 schedule_updated 后会立刻拉赛程，
+    # 未提交的话读到的还是重排前的旧轮次；审计随后
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "schedule_updated"})
+    await audit(
+        user=user, action="tournament_reschedule",
+        target_type="tournament", target_id=tournament_id,
+        detail={"players": n, "matches": M, "replaced_matches": replaced_matches,
+                "replaced_rounds": replaced_rounds,
+                "released_referees": len(released_referees),
+                "total_matches": tournament.total_matches},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return {
+        "ok": True,
+        "players": n,
+        "matches": M,
+        "replaced_matches": replaced_matches,
+        "replaced_rounds": replaced_rounds,
+        "released_referees": len(released_referees),
+        "total_matches": tournament.total_matches,
+    }
+
 
 @router.post("/withdraw/{player_id}")
 async def withdraw_player(

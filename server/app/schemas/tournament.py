@@ -134,6 +134,9 @@ class TournamentDetail(BaseModel):
     cancelled_count: int = 0
     # 还没裁判的场次数（未打完 + 没有在任裁判）：>0 时赛事详情页才显示「一次性分配裁判」
     pending_referee_count: int = 0
+    # 已经开打的场次数（在打 + 已打完）：==0（一场都没开打）时详情页才显示「重排未打完的场次」，
+    # 因为那个入口会把未打完的场次整批删掉重排（有人在打/打过就不能这么做）
+    started_match_count: int = 0
     total_matches: int | None = None
     points_to_win: int = 11
     registration_open_at: datetime | None = None

@@ -276,7 +276,7 @@ const ACTION_LABELS: Record<string, string> = {
   admin_delete_user: '删除用户', tournament_create: '创建赛事', tournament_create_batch: '批量创建赛事',
   admin_disable_user: '禁用用户', admin_enable_user: '恢复用户',
   tournament_delete: '删除赛事', tournament_start: '开始赛事', tournament_end: '结束赛事',
-  tournament_add_matches: '追加比赛',
+  tournament_add_matches: '追加比赛', tournament_reschedule: '重排赛程',
   // 由运维脚本 scripts/randomize_match_sides.py 写入（存量赛事对阵左右随机翻边）
   match_sides_randomized: '重置对阵左右',
   tournament_withdraw: '退赛', registration: '报名', cancel_registration: '取消报名',

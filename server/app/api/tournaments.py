@@ -616,6 +616,18 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
     )
     pending_referee_count = pending_referee_result.scalar() or 0
 
+    # 已经开打的场次数（在打 + 已打完）：详情页据此决定要不要显示「重排未打完的场次」。
+    # 重排会把"未打完"的场次整批删掉重排，一旦有人在打/打过，这么做就是毁掉进行中的
+    # 比分与历史，所以只允许在**一场都没开打**时用（接口那边也会再拦一次，这里的字段
+    # 只负责别给出一个点了必被拒的按钮）。
+    started_match_result = await db.execute(
+        select(func.count(Match.id)).where(
+            Match.tournament_id == t.id,
+            Match.status != MatchStatus.PENDING,
+        )
+    )
+    started_match_count = started_match_result.scalar() or 0
+
     courts_result = await db.execute(
         select(Court).where(Court.tournament_id == t.id).order_by(Court.sort_order)
     )
@@ -668,6 +680,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         registered_count=registered_count,
         cancelled_count=cancelled_count,
         pending_referee_count=pending_referee_count,
+        started_match_count=started_match_count,
         is_registered=is_registered,
         created_at=t.created_at.isoformat() if t.created_at else "",
     )

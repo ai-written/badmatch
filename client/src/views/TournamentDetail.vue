@@ -83,6 +83,12 @@
       <div class="creator-block" v-if="canManage && tournament.status === 'ongoing'">
         <!-- 开场次排少了 / 还有时间：可以再追加几场（后端只为每人新增场次相等的组合放行） -->
         <van-button plain type="primary" block round :loading="submitting" :disabled="submitting" @click="openAddMatches">追加比赛</van-button>
+        <!-- 换一份赛程（房主/管理员/超管）：**只有一场都没开打时才给**——重排会把未打完的
+             场次整批删掉重排，有人在打/打过就不能这么做（后端同一套判据，会回 400）。
+             服务端每次都会洗牌，所以连点会得到不同的赛程（不是"点了没反应"） -->
+        <van-button v-if="tournament.started_match_count === 0" plain type="primary" block round
+                    :loading="submitting" :disabled="submitting" style="margin-top:10px"
+                    @click="doReschedule">重排未打完的场次</van-button>
         <!-- 一次性把全部还没裁判的场次分完（房主/管理员/超管）。分完后还剩 0 场，
              这个入口和对阵表里的「分配裁判」按钮都会自动消失，所以实际上只能点一次 -->
         <van-button v-if="tournament.pending_referee_count > 0" plain type="primary" block round
@@ -695,6 +701,30 @@ async function doAddMatches(added: number) {
     const actual = Number(res.data?.added ?? added)
     // 服务端排不出请求的场次时会按步长往上试，实际追加数要如实告知
     showToast(actual === added ? `已追加 ${actual} 场比赛` : `所选场次排不出，已追加 ${actual} 场`)
+    await fetchDetail()
+  })
+}
+
+/** 重排未打完的场次：**只在一场都没开打时可用**（入口本身也按这个条件显示）。
+ *  把当前这份赛程整批换掉（房主/管理员/超管，后端同一套判据）；服务端每次都会洗牌，
+ *  所以连点两次会得到不同的赛程。这些场次上已认领的裁判会被取消并收到站内消息。 */
+async function doReschedule() {
+  try {
+    await showConfirmDialog({
+      title: '重排未打完的场次',
+      message: '会把当前这份还没开打的赛程整批换掉（每人场次不变）。'
+        + '已经认领这些场次的裁判会被取消并收到通知。',
+      confirmButtonText: '重排',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return   // 取消
+  }
+  await withSubmitting(async () => {
+    const res = await api.post(`/tournaments/${route.params.id}/reschedule`)
+    const replaced = Number(res.data?.replaced_matches ?? 0)
+    const refs = Number(res.data?.released_referees ?? 0)
+    showToast(`已重排 ${replaced} 场${refs > 0 ? `，${refs} 位裁判需重新认领` : ''}`)
     await fetchDetail()
   })
 }
