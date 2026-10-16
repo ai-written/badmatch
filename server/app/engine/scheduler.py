@@ -115,12 +115,16 @@ def generate_schedule(players, total_matches, partner_history=None,
                       opponent_history=None, match_history=None):
     """排一份（新增的）赛程。
 
-    partner_history / opponent_history / match_history 是**已有赛程**里的重复统计，
+    partner_history / opponent_history / match_history 是**已有比赛**里的重复统计，
     用来让新排出来的比赛尽量避开已经出现过的东西：
       - partner_history  —— 重复搭档（键为 _pair_key，两个方向各记一次）
       - opponent_history —— 重复对手
       - match_history    —— 完全相同的对局（同 4 人 + 同分组）
     三者缺省都为空，因此老调用方的行为完全不变。
+
+    统计的不止"本赛事已排的"：engine_api 会把**最近几场赛事**的统计一起并进来
+    （跨赛事避重，见那边的 RECENT_EVENT_HISTORY）—— 同一群体每周固定打球时，
+    这能避免"上周那场 4 人、同样分组"原样再来一次。
 
     注意这三者只影响**评分**，不改变目标场次：每人还是打 target 场，
     只是"跟谁打、怎么分组"会更偏向没出现过的组合。

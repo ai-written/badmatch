@@ -13,6 +13,8 @@
 5. 禁用房主后，房主转给未禁用的在场选手，并给新房主发一条提醒
 6. 退赛重排后 tournaments.total_matches 等于库里真实场次数；追加比赛按真实场次数算
 7. 已禁用账号的邀请码不能注册（正常账号的仍可）
+8. **跨赛事避重**：同一批人连开三场，后面的赛事不重复前面用过的「同 4 人 + 同分组」对局，
+   且每人场次仍然相等（跨赛事历史只影响打分）
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -29,6 +31,7 @@ import argparse
 import asyncio
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -55,8 +58,8 @@ from app.models.round import (                               # noqa: E402
 from app.engine.scheduler import generate_schedule, compute_rounds  # noqa: E402
 from app.schemas.auth import AdminSetActive, RegisterRequest  # noqa: E402
 from app.api.engine_api import (                              # noqa: E402
-    AddMatchesBody, add_matches, extra_match_options, start_tournament,
-    withdraw_player, WithdrawBody,
+    AddMatchesBody, StartRequest, add_matches, extra_match_options,
+    start_tournament, withdraw_player, WithdrawBody,
 )
 from app.api.auth import set_user_active, register            # noqa: E402
 
@@ -207,6 +210,34 @@ async def max_match_id(tid):
     async with Session() as s:
         return (await s.execute(select(func.max(Match.id))
                                 .where(Match.tournament_id == tid))).scalar() or 0
+
+
+async def match_sigs(tid) -> set:
+    """每场的规范键：同 4 人 + 同分组（两队之间也排序）——「完全相同的对局」。"""
+    async with Session() as s:
+        ms = (await s.execute(select(Match).where(Match.tournament_id == tid))).scalars().all()
+        out = set()
+        for m in ms:
+            pa = await s.get(RoundPairing, m.pairing_a_id)
+            pb = await s.get(RoundPairing, m.pairing_b_id)
+            out.add(frozenset((
+                frozenset((pa.player_a_id, pa.player_b_id)),
+                frozenset((pb.player_a_id, pb.player_b_id)),
+            )))
+        return out
+
+
+async def appearances(tid) -> Counter:
+    """每人上场次数（用来验证带历史排程后场次仍然相等）。"""
+    async with Session() as s:
+        ms = (await s.execute(select(Match).where(Match.tournament_id == tid))).scalars().all()
+        c: Counter = Counter()
+        for m in ms:
+            pa = await s.get(RoundPairing, m.pairing_a_id)
+            pb = await s.get(RoundPairing, m.pairing_b_id)
+            for p in (pa.player_a_id, pa.player_b_id, pb.player_a_id, pb.player_b_id):
+                c[p] += 1
+        return c
 
 
 async def disable(admin_id, uid):
@@ -385,6 +416,36 @@ async def check_owner_and_invite():
     check("被禁用账号的邀请码没有产生任何新账号", rejected is None, rejected)
 
 
+async def check_cross_event_avoidance():
+    """跨赛事避重：同一批人连开三场，后面的赛事不该重复前面的「同 4 人 + 同分组」对局。
+
+    为什么需要这条：8 人 14 场时搭档组合只有 C(8,2)=28 种、一周用满，跨周重复搭档是
+    数学必然；但"上周那一场 4 个人、同样的分组再来一次"是能避免的（实测不带历史时
+    连续两周平均会重合 1 场）。这条不变量只有真库能验：历史是从**别的赛事**读出来的。
+    """
+    print("\n6) 跨赛事避重：连开三场，后面的赛事不重复前面用过的对局")
+    admin, ids = await mk_users("cross", 8)
+    sigs: list[set] = []
+    tids: list[int] = []
+    for i in range(3):
+        tid = await seed_open(admin, ids)          # 同一批人、同样的报名顺序
+        async with Session() as s:
+            await start_tournament(tournament_id=tid, request=fake_request(),
+                                   body=StartRequest(total_matches=14),
+                                   user=await s.get(User, admin), db=s)
+        tids.append(tid)
+        sigs.append(await match_sigs(tid))
+
+    check("三场都排满 14 场", [len(x) for x in sigs] == [14, 14, 14], [len(x) for x in sigs])
+    check("第二场没有重复第一场的对局", not (sigs[1] & sigs[0]), sorted(sigs[1] & sigs[0]))
+    check("第三场没有重复前两场的对局（往前看 3 场）",
+          not (sigs[2] & (sigs[0] | sigs[1])), sorted(sigs[2] & (sigs[0] | sigs[1])))
+    for idx, tid in enumerate(tids, start=1):
+        app = await appearances(tid)
+        check(f"第 {idx} 场每人场次仍然相等（8 人 14 场 = 各 7 场）",
+              len(app) == 8 and set(app.values()) == {7}, dict(app))
+
+
 async def main() -> int:
     global Session
     parser = argparse.ArgumentParser(description="赛程/账号不变量检查（需一次性试点库）")
@@ -418,6 +479,7 @@ async def main() -> int:
     await check_start()
     await check_withdraw_and_totals()
     await check_owner_and_invite()
+    await check_cross_event_avoidance()
 
     await engine.dispose()
     print(f"\n共 {len(FAILED)} 项失败" + (f"：{FAILED}" if FAILED else "，全部通过 ✓"))

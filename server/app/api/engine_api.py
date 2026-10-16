@@ -24,6 +24,18 @@ from app.engine.scheduler import (
 # 总场次上限：与开赛时的校验同一个数（原先是硬编码两处，追加比赛也要用同一个上限）
 MAX_TOTAL_MATCHES = 100
 
+# 跨赛事避重：新排赛程时把「本赛事已排的」+「**最近几场赛事**的」搭档/对手/对局统计
+# 一起当历史喂给排程器，让本周尽量不出现上周打过的「同 4 人 + 同分组」对局。
+#
+# 为什么只承诺"避开相同的对局/搭档"，不承诺"搭档完全不重复"：8 人 14 场时每人打 7 场、
+# 正好要跟其余 7 人各搭档一次，而搭档组合总共只有 C(8,2)=28 种 —— 一周就用满全部搭档
+# 位，跨周必然重复。这是组合数学的限制，不是算法能绕开的（9 人以上搭档池才有多余空间）。
+#
+# 取 3 场（不是 1 场）：只看上一场会让配对在两份赛程之间来回摆（上周 A 组、这周 B 组、
+# 下周又回到 A 组）；往前看 3 场能把重复推得更远。历史只影响打分、不改变每人目标场次，
+# 所以「每人场次相等」不受影响（有单测）。
+RECENT_EVENT_HISTORY = 3
+
 
 class StartRequest(BaseModel):
     total_matches: int | None = None
@@ -108,6 +120,11 @@ async def start_tournament(
         # 未设置，或存量值与当前人数不匹配：按当前人数取最小可行场次
         M = compute_match_count(len(player_ids))
 
+    # 跨赛事避重：把最近几场赛事的搭档/对手/对局统计喂给排程器（本赛事此时还没排过赛程，
+    # 所以只会是别的赛事的）。同一群体每周固定打球时，这一步让"上周那场 4 人、同样分组"
+    # 不会原样再来一次。
+    partner_history, opponent_history, match_history = await _new_match_history(db, tournament_id)
+
     # 排程理论上对「4M 能被 N 整除」的组合都可行（scheduler 内部已用随机重试
     # 消除贪婪选人的死路），但仍保留一层兜底：万一某个组合排不出来，
     # 退到可行的最小场次，保证赛事总能开起来，而不是 500 回滚后卡在 open。
@@ -115,7 +132,8 @@ async def start_tournament(
     schedule = None
     adjusted_M = M
     try:
-        schedule = generate_schedule(player_ids, M)
+        schedule = generate_schedule(player_ids, M, partner_history,
+                                     opponent_history, match_history)
     except ValueError:
         candidate = compute_match_count(len(player_ids))
         while candidate <= max(M, 30):
@@ -123,7 +141,8 @@ async def start_tournament(
                 candidate += len(player_ids)
                 continue
             try:
-                schedule = generate_schedule(player_ids, candidate)
+                schedule = generate_schedule(player_ids, candidate, partner_history,
+                                             opponent_history, match_history)
                 adjusted_M = candidate
                 break
             except ValueError:
@@ -217,12 +236,16 @@ async def _active_player_ids(db: AsyncSession, tournament_id: int) -> list[int]:
     return [uid for (uid,) in rows.all()]
 
 
-async def _load_history(db: AsyncSession, tournament_id: int):
-    """已有赛程的搭档/对手/对局统计，交给排程器做重复惩罚。
+async def _load_history(db: AsyncSession, tournament_ids):
+    """给定赛事的搭档/对手/对局统计，交给排程器做重复惩罚。
 
     取**全部轮次**而不只是打过的：追加比赛时，还没开打的比赛也已经排在那里了，
     跟它排成一模一样同样是"重复"。
     """
+    ids = [tid for tid in tournament_ids if tid is not None]
+    if not ids:
+        return Counter(), Counter(), Counter()
+
     partner_history: Counter = Counter()
     opponent_history: Counter = Counter()
     match_history: Counter = Counter()
@@ -230,7 +253,7 @@ async def _load_history(db: AsyncSession, tournament_id: int):
     pairing_rows = await db.execute(
         select(RoundPairing)
         .join(Round, Round.id == RoundPairing.round_id)
-        .where(Round.tournament_id == tournament_id)
+        .where(Round.tournament_id.in_(ids))
     )
     pairings: dict[int, RoundPairing] = {}
     for p in pairing_rows.scalars().all():
@@ -241,7 +264,7 @@ async def _load_history(db: AsyncSession, tournament_id: int):
         pairings[p.id] = p
 
     match_rows = await db.execute(
-        select(Match).where(Match.tournament_id == tournament_id)
+        select(Match).where(Match.tournament_id.in_(ids))
     )
     for m in match_rows.scalars().all():
         pa, pb = pairings.get(m.pairing_a_id), pairings.get(m.pairing_b_id)
@@ -255,6 +278,27 @@ async def _load_history(db: AsyncSession, tournament_id: int):
                 opponent_history[_pair_key(u, v)] += 1
 
     return partner_history, opponent_history, match_history
+
+
+async def _recent_tournament_ids(db: AsyncSession, tournament_id: int) -> list[int]:
+    """本赛事之前创建的最近几场赛事 id（新的在前）。
+
+    只取 id 更小的：赛事按 id 递增创建，所以"下周的赛事"（提前建好、id 更大）不会
+    反过来影响"本周的赛事"。还没排过赛程的赛事查不到配对，带进来也无害。
+    """
+    rows = await db.execute(
+        select(Tournament.id)
+        .where(Tournament.id < tournament_id)
+        .order_by(Tournament.id.desc())
+        .limit(RECENT_EVENT_HISTORY)
+    )
+    return [tid for (tid,) in rows.all()]
+
+
+async def _new_match_history(db: AsyncSession, tournament_id: int):
+    """新排比赛（开赛 / 追加）要避开的重复：**本赛事已排的 + 最近几场赛事的**。"""
+    recent = await _recent_tournament_ids(db, tournament_id)
+    return await _load_history(db, [tournament_id, *recent])
 
 
 @router.get("/extra-match-options")
@@ -357,7 +401,7 @@ async def add_matches(
             detail=f"总场次上限 {MAX_TOTAL_MATCHES} 场（现有 {current} 场）",
         )
 
-    partner_history, opponent_history, match_history = await _load_history(db, tournament_id)
+    partner_history, opponent_history, match_history = await _new_match_history(db, tournament_id)
 
     # 贪心排程在个别组合下会走入死路（开赛那边也有同样的兜底）：按步长往上试，
     # 宁可多排一点也不要给用户一个 500。实际追加数会返回给前端提示。
@@ -597,7 +641,8 @@ async def withdraw_player(
         await db.execute(delete(RoundPairing).where(RoundPairing.round_id == r.id))
         await db.execute(delete(Round).where(Round.id == r.id))
 
-    partner_history = {}
+    # 本赛事已打完（冻结）轮次的搭档统计：重排出来的未开打轮次当然不能跟它们撞
+    frozen_partner: dict = {}
     frozen_rounds = await db.execute(
         select(Round).where(Round.tournament_id == tournament_id, Round.is_frozen == True)
     )
@@ -605,7 +650,7 @@ async def withdraw_player(
         pairings = await db.execute(select(RoundPairing).where(RoundPairing.round_id == r.id))
         for p in pairings.scalars().all():
             key = (p.player_a_id, p.player_b_id)
-            partner_history[key] = partner_history.get(key, 0) + 1
+            frozen_partner[key] = frozen_partner.get(key, 0) + 1
 
     remaining = []
     stats = await db.execute(
@@ -650,7 +695,18 @@ async def withdraw_player(
         new_M = tournament.total_matches
     else:
         new_M = compute_match_count(remaining_count)
-    new_schedule = generate_schedule(remaining, new_M, partner_history)
+    # 跨赛事避重：重排出来的未开打轮次也不该跟最近几场赛事撞车（见 RECENT_EVENT_HISTORY）。
+    # 历史只影响打分、不改变每人目标场次；万一带着它排不出来，就退回"只带本赛事冻结轮次"
+    # 的老排法 —— 「退赛」这条路不能因为避重而失败。
+    recent_partner, recent_opponent, recent_match = await _load_history(
+        db, await _recent_tournament_ids(db, tournament_id))
+    partner_history: Counter = Counter(frozen_partner)
+    partner_history.update(recent_partner)
+    try:
+        new_schedule = generate_schedule(remaining, new_M, partner_history,
+                                         recent_opponent, recent_match)
+    except ValueError:
+        new_schedule = generate_schedule(remaining, new_M, frozen_partner)
     # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
     # 的确定性偏置（remaining 仍是按报名顺序的名单），不翻边就会把偏置带进新赛程
     new_schedule = shuffle_sides(new_schedule)

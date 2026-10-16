@@ -283,6 +283,66 @@ def test_new_batch_keeps_equal_play_with_history():
         assert len(set(played.values())) == 1, f"n={n} 带历史追加后场次不等：{dict(played)}"
 
 
+def _history_of(schedules) -> tuple:
+    """把一份或多份赛程统计成 (搭档/对手/对局) 三个 Counter —— 与
+    engine_api._load_history 同一口径（搭档两个方向各记一次）。"""
+    partner_history: Counter = Counter()
+    opponent_history: Counter = Counter()
+    match_history: Counter = Counter()
+    for schedule in schedules:
+        for (a, b), (c, d), *_ in schedule:
+            t1, t2 = _pair_key(a, b), _pair_key(c, d)
+            for pair in (t1, t2):
+                partner_history[pair] += 1
+                partner_history[pair[::-1]] += 1
+            match_history[_match_key(t1, t2)] += 1
+            for u in t1:
+                for v in t2:
+                    opponent_history[_pair_key(u, v)] += 1
+    return partner_history, opponent_history, match_history
+
+
+def test_cross_event_history_avoids_same_matchups():
+    """跨赛事避重：把「上一场赛事」的统计当历史，新赛事不该再排出一模一样的对局。
+
+    这是同一群体每周固定打球的真实用法。注意搭档必然重复（8 人 14 场搭档组合只有
+    C(8,2)=28 种、一周用满），能且只能避开的是「同 4 人 + 同分组」再来一次。
+    """
+    for n, m in ((8, 14), (9, 18), (12, 33)):
+        players = list(range(n))
+        prev = generate_schedule(players, m)
+        partner_history, opponent_history, match_history = _history_of([prev])
+
+        # 报名顺序变了（先报名的人换了）也要避开上一场
+        nxt = generate_schedule(list(reversed(players)), m, partner_history,
+                                opponent_history, match_history)
+
+        repeated = set(_match_sigs(nxt)) & set(_match_sigs(prev))
+        assert not repeated, f"n={n}：新赛事重复了上一场的对局 {repeated}"
+        played = Counter(p for (a, b), (c, d), *_ in nxt for p in (a, b, c, d))
+        assert len(played) == n and len(set(played.values())) == 1, \
+            f"n={n}：带跨赛事历史后每人场次不等 {dict(played)}"
+
+
+def test_cross_event_history_covers_the_last_three_events():
+    """服务端往前看 RECENT_EVENT_HISTORY=3 场：这 3 场用过的对局都不该出现在第 4 场。"""
+    players = list(range(8))
+    recent = [generate_schedule(players, 14)]
+    for _ in range(2):                      # 后两场都带着"更早几场"的历史排出来
+        partner_history, opponent_history, match_history = _history_of(recent)
+        recent.append(generate_schedule(players, 14, partner_history,
+                                        opponent_history, match_history))
+
+    partner_history, opponent_history, match_history = _history_of(recent)
+    nxt = generate_schedule(players, 14, partner_history, opponent_history, match_history)
+
+    used = set()
+    for s in recent:
+        used |= set(_match_sigs(s))
+    assert not (set(_match_sigs(nxt)) & used), \
+        f"最近 3 场用过的对局不该再出现：{set(_match_sigs(nxt)) & used}"
+
+
 # ---- 落库前的左右随机翻边：抹掉「名单第一人永远站左队」 ----
 
 def test_shuffle_sides_only_swaps_the_two_teams():
