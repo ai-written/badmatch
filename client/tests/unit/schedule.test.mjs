@@ -12,7 +12,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   normalizeFilter, matchVisible, emptyFilter, isFilterActive, filterRounds,
-  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter,
+  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter, shortRefereeName,
 } from '../../src/utils/schedule.ts'
 
 const P = (id) => ({ id, username: `p${id}` })
@@ -241,4 +241,22 @@ test('nextOnlyMeFilter：一键收敛成只看我一个人；已经是则取消�
 
   // 已经生效再点 → 回到全部比赛
   assert.deepEqual(nextOnlyMeFilter(converged, me), { onlyPlayerIds: [], excludePlayerIds: [], onlyMode: 'any' })
+})
+
+test('shortRefereeName：4 个字以内全显示，超过就截 4 个字加省略号', () => {
+  assert.equal(shortRefereeName('王五'), '王五')
+  assert.equal(shortRefereeName('李尚往来'), '李尚往来', '正好 4 个字要显示全')
+  assert.equal(shortRefereeName('李尚往来啊'), '李尚往来…')
+  assert.equal(shortRefereeName('李尚往来啊啊啊'), '李尚往来…', '再长也只留 4 个字')
+  assert.equal(shortRefereeName('王五abcdef'), '王五ab…', '英文名同样按字符数算')
+})
+
+test('shortRefereeName：空值不炸（详情还没加载出来时是 null）', () => {
+  assert.equal(shortRefereeName(''), '')
+  assert.equal(shortRefereeName(null), '')
+  assert.equal(shortRefereeName(undefined), '')
+})
+
+test('shortRefereeName：按码点截断，emoji 不会被劈成半个', () => {
+  assert.equal(shortRefereeName('🏸🏸🏸🏸🏸'), '🏸🏸🏸🏸…')
 })

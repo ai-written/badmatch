@@ -244,3 +244,18 @@ export function focusMatchId(rounds: any[]): number | null {
 export function focusScrollTop(offsetTop: number, clientHeight: number, upperRatio = 1 / 3): number {
   return Math.max(0, offsetTop - clientHeight * upperRatio)
 }
+
+/**
+ * 对阵表卡片右上角「裁 X」那行用的短名：**最多 4 个字**，更长就截断加省略号。
+ *
+ * 为什么要有这条规则：右列只有 ~60px（「裁 」+ 4 个汉字正好一行）。名字一长就折行，
+ * 而「（已卸任）」在名字后面，折行时会被挤出可视区 —— 表现为"卸任标记不见了"（实测
+ * 「裁 李尚往来」折行）。按**字符数**截断而不是交给 CSS 的 text-overflow，是为了规则确定：
+ * 4 个字以内一定显示全，超过就一定是 4 个字 + …，与容器宽度、字体度量无关
+ * （CSS 那边再兜一层 nowrap + ellipsis，防止字体差异让 4 个字也放不下）。
+ */
+export function shortRefereeName(name: string | null | undefined, max = 4): string {
+  // 用 Array.from 按字符（码点）数：emoji 之类的代理对不会被劈成两半
+  const chars = Array.from(name || '')
+  return chars.length <= max ? chars.join('') : chars.slice(0, max).join('') + '…'
+}

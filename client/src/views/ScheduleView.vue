@@ -131,7 +131,11 @@
 
             <div class="match-info">
               <span v-if="m.status === 'finished' && m.duration_seconds != null" class="match-dur">{{ fmtDuration(m.duration_seconds) }}</span>
-              <span v-if="m.referee" class="foot-ref has">裁 {{ m.referee.username }}<template v-if="!m.active_referee">（已卸任）</template></span>
+              <!-- 名字最多 4 个字（多了截断加省略号，见 shortRefereeName）：右列只有 ~60px，
+                   再长就会折行并把「（已卸任）」挤没。已卸任标记单独一个 nowrap 的 span，
+                   这样非折不可时是从名字后面断开，而不是从名字中间劈开。
+                   e2e 是按 .match-card 里的 .foot-ref 取文本的，class 不能动 -->
+              <span v-if="m.referee" class="foot-ref has"><span class="foot-ref-name">裁 {{ shortRefereeName(m.referee.username) }}</span><span v-if="!m.active_referee" class="foot-ref-state">（已卸任）</span></span>
               <van-button v-if="m.can_referee" size="mini" type="primary" round @click.stop="claimReferee(m)">裁判</van-button>
             </div>
           </div>
@@ -199,7 +203,7 @@ import {
   withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
   normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
   pruneFilter, isOnlyMeFilter, nextOnlyMeFilter,
-  emptyFilter, type ScheduleFilter, type OnlyMode,
+  emptyFilter, shortRefereeName, type ScheduleFilter, type OnlyMode,
 } from '@/utils/schedule'
 import { showToast, showConfirmDialog } from 'vant'
 
@@ -814,7 +818,9 @@ onMounted(() => {
 .score-div { font-size: 16px; color: #ccc; margin: 0 2px; }
 
 .match-info {
-  width: 52px; flex-shrink: 0; margin-left: 4px;
+  /* 52 → 60：装得下「裁 」+ 4 个汉字（约 58px）。再宽就要从两侧选手名里抢，
+     而两侧各只有 ~107px（两个 48px 的 4 字名 + 8px 间距） */
+  width: 60px; flex-shrink: 0; margin-left: 2px;
   display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 .match-num { font-size: 10px; color: #aaa; }
@@ -835,5 +841,10 @@ onMounted(() => {
 
 .score-foot { margin-top: 6px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .score-foot .van-button { margin-top: 2px; }
-.foot-ref.has { color: #07c160; font-weight: 500; font-size: 11px; }
+/* 裁判行（右列内）：名字已按 4 个字截断（shortRefereeName），这里只保证
+   ① 名字那一节不换行、放不下就省略号；② 「（已卸任）」整块不拆开 */
+.foot-ref { max-width: 100%; font-size: 11px; line-height: 1.3; }
+.foot-ref-name { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.foot-ref-state { white-space: nowrap; }
+.foot-ref.has { color: #07c160; font-weight: 500; }
 </style>
