@@ -462,21 +462,39 @@ async def check_start_shuffle():
     print("\n10) 开赛洗牌：同一批人、同样报名顺序，第一场不再每次都一样")
     admin, ids = await mk_users("shuf", 8)
     firsts = []
+    tids = []
     for i in range(4):
         tid = await seed_open(admin, ids)
         async with Session() as s:
             await start_tournament(tournament_id=tid, request=fake_request(),
                                    body=StartRequest(total_matches=14),
                                    user=await s.get(User, admin), db=s)
+        tids.append(tid)
         firsts.append(await first_match_teams(tid))
 
     check("4 场的第一场不是同一个（名单顺序被洗过）",
           len(set(firsts)) > 1, [sorted(map(sorted, f)) for f in firsts])
+    # 洗过的顺序会落库（PlayerStats.id 顺序），所以"落库顺序 ≠ 报名顺序"至少要出现一次。
+    # 4 场都恰好等于报名顺序的概率是 (1/8!)^4，可忽略。
+    stored = [await player_stats_order(tid) for tid in tids]
+    check("落库的名单顺序确实被洗过（至少一场 ≠ 报名顺序）",
+          any(order != ids for order in stored), stored)
+    check("落库顺序仍是同一批人（洗牌没丢人/多人）",
+          all(sorted(order) == sorted(ids) for order in stored), stored)
     start_audits = [a for a in AUDITS if a.get("action") == "tournament_start"]
     seeds = [a.get("detail", {}).get("shuffle_seed") for a in start_audits[-4:]]
     check("开赛审计里记了 shuffle_seed（随机可追溯）",
           len(seeds) == 4 and all(isinstance(s, int) and s > 0 for s in seeds), seeds)
     check("4 场的洗牌种子各不相同", len(set(seeds)) == 4, seeds)
+
+
+async def player_stats_order(tid):
+    """落库的名单顺序（PlayerStats.id 顺序）—— 开赛洗牌后它就等于"这一场的名单顺序"。"""
+    async with Session() as s:
+        return [uid for (uid,) in (await s.execute(
+            select(PlayerStats.user_id)
+            .where(PlayerStats.tournament_id == tid)
+            .order_by(PlayerStats.id))).all()]
 
 
 async def check_reschedule():
@@ -558,6 +576,11 @@ async def check_reschedule():
     check("通知内容说清「请重新认领」",
           len(notes) == 1 and "重新认领" in notes[0].message,
           [n.message for n in notes])
+    resched_audits = [a for a in AUDITS if a.get("action") == "tournament_reschedule"]
+    check("重排审计里也记了 shuffle_seed（与开赛同一个口径）",
+          bool(resched_audits)
+          and isinstance(resched_audits[-1].get("detail", {}).get("shuffle_seed"), int),
+          resched_audits[-1].get("detail") if resched_audits else "没有审计")
 
 
 class _NoShuffleRandom:

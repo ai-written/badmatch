@@ -92,8 +92,9 @@ async def start_tournament(
             # 被禁用的账号登录不进来，排进赛程就是给全场安排一场打不了的比赛
             User.is_active == True,
         )
-        # 固定顺序：player_ids 会直接喂给排程算法，顺序不同排出来的对阵也不同。
-        # 不写 ORDER BY 时顺序由执行计划决定，等于每次开赛的输入都不一样。
+        # 固定顺序（报名先后的稳定序）：这个列表马上会被**随机洗一次**再喂给排程算法，
+        # 但仍然必须先有一份确定的顺序 —— 否则不写 ORDER BY 时顺序由执行计划决定，
+        # 同一个 shuffle_seed 也复现不出同一份赛程（洗牌本身是"洗这份确定的名单"）。
         .order_by(Registration.created_at, Registration.id)
     )
     registrations = regs.scalars().all()
@@ -108,8 +109,9 @@ async def start_tournament(
     #   算法本身是确定性的（同一份名单顺序 → 同一份赛程），不洗牌的话同一群体每周
     #   同样顺序报名就会拿到一模一样的第一场。
     #
-    # 用种子而不是直接 random.shuffle：出问题时按审计里的 shuffle_seed 能复现同一份赛程
-    # （算法内部的重试本来就是固定种子，所以"顺序 + 历史 + 场次数"定了，赛程就定了）。
+    # 用种子而不是直接 random.shuffle：出问题时按审计里的 shuffle_seed 能复现同一份
+    # **对阵与分组**（算法内部的重试本来就是固定种子，所以"顺序 + 历史 + 场次数"定了，
+    # 谁跟谁打、怎么分组就定了；只有落库前那次左右翻边是另一层随机，不受这个种子控制）。
     # 洗过的顺序会跟着 PlayerStats 一起落库，本赛事后续的追加比赛 / 退赛重排都按它算，
     # 所以**同一赛事内仍然可复现**，只有"每次开赛"才是随机的。
     shuffle_seed = random.randrange(1, 2 ** 31)
@@ -236,10 +238,12 @@ class AddMatchesBody(BaseModel):
 
 
 async def _active_player_ids(db: AsyncSession, tournament_id: int) -> list[int]:
-    """在场选手 id（按 PlayerStats.id，即开赛时的报名顺序）。
+    """在场选手 id（按 PlayerStats.id，即**开赛时打散后的名单顺序**）。
 
     顺序必须固定：这个列表会直接喂给排程算法，顺序不同排出来的对阵也不同
-    （与 withdraw 重排用的是同一个口径）。
+    （与 withdraw 重排用的是同一个口径）。开赛时会把名单真随机洗一次再落库
+    （见 start_tournament 的 shuffle_seed），所以这里拿到的是那次洗牌的顺序，
+    不再是报名顺序 —— 这也正是"别总是报名最早的人打第一场"的实现方式。
 
     「在场」= PlayerStats.is_active 且**账号未被禁用**：禁用不改 PlayerStats
     （那是"退赛"的语义、也刻意保留数据），但被禁用的人登录不进来，
@@ -616,8 +620,10 @@ async def reschedule_schedule(
     else:
         M = compute_match_count(n)
 
-    # 见 docstring：显式重排洗牌，保证"再点一次会换一份"
-    random.shuffle(players)
+    # 见 docstring：显式重排洗牌，保证"再点一次会换一份"。同样记种子进审计，
+    # 与开赛那次洗牌一个口径：能复现"谁跟谁打、怎么分组"（左右两边另算）。
+    reschedule_shuffle_seed = random.randrange(1, 2 ** 31)
+    random.Random(reschedule_shuffle_seed).shuffle(players)
 
     # 贪心在个别组合下会走死路（与开赛/追加同一层兜底）：逐级放宽历史 ——
     # ① 避开"这份旧赛程 + 最近几场" → ② 只避开最近几场 → ③ 不带历史。
@@ -694,7 +700,9 @@ async def reschedule_schedule(
                 "released_referees": len(released_referees),
                 "total_matches": tournament.total_matches,
                 # 用上了哪一级避重历史（0 = 旧赛程+最近几场，1 = 只最近几场，2 = 不带）
-                "history_level": history_level},
+                "history_level": history_level,
+                # 这次重排打散名单用的种子：与开赛一样，可按它复现"谁跟谁打、怎么分组"
+                "shuffle_seed": reschedule_shuffle_seed},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {
@@ -910,7 +918,7 @@ async def withdraw_player(
         )
         # 与 start_tournament 同一口径：remaining 会直接喂给排程算法，
         # 顺序不同重排出来的对阵也不同。PlayerStats 没有 created_at，
-        # 用 id 即等于「开赛时的报名顺序」（那时就是按报名时间建的这些行）。
+        # 用 id 即等于「开赛时洗过牌、落库下来的名单顺序」（那批行就是按那个顺序建的）。
         .order_by(PlayerStats.id)
     )
     for s in stats.scalars().all():
@@ -954,7 +962,7 @@ async def withdraw_player(
     if new_schedule is None:
         raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
     # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
-    # 的确定性偏置（remaining 仍是按报名顺序的名单），不翻边就会把偏置带进新赛程
+    # 的确定性偏置（remaining 是按 PlayerStats.id 排的名单），不翻边就会把偏置带进新赛程
     new_schedule = shuffle_sides(new_schedule)
     new_rounds_data = compute_rounds(new_schedule, 2)
 
