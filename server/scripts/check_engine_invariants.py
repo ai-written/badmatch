@@ -19,6 +19,9 @@
    用完全部换新、每人场次仍相等、写回真实总场次、被取消场次的在任裁判收到「请重新认领」通知
 10. **开赛洗牌**：同一批人、同样报名顺序连开 4 场，第一场不该总是一个（名单顺序真随机打散过），
     且审计里必须记下 `shuffle_seed`（随机可追溯）
+11. **分配裁判是均衡轮转**：优先挑本赛事已安排执裁最少的人、并列才随机 ——
+    一次分完整局后每人次数极差 ≤2、没人轮空（纯随机时极差常见 3~4、12.9% 的人轮空），
+    同时"不吹自己那场 / 同一批不重复 / 只填空缺 / 已认领的算进计数"都要成立
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -51,6 +54,7 @@ from fastapi import HTTPException                            # noqa: E402
 import app.api.auth as auth_mod                              # noqa: E402
 import app.api.engine_api as engine_mod                      # noqa: E402
 import app.api.matches as matches_mod                        # noqa: E402
+import app.api.referee as referee_mod                        # noqa: E402
 from app.core.database import Base                           # noqa: E402
 from app.models import user, tournament, round, audit, password_reset  # noqa: E402,F401
 from app.models.user import User                             # noqa: E402
@@ -452,6 +456,109 @@ async def first_match_teams(tid):
                           frozenset((pb.player_a_id, pb.player_b_id))))
 
 
+async def match_referee_info(tid):
+    """{match_id: (轮次号, 本场 4 名选手, 裁判 id, 是否在任)} —— 验裁判分配用。"""
+    async with Session() as s:
+        matches = (await s.execute(
+            select(Match).where(Match.tournament_id == tid))).scalars().all()
+        round_no = {r.id: r.round_number for r in (await s.execute(
+            select(Round).where(Round.tournament_id == tid))).scalars().all()}
+        pids = {p for m in matches for p in (m.pairing_a_id, m.pairing_b_id)}
+        pairings = {p.id: p for p in (await s.execute(
+            select(RoundPairing).where(RoundPairing.id.in_(pids)))).scalars().all()}
+    info = {}
+    for m in matches:
+        pa, pb = pairings[m.pairing_a_id], pairings[m.pairing_b_id]
+        info[m.id] = (
+            round_no[m.round_id],
+            frozenset((pa.player_a_id, pa.player_b_id, pb.player_a_id, pb.player_b_id)),
+            m.referee_id, m.has_active_referee,
+        )
+    return info
+
+
+def active_referee_counts(info):
+    """按"在任裁判"统计每人几场（与端点里均衡计数的口径一致）。"""
+    counts = Counter()
+    for _rn, _players, ref, active in info.values():
+        if ref is not None and active:
+            counts[ref] += 1
+    return counts
+
+
+async def check_referee_balance():
+    """分配裁判：均衡轮转 + 并列随机。
+
+    这一层只有真库能验：均衡计数来自 `matches.referee_id`（本赛事在任的执裁场次）。
+    纯随机改均衡之前，实测 8 人 14 场里"最多-最少"常见 3~4 次、12.9% 的人整场轮空；
+    改完 20000 场模拟：极差 ≤2、没人轮空（这次在真库端点上也验一遍）。
+    """
+    print("\n11) 分配裁判：均衡轮转 + 并列随机（优先挑吹得最少的人）")
+    from app.api.referee import AutoAssignBody, auto_assign_referees, claim_referee
+
+    admin, ids = await mk_users("refbal", 8)
+    tid = await seed_ongoing(admin, ids, total=14, played_rounds=0)
+    async with Session() as s:
+        res = await auto_assign_referees(tournament_id=tid, request=fake_request(),
+                                         body=AutoAssignBody(scope="all"),
+                                         user=await s.get(User, admin), db=s)
+    info = await match_referee_info(tid)
+    counts = active_referee_counts(info)
+
+    check("scope=all 一次把 14 场都分出去了（没有跳过）",
+          len(res["assigned"]) == 14 and res["skipped"] == [],
+          (len(res["assigned"]), res["skipped"]))
+    bad = [m for m, (_rn, players, ref, _a) in info.items() if ref in players]
+    check("硬规则：裁判不是本场那 4 名选手", not bad, bad[:3])
+    per_round: dict[int, list[int]] = {}
+    for rn, _players, ref, _a in info.values():
+        per_round.setdefault(rn, []).append(ref)
+    dup = {rn: refs for rn, refs in per_round.items() if len(refs) != len(set(refs))}
+    check("硬规则：同一批里没人被分到两场", not dup, dup)
+    check("均衡：每人执裁次数极差 ≤ 2（纯随机时常见 3~4）",
+          max(counts.values()) - min(counts.values()) <= 2, dict(counts))
+    check("均衡：8 个人都至少吹了一场（纯随机时 12.9% 的人整场轮空）",
+          set(counts) == set(ids) and min(counts.values()) >= 1, dict(counts))
+
+    async with Session() as s:
+        again = await auto_assign_referees(tournament_id=tid, request=fake_request(),
+                                           body=AutoAssignBody(scope="all"),
+                                           user=await s.get(User, admin), db=s)
+    check("只填空缺：再点一次不动任何场次",
+          again["assigned"] == [] and "已有裁判" in again["message"], again["message"])
+
+    # 先自己认领一场的人也要算进均衡（计数口径是"本赛事在任执裁场次"，不只是本次分的）
+    tid2 = await seed_ongoing(admin, ids, total=14, played_rounds=0)
+    async with Session() as s:
+        first_match = (await s.execute(select(Match).where(Match.tournament_id == tid2)
+                                       .order_by(Match.id).limit(1))).scalar_one()
+        await claim_referee(tournament_id=tid2, match_id=first_match.id, request=fake_request(),
+                            user=await s.get(User, ids[0]), db=s)
+        await auto_assign_referees(tournament_id=tid2, request=fake_request(),
+                                   body=AutoAssignBody(scope="all"),
+                                   user=await s.get(User, admin), db=s)
+    counts2 = active_referee_counts(await match_referee_info(tid2))
+    check("已认领的那场也算进均衡（含它之后极差仍 ≤ 2）",
+          max(counts2.values()) - min(counts2.values()) <= 2 and counts2.get(ids[0], 0) >= 1,
+          dict(counts2))
+
+    # 卸任后不能被自动分回同一场：均衡计数按"在任"算，卸任会让他变成次数最少的那个，
+    # 没有 forbidden 这层就会被立刻送回去（真实踩到过）
+    from app.api.referee import release_referee
+
+    mid = next(iter(info))
+    old_ref = info[mid][2]
+    async with Session() as s:
+        await release_referee(tournament_id=tid, match_id=mid, request=fake_request(),
+                              user=await s.get(User, old_ref), db=s)
+        await auto_assign_referees(tournament_id=tid, request=fake_request(), body=None,
+                                   user=await s.get(User, ids[0]), db=s)
+    after = (await match_referee_info(tid))[mid]
+    check("卸任的空缺被补上，且没有分回给刚卸任的人",
+          after[3] is True and after[2] is not None and after[2] != old_ref,
+          {"卸任者": old_ref, "新的": after[2], "在任": after[3]})
+
+
 async def check_start_shuffle():
     """开赛会真随机打散名单顺序：同一批人、同样报名顺序连开几场，第一场不该总一样。
 
@@ -767,6 +874,8 @@ async def main() -> int:
     # 也要替换比赛模块的 audit：本脚本会直接调 start_round 等接口，
     # 它们各自在模块里 import 了 audit，只替换上面两处会让这些调用真的往库里写审计
     matches_mod.audit = fake_audit
+    # 同理：分配/认领裁判的接口也在自己模块里 import 了 audit
+    referee_mod.audit = fake_audit
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -782,6 +891,7 @@ async def main() -> int:
     await check_reschedule_with_started_round()
     await check_cross_event_avoidance()
     await check_start_shuffle()
+    await check_referee_balance()
 
     await engine.dispose()
     print(f"\n共 {len(FAILED)} 项失败" + (f"：{FAILED}" if FAILED else "，全部通过 ✓"))

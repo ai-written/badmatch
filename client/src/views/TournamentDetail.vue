@@ -738,7 +738,8 @@ async function doAssignReferees() {
   try {
     await showConfirmDialog({
       title: '一次性分配裁判',
-      message: `给全部 ${n} 场还没裁判的比赛随机分配场下人员？被分配到的人会收到站内消息。`,
+      message: `给全部 ${n} 场还没裁判的比赛分配场下人员？会优先分给执裁次数最少的人（并列随机），`
+        + '被分配到的人会收到站内消息。',
       confirmButtonText: '分配',
       cancelButtonText: '取消',
     })

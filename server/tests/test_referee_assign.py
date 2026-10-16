@@ -65,7 +65,7 @@ def test_skips_match_when_nobody_is_available():
 
 
 def test_is_truly_random_but_reproducible_with_a_seed():
-    """真随机：多次运行会挑到不同的人；传固定种子时结果可复现。"""
+    """不传 served（纯随机那条路）：每个人都会被挑到，传固定种子结果可复现。"""
     matches = [(1, {1, 2, 3, 4})]
     counts = Counter(
         assign_referees(matches, [5, 6, 7, 8], rng=random.Random(s))[0][1]
@@ -81,3 +81,106 @@ def test_is_truly_random_but_reproducible_with_a_seed():
 def test_empty_input_and_empty_pool():
     assert assign_referees([], [1, 2, 3]) == []
     assert assign_referees([(1, {1, 2})], []) == []
+
+
+# ---- 均衡轮转 + 并列随机（取代"纯随机"）----
+
+def test_served_only_picks_from_the_least_used_tier():
+    """均衡：只有"已安排场次最少"的那一档会被挑到，次数高的那一档一次都轮不到。"""
+    matches = [(1, {1, 2, 3, 4})]
+    served = {5: 0, 6: 3, 7: 3, 8: 3}          # 只有 5 还没吹过
+    for seed in range(50):
+        assert assign_referees(matches, [5, 6, 7, 8], served=served,
+                               rng=random.Random(seed)) == [(1, 5)]
+
+
+def test_ties_are_broken_randomly():
+    """并列者之间仍是等概率随机 —— 所以它还是"随机分配"，只是把次数拉平。"""
+    matches = [(1, {1, 2, 3, 4})]
+    served = {5: 2, 6: 2, 7: 2, 8: 2}
+    picked = Counter(
+        assign_referees(matches, [5, 6, 7, 8], served=served, rng=random.Random(s))[0][1]
+        for s in range(200)
+    )
+    assert set(picked) == {5, 6, 7, 8}, picked        # 四个人都可能被挑到
+    assert max(picked.values()) < 200                 # 不是固定挑同一个
+
+
+def test_without_served_it_is_still_pure_random():
+    """不传 served（老调用方）必须与改动前完全一致：没有"次数"这层优先级。"""
+    matches = [(1, {1, 2, 3, 4})]
+    assert (assign_referees(matches, [5, 6, 7, 8], served={}, rng=random.Random(3))
+            == assign_referees(matches, [5, 6, 7, 8], rng=random.Random(3)))
+
+
+def test_served_never_overrides_the_hard_rules():
+    """均衡不能压过硬规则：本场选手、同一批已在执裁的人永远不进候选池。"""
+    matches = [(1, {1, 2, 3, 4}), (2, {5, 6, 7, 8})]
+    # 把 1~4 的计数压到最低也没用：他们是第 1 场的选手；第 2 场只能在 1~4 里挑
+    served = {1: 0, 2: 0, 3: 0, 4: 0, 5: 9, 6: 9, 7: 9, 8: 9}
+    picked = dict(assign_referees(matches, [1, 2, 3, 4, 5, 6, 7, 8], served=served,
+                                  rng=random.Random(0)))
+    assert picked[1] in {5, 6, 7, 8}, picked
+    assert picked[2] in {1, 2, 3, 4}, picked
+    assert picked[1] != picked[2], picked
+
+
+def test_forbidden_keeps_the_just_released_referee_off_that_match():
+    """刚在这场上卸任的人不会被自动分回同一场（否则均衡会把他立刻送回来）。"""
+    matches = [(1, {1, 2, 3, 4})]
+    served = {5: 0, 6: 0, 7: 9, 8: 9}          # 5、6 次数最少
+    picked = {assign_referees(matches, [5, 6, 7, 8], served=served,
+                              forbidden={1: {5}}, rng=random.Random(s))[0][1]
+              for s in range(60)}
+    assert picked == {6}, picked               # 5 明确说了不行 → 只能 6
+
+    # 整批都被禁 → 跳过该场，而不是硬塞一个
+    assert assign_referees(matches, [5, 6], served=served,
+                           forbidden={1: {5, 6}}, rng=random.Random(0)) == []
+
+
+def test_forbidden_is_per_match_not_global():
+    """只禁止"这一场"：卸任过第 1 场的人照样可以吹第 2 场。"""
+    matches = [(1, {1, 2, 3, 4}), (2, {5, 6, 7, 8})]
+    picked = dict(assign_referees(matches, [1, 2, 3, 4, 5, 6, 7, 8], served={},
+                                  forbidden={1: {5}}, rng=random.Random(0)))
+    assert picked[1] in {6, 7, 8}              # 第 1 场排除 5
+    assert picked[2] in {1, 2, 3, 4}           # 第 2 场不受影响
+
+
+def test_served_is_read_only():
+    """served 只读：跨批次的累加必须由调用方显式做（否则均衡会静默失效，这里钉住契约）。"""
+    served = {5: 0, 6: 1}
+    assign_referees([(1, {1, 2, 3, 4})], [5, 6], served=served, rng=random.Random(0))
+    assert served == {5: 0, 6: 1}
+
+
+def test_served_balances_over_a_whole_event():
+    """整局视角：8 人 14 场（7 批 × 2 场），按批继续累加计数 → 每人 1~2 场，没人轮空。"""
+    matches = [
+        (1, {1, 2, 3, 4}), (2, {5, 6, 7, 8}),
+        (3, {1, 2, 5, 6}), (4, {3, 4, 7, 8}),
+        (5, {1, 3, 5, 7}), (6, {2, 4, 6, 8}),
+        (7, {1, 4, 5, 8}), (8, {2, 3, 6, 7}),
+        (9, {1, 2, 7, 8}), (10, {3, 4, 5, 6}),
+        (11, {1, 6, 3, 8}), (12, {2, 5, 4, 7}),
+        (13, {1, 8, 6, 3}), (14, {2, 7, 5, 4}),
+    ]
+    candidates = list(range(1, 9))
+    for seed in range(30):
+        rng = random.Random(seed)
+        served: dict[int, int] = {}
+        per_round: list[list[int]] = []
+        for i in range(0, len(matches), 2):
+            batch = matches[i:i + 2]
+            picks = assign_referees(batch, candidates, served=served, rng=rng)
+            per_round.append([uid for _mid, uid in picks])
+            for _mid, uid in picks:
+                served[uid] = served.get(uid, 0) + 1
+        assert len(per_round) == 7
+        assert all(len(set(r)) == len(r) for r in per_round)      # 同一批不重复
+        assert sum(served.values()) == 14                          # 14 场都分出去了
+        assert set(served) == set(candidates)                      # 没人整场轮空
+        # 极差 ≤2：14 个名额分给 8 人，均值 1.75，理论上最好只能是「6 人 2 场 + 2 人 1 场」；
+        # 偶发 2 是因为某一批的候选池恰好都已经被安排过了（池子只有另外 4 个人）
+        assert max(served.values()) - min(served.values()) <= 2, served

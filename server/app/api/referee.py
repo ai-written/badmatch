@@ -139,14 +139,19 @@ async def auto_assign_referees(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """随机指派裁判（手动点一次）。
+    """指派裁判（手动点一次）。
 
     规则：
     - scope=current：最早一个**还有比赛没打完**的轮次；scope=all：全部这样的轮次都分完；
-    - 候选人 = 本赛事在场选手（未退赛、账号未禁用）里**不参加该场**的人，**真随机**
-      （不按执裁次数加权）—— 注意同一批里另一场的选手也算"不在这一场"，8 人局里
-      两场互为对方的候选人池；
-    - **同一批里**一个人最多当一场的裁判（人不能分身；跨批次当然可以重复当）；
+    - 候选人 = 本赛事在场选手（未退赛、账号未禁用）里**不参加该场**的人 ——
+      注意同一批里另一场的选手也算"不在这一场"，8 人局里两场互为对方的候选人池；
+    - **均衡轮转 + 并列随机**：优先挑**本赛事已安排执裁场次最少**的人，次数并列的人之间
+      等概率随机。所以它仍是"随机分配"（并列者里谁被挑中是随机的），但不再出现
+      "有人吹 4 场、有人一场没吹"那种纯随机的偏斜（实测见 README）；
+      计数口径 = 本赛事里 `referee_id` 是他、且**在任**（没卸任）的场次，
+      本次请求里已经分出去的场次也算（跨批次继续均衡）；
+    - **同一批里**一个人最多当一场的裁判（人不能分身；跨批次可以重复当，但会被上面的
+      计数器拉住，所以是"轮着来"而不是"反复同一个人"）；
     - **只填空缺**：已经有在任裁判的场次不动（想换裁判请用「顶替」/认领）；
     - 在场人不够（例如在场只剩这一场的 4 人）时跳过该场，并在响应里告诉前端有几场跳过。
     """
@@ -196,6 +201,21 @@ async def auto_assign_referees(
     def no_of(match_ids) -> str:
         return fmt_nums([ordinal.get(mid, "?") for mid in match_ids])
 
+    # 均衡轮转用的计数，口径：本赛事里"referee_id 是他、且还没卸任"的场次
+    # = 他现在担着几场裁判。用"在任"而不是"历史上被安排过"：卸任等于这活不归他了
+    # （那场会被别人重新认领、那个人也会记上一笔），所以他不该背着这个数被扣掉后续机会。
+    served_rows = await db.execute(
+        select(Match.referee_id).where(
+            Match.tournament_id == tournament_id,
+            Match.referee_id.is_not(None),
+            Match.referee_released_at.is_(None),
+        )
+    )
+    served: dict[int, int] = {}
+    for (uid,) in served_rows.all():
+        if uid is not None:
+            served[uid] = served.get(uid, 0) + 1
+
     picks: list[tuple[int, int]] = []
     skipped: list[int] = []
     by_id: dict[int, Match] = {}
@@ -228,10 +248,19 @@ async def auto_assign_referees(
         # 同一批里已经在执裁的人，不能再分给别的场次；跨批次重新计算（每轮各自一份 busy）
         busy_ids = {m.referee_id for m in live
                     if m.has_active_referee and m.referee_id is not None}
-        round_picks = assign_referees(round_targets, candidates, busy_ids=busy_ids)
+        # 刚在这场上卸任的人不要再被自动分回来（他明确说了不行）。均衡计数按"在任"算，
+        # 卸任会让他变成次数最少的那个 —— 不加这层就会立刻把他分回同一场。
+        # 想吹回来可以手动认领（认领不看这层）。
+        forbidden = {m.id: {m.referee_id} for m in need if m.referee_id is not None}
+        round_picks = assign_referees(round_targets, candidates, busy_ids=busy_ids,
+                                      served=served, forbidden=forbidden)
         picked_map = dict(round_picks)
         picks.extend(round_picks)
         skipped.extend(mid for mid, _players in round_targets if mid not in picked_map)
+        # 本次请求里刚分出去的也要累加：scope=all 会把整局的批次一次分完，
+        # 不累加的话第二批又会在"全 0"的计数里随机，均衡就白做了
+        for _mid, uid in round_picks:
+            served[uid] = served.get(uid, 0) + 1
 
     if not picks:
         if skipped:
@@ -264,7 +293,7 @@ async def auto_assign_referees(
             tournament_id=tournament_id,
             type="referee_assigned",
             # 只提「第 N 场」：界面上的编号就是对阵表的编号，没有「第 N 轮」这个概念
-            message=f"您被随机分配为第 {fmt_nums(nums)} 场的裁判，请到记分页执裁。",
+            message=f"您被分配为第 {fmt_nums(nums)} 场的裁判，请到记分页执裁。",
         ))
 
     # 先提交再广播再审计（全仓统一）：订阅者收到 referee_claimed 后会回查赛程，

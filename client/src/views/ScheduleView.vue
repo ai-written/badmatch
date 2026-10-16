@@ -399,7 +399,8 @@ async function doAutoAssign() {
   try {
     await showConfirmDialog({
       title: '自动分配裁判',
-      message: `给第 ${fmtMatchNo(pendingMatchNo.value)} 场随机分配场下人员？被分配到的人会收到站内消息。`,
+      message: `给第 ${fmtMatchNo(pendingMatchNo.value)} 场分配场下人员？会优先分给执裁次数最少的人`
+        + '（并列随机），被分配到的人会收到站内消息。',
       confirmButtonText: '分配',
       cancelButtonText: '取消',
     })
