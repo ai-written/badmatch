@@ -369,6 +369,28 @@ def test_history_dead_end_has_no_history_fallback():
         assert len(schedule) == 5 and len(played) == 5 and set(played.values()) == {4}
 
 
+def test_try_schedule_relaxes_history_before_changing_the_match_count():
+    """兜底顺序：同一档位先退历史，退不动才换档位（否则会把用户选的场次改大）。
+
+    这是开赛 / 追加比赛 / 重排共用的兜底策略，也是"实测 5 人 5 场会被顶成 10 场"那个坑的
+    修复依据：带历史排不出来时，必须先在**同一档位**上退到不带历史。
+    """
+    from app.api.engine_api import _try_schedule
+
+    players = [1, 2, 3, 4, 5]
+    dead_end = _history_of([generate_schedule(players, 5), generate_schedule([3, 1, 2, 4, 5], 5)])
+
+    schedule, level = _try_schedule(players, 5, (dead_end, ({}, {}, {})))
+    assert schedule is not None and len(schedule) == 5
+    assert level == 1, "带历史排不出来时应当在同一档位上退到不带历史"
+
+    # 第一级就够用时不退级
+    assert _try_schedule(players, 5, ({}, {}, {}))[1] == 0
+
+    # 所有级都排不出来 → (None, None)，由调用方决定换档位还是报错
+    assert _try_schedule(players, 5, (dead_end,))[0] is None
+
+
 # ---- 落库前的左右随机翻边：抹掉「名单第一人永远站左队」 ----
 
 def test_shuffle_sides_only_swaps_the_two_teams():

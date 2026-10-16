@@ -102,6 +102,19 @@ async def start_tournament(
     if len(player_ids) < 4:
         raise HTTPException(status_code=400, detail="至少需要 4 人参赛")
 
+    # 开赛时把名单顺序**真随机**打散一次。两层目的各管一件事：
+    # - 跨赛事避重（_new_match_history）负责"别跟最近几场撞同样的对局"；
+    # - 这次洗牌负责"别总是报名最早的那 4 个人打第一场、每场的分组结构也别老一样"：
+    #   算法本身是确定性的（同一份名单顺序 → 同一份赛程），不洗牌的话同一群体每周
+    #   同样顺序报名就会拿到一模一样的第一场。
+    #
+    # 用种子而不是直接 random.shuffle：出问题时按审计里的 shuffle_seed 能复现同一份赛程
+    # （算法内部的重试本来就是固定种子，所以"顺序 + 历史 + 场次数"定了，赛程就定了）。
+    # 洗过的顺序会跟着 PlayerStats 一起落库，本赛事后续的追加比赛 / 退赛重排都按它算，
+    # 所以**同一赛事内仍然可复现**，只有"每次开赛"才是随机的。
+    shuffle_seed = random.randrange(1, 2 ** 31)
+    random.Random(shuffle_seed).shuffle(player_ids)
+
     # 总场次：显式传入的值先校验；库里的存量值也必须复检。
     # 库里可能是「创建时按旧人数钉下的场次」，报名人数变化后就不整除了，
     # 直接拿去排程会抛异常（未捕获 → 500 → 赛事永远开不起来），
@@ -137,6 +150,7 @@ async def start_tournament(
     # 先不带历史重试同一档，是为了别把用户选的场次改大（5 → 10），也别直接 400。
     schedule = None
     adjusted_M = M
+    history_level = None
     candidate_Ms = [M]
     next_M = compute_match_count(len(player_ids))
     while next_M <= max(M, 30):
@@ -144,14 +158,12 @@ async def start_tournament(
             candidate_Ms.append(next_M)
         next_M += len(player_ids)          # 只试整除的组合（与改动前一模一样）
     for cand_M in candidate_Ms:
-        for hist in ((partner_history, opponent_history, match_history), ({}, {}, {})):
-            try:
-                schedule = generate_schedule(player_ids, cand_M, *hist)
-                adjusted_M = cand_M
-                break
-            except ValueError:
-                continue
+        schedule, history_level = _try_schedule(
+            player_ids, cand_M,
+            ((partner_history, opponent_history, match_history), ({}, {}, {})),
+        )
         if schedule is not None:
+            adjusted_M = cand_M
             break
     if schedule is None:
         raise HTTPException(
@@ -209,7 +221,11 @@ async def start_tournament(
         target_type="tournament", target_id=tournament.id,
         detail={"players": len(player_ids), "matches": M, "rounds": len(rounds_data),
                 # 被禁用而自动取消的报名数：事后能解释"报名 8 人怎么只排了 7 人"
-                "disabled_registrations_cancelled": disabled_cancelled},
+                "disabled_registrations_cancelled": disabled_cancelled,
+                # 开赛时打散名单用的种子：有它才能按同一份输入复现这份赛程
+                "shuffle_seed": shuffle_seed,
+                # 用上了哪一级避重历史（0 = 带跨赛事历史，1 = 退到不带历史）
+                "history_level": history_level},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
@@ -305,6 +321,24 @@ async def _new_match_history(db: AsyncSession, tournament_id: int):
     """新排比赛（开赛 / 追加）要避开的重复：**本赛事已排的 + 最近几场赛事的**。"""
     recent = await _recent_tournament_ids(db, tournament_id)
     return await _load_history(db, [tournament_id, *recent])
+
+
+def _try_schedule(players, matches, history_variants):
+    """按「历史逐级放宽」的顺序试排一份赛程，返回 (schedule, level)；全失败返回 (None, None)。
+
+    - `history_variants`：从最完整的避重到最弱的顺序，例如
+      开赛 = (跨赛事历史, 不带历史)；追加 = (跨赛事+本赛事, 只本赛事)；
+      重排 = (旧赛程+最近几场, 只最近几场, 不带历史)。
+    - `level` 就是用上的那一级的下标，会写进审计：历史只影响打分，但会让贪心在个别
+      组合上走死路（实测 5 人 5 场），所以真的会退级 —— 事后要能看出来这份赛程
+      到底是"完整避重"还是"退到某一级"排出来的。
+    """
+    for level, hist in enumerate(history_variants):
+        try:
+            return generate_schedule(players, matches, *hist), level
+        except ValueError:
+            continue
+    return None, None
 
 
 @router.get("/extra-match-options")
@@ -408,30 +442,28 @@ async def add_matches(
         )
 
     partner_history, opponent_history, match_history = await _new_match_history(db, tournament_id)
+    # 只避"本赛事已排的重复"这一级历史（= 加上跨赛事避重之前的行为）：带着跨赛事历史
+    # 个别组合会走死路，这一级是每一档的兜底，绝不能等到"所有档位都失败"才用 ——
+    # 那会把用户请求的档位悄悄翻倍（实测 5 人局：请求 +5 变成 +10）
+    own_partner, own_opponent, own_match = await _load_history(db, [tournament_id])
 
-    # 贪心排程在个别组合下会走入死路（开赛那边也有同样的兜底）：按步长往上试，
-    # 宁可多排一点也不要给用户一个 500。实际追加数会返回给前端提示。
+    # 贪心排程在个别组合下会走入死路（开赛那边也有同样的兜底）：先按用户请求的档位试，
+    # 每一档都「带跨赛事历史 → 只带本赛事历史」各试一次，都排不出来才按步长往上加。
+    # 顺序很重要：先退历史、再改档位 —— 否则会把用户选的追加数悄悄改大。
     schedule = None
+    history_level = None
     added = body.matches
     while current + added <= MAX_TOTAL_MATCHES:
-        try:
-            schedule = generate_schedule(players, added, partner_history,
-                                         opponent_history, match_history)
+        schedule, history_level = _try_schedule(
+            players, added,
+            ((partner_history, opponent_history, match_history),
+             (own_partner, own_opponent, own_match)),
+        )
+        if schedule is not None:
             break
-        except ValueError:
-            added += step
+        added += step
     if schedule is None:
-        # 每一档都排不出来（带着跨赛事历史时个别组合会走死路，见开赛那边的说明）：
-        # 退回"只避本赛事已排的重复"再试用户请求的档位 —— 这正是加上跨赛事历史之前的行为，
-        # 宁可少一层跨赛事避重，也不要给用户一个 400。仍然要避开本赛事的重复，
-        # 所以这里不干脆把历史清空（那会让同一赛事里出现完全相同的对局）。
-        own_partner, own_opponent, own_match = await _load_history(db, [tournament_id])
-        try:
-            schedule = generate_schedule(players, body.matches,
-                                         own_partner, own_opponent, own_match)
-            added = body.matches
-        except ValueError:
-            raise HTTPException(status_code=400, detail="当前人数排不出更多场次，请减少追加场次后重试")
+        raise HTTPException(status_code=400, detail="当前人数排不出更多场次，请减少追加场次后重试")
 
     last_num_row = await db.execute(
         select(func.max(Round.round_number)).where(Round.tournament_id == tournament_id)
@@ -470,7 +502,9 @@ async def add_matches(
         user=user, action="tournament_add_matches",
         target_type="tournament", target_id=tournament_id,
         detail={"added": added, "requested": body.matches, "total_matches": total,
-                "players": n, "rounds": len(rounds_data)},
+                "players": n, "rounds": len(rounds_data),
+                # 用上了哪一级避重历史（0 = 跨赛事+本赛事，1 = 只本赛事）
+                "history_level": history_level},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {
@@ -546,20 +580,24 @@ async def reschedule_schedule(
     opponent_history.update(recent_opponent)
     match_history.update(recent_match)
 
-    # 至此可以断定：库里这个赛事的比赛**全都是 PENDING**（一场没开打），
-    # 所以下面直接整批删掉重排，不需要退赛那套"冻结已打完轮次"的处理
-    # （也不存在要保留下来的比分与历史）。
-    pending_rounds = await db.execute(
-        select(Round).where(
-            Round.tournament_id == tournament_id,
-            Round.status == RoundStatus.PENDING,
-        )
+    players = await _active_player_ids(db, tournament_id)
+    n = len(players)
+    if n < 4:
+        raise HTTPException(status_code=400, detail="在场选手不足 4 人，无法重排赛程")
+
+    # 至此可以断定：库里这个赛事的比赛**全都是 PENDING**（一场没开打），所以下面把
+    # **所有轮次**整批删掉重排 —— 注意不能只删 `Round.status == PENDING` 的轮次：
+    # `POST /rounds/{id}/start-round` 会把轮次标成 ONGOING 而比赛仍是 PENDING，
+    # 只按轮次状态过滤会漏掉它，结果就是"旧的一份 + 新的一份"叠加（每人多打一场、
+    # 场次数与返回的 replaced_matches 也对不上）。这里按"比赛一场没开打"整批换。
+    all_rounds = await db.execute(
+        select(Round).where(Round.tournament_id == tournament_id)
     )
     released_referees: set[int] = set()
     replaced_rounds = 0
     replaced_matches = 0
-    for r in pending_rounds.scalars().all():
-        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id != None))
+    for r in all_rounds.scalars().all():
+        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id.is_not(None)))
         for m in ms.scalars().all():
             # 只通知在任裁判：已卸任者（referee_id 保留作历史）不需要重新认领
             if m.has_active_referee:
@@ -573,11 +611,6 @@ async def reschedule_schedule(
         await db.execute(delete(Round).where(Round.id == r.id))
         replaced_rounds += 1
 
-    players = await _active_player_ids(db, tournament_id)
-    n = len(players)
-    if n < 4:
-        raise HTTPException(status_code=400, detail="在场选手不足 4 人，无法重排赛程")
-
     if tournament.total_matches and (4 * tournament.total_matches) % n == 0:
         M = tournament.total_matches
     else:
@@ -590,17 +623,12 @@ async def reschedule_schedule(
     # ① 避开"这份旧赛程 + 最近几场" → ② 只避开最近几场 → ③ 不带历史。
     # 历史只影响打分、不改变每人场次，所以任何一级排出来都比给用户一个 400 好；
     # 名单顺序已经洗过牌，即使退到 ③ 也基本不会排出和刚才一样的一份。
-    schedule = None
-    for hist in (
-        (partner_history, opponent_history, match_history),
-        (recent_partner, recent_opponent, recent_match),
-        ({}, {}, {}),
-    ):
-        try:
-            schedule = generate_schedule(players, M, *hist)
-            break
-        except ValueError:
-            continue
+    schedule, history_level = _try_schedule(
+        players, M,
+        ((partner_history, opponent_history, match_history),
+         (recent_partner, recent_opponent, recent_match),
+         ({}, {}, {})),
+    )
     if schedule is None:
         raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
 
@@ -664,7 +692,9 @@ async def reschedule_schedule(
         detail={"players": n, "matches": M, "replaced_matches": replaced_matches,
                 "replaced_rounds": replaced_rounds,
                 "released_referees": len(released_referees),
-                "total_matches": tournament.total_matches},
+                "total_matches": tournament.total_matches,
+                # 用上了哪一级避重历史（0 = 旧赛程+最近几场，1 = 只最近几场，2 = 不带）
+                "history_level": history_level},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {
@@ -819,29 +849,36 @@ async def withdraw_player(
         if first:
             tournament.creator_id = first
 
-    completed_rounds = await db.execute(
-        select(Round).where(
-            Round.tournament_id == tournament_id,
-            Round.status == RoundStatus.FINISHED,
-        )
-    )
-    for r in completed_rounds.scalars().all():
-        r.is_frozen = True
+    # 哪些轮次「已经开打了」= 该轮里**有任何一场不是 PENDING**（在打或已打完）。
+    #
+    # 必须按**比赛状态**判断，不能按 Round.status：全仓没有任何地方把轮次标成 FINISHED
+    # （只有 start-round 会标 ONGOING），按轮次状态判断会把"已打完的轮次"当成没开打、
+    # 整批删掉 —— 历史比分被抹掉而 PlayerStats 还留着分（对阵表和积分榜对不上，"第N场"
+    # 也从 1 重来）。真实踩过，所以这里改成按比赛判：开打过的轮次冻结保留，
+    # 一场没打的轮次才删掉重排。
+    started_round_ids = {
+        rid for (rid,) in (await db.execute(
+            select(Match.round_id).where(
+                Match.tournament_id == tournament_id,
+                Match.status != MatchStatus.PENDING,
+            ).distinct()
+        )).all()
+    }
 
-    unstarted_rounds = await db.execute(
-        select(Round).where(
-            Round.tournament_id == tournament_id,
-            Round.status == RoundStatus.PENDING,
-        )
+    all_rounds = await db.execute(
+        select(Round).where(Round.tournament_id == tournament_id)
     )
     affected_referees = set()
-    for r in unstarted_rounds.scalars().all():
-        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id != None))
+    for r in all_rounds.scalars().all():
+        if r.id in started_round_ids:
+            r.is_frozen = True              # 开打过的轮次：编号与比赛原样保留
+            continue
+        # 一场没打的轮次：整批删掉，稍后重排（先收被取消场次的在任裁判，好发通知）
+        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id.is_not(None)))
         for m in ms.scalars().all():
             # 只通知在任裁判：已卸任者（referee_id 保留作历史）不需要重新认领
             if m.has_active_referee:
                 affected_referees.add(m.referee_id)
-        # delete match supports first
         match_ids = await db.execute(select(Match.id).where(Match.round_id == r.id))
         for (mid,) in match_ids.all():
             await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
@@ -903,18 +940,19 @@ async def withdraw_player(
         new_M = tournament.total_matches
     else:
         new_M = compute_match_count(remaining_count)
-    # 跨赛事避重：重排出来的未开打轮次也不该跟最近几场赛事撞车（见 RECENT_EVENT_HISTORY）。
-    # 历史只影响打分、不改变每人目标场次；万一带着它排不出来，就退回"只带本赛事冻结轮次"
-    # 的老排法 —— 「退赛」这条路不能因为避重而失败。
+    # 跨赛事避重：重排出来的、一场没打的轮次也不该跟最近几场赛事撞车（见 RECENT_EVENT_HISTORY）。
+    # 历史只影响打分、不改变每人目标场次；万一带着它排不出来，就退回"只带本赛事已冻结轮次"
+    # 的那一级 —— 「退赛」这条路不能因为避重而失败，也不能因此给用户一个 500。
     recent_partner, recent_opponent, recent_match = await _load_history(
         db, await _recent_tournament_ids(db, tournament_id))
     partner_history: Counter = Counter(frozen_partner)
     partner_history.update(recent_partner)
-    try:
-        new_schedule = generate_schedule(remaining, new_M, partner_history,
-                                         recent_opponent, recent_match)
-    except ValueError:
-        new_schedule = generate_schedule(remaining, new_M, frozen_partner)
+    new_schedule, reschedule_history_level = _try_schedule(
+        remaining, new_M,
+        ((partner_history, recent_opponent, recent_match), (frozen_partner, {}, {})),
+    )
+    if new_schedule is None:
+        raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
     # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
     # 的确定性偏置（remaining 仍是按报名顺序的名单），不翻边就会把偏置带进新赛程
     new_schedule = shuffle_sides(new_schedule)
@@ -974,7 +1012,10 @@ async def withdraw_player(
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
     await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
-                detail={"player_id": player_id, "remaining": remaining_count, "new_creator_id": tournament.creator_id},
+                detail={"player_id": player_id, "remaining": remaining_count,
+                        "new_creator_id": tournament.creator_id,
+                        # 用上了哪一级避重历史（0 = 冻结轮次+最近几场，1 = 只冻结轮次）
+                        "history_level": reschedule_history_level},
                 ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return {"ok": True}
 

@@ -431,9 +431,14 @@ async function fetchMatch() {
     match.value = res.data
     syncTimerAnchor()
     loadFailed.value = false
-  } catch (e) {
+  } catch (e: any) {
     // 比赛不存在/已删除或网络异常：原先页面会永远停在 loading 转圈，
-    // 没有任何返回或重试入口，只能靠浏览器后退
+    // 没有任何返回或重试入口，只能靠浏览器后退。
+    // 404（比赛行已经没了，例如赛程被重排或有人退赛重排）必须**丢掉本地那份 match**：
+    // 否则它是幽灵数据，页面照常显示记分按钮，点什么都收到「比赛不存在」，
+    // 而且再也不会自己恢复。清掉之后走失败态，给用户一个「返回」入口。
+    const gone = e?.response?.status === 404
+    if (gone) match.value = null
     if (!match.value) loadFailed.value = true
     throw e
   }
@@ -646,6 +651,12 @@ watch(lastMessage, (msg) => {
   // 赛事被别处结束：立刻刷新切成只读（配合 readOnly 的 watch 退出修正模式）。
   // 本页常停在"已结束的比赛"上，而 30 秒校准只在比赛进行中才跑，不接这个广播可能长期不刷新。
   if (msg.type === 'tournament_finished') {
+    fetchMatch().catch(() => {})
+  }
+  // 赛程变了（追加比赛 / 有人退赛重排 / 重排赛程）：本场可能已经被删掉并换成了新 id，
+  // 必须回查一次 —— 否则整页停在幽灵数据上，点什么都收到「比赛不存在」
+  // （fetchMatch 遇 404 会丢掉本地数据并切到失败态，给一个「返回」入口）
+  if (msg.type === 'schedule_updated' || msg.type === 'registration_updated') {
     fetchMatch().catch(() => {})
   }
 })

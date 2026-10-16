@@ -17,6 +17,8 @@
    且每人场次仍然相等（跨赛事历史只影响打分）
 9. **重排未打完的场次**：**只允许一场都没开打时**用（有比赛在打/已打完必须被 400 拦下），
    用完全部换新、每人场次仍相等、写回真实总场次、被取消场次的在任裁判收到「请重新认领」通知
+10. **开赛洗牌**：同一批人、同样报名顺序连开 4 场，第一场不该总是一个（名单顺序真随机打散过），
+    且审计里必须记下 `shuffle_seed`（随机可追溯）
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -48,6 +50,7 @@ from fastapi import HTTPException                            # noqa: E402
 
 import app.api.auth as auth_mod                              # noqa: E402
 import app.api.engine_api as engine_mod                      # noqa: E402
+import app.api.matches as matches_mod                        # noqa: E402
 from app.core.database import Base                           # noqa: E402
 from app.models import user, tournament, round, audit, password_reset  # noqa: E402,F401
 from app.models.user import User                             # noqa: E402
@@ -100,10 +103,15 @@ async def mk_users(tag: str, players: int, disabled: int = 0):
 
 async def seed_ongoing(creator_id: int, ids, total: int, played_rounds: int = 0,
                        referee_id: int | None = None):
-    """进行中的赛事：total 场（前 played_rounds 轮标记为已结束）。
+    """进行中的赛事：total 场（前 played_rounds 轮里的比赛标记为已结束）。
 
     referee_id 给定时：第 1 场（未打完）与第 2 场（已结束）都挂他当裁判，
     用来验证"只卸任未打完的"。
+
+    注意：**刻意不动 `Round.status`**（一直留 PENDING）—— 真实代码就是这样：
+    全仓只有 start-round 会把轮次标成 ONGOING，没有任何地方标 FINISHED，
+    记分只改 `Match.status`。以前这个 fixture 把轮次也标成 FINISHED，于是
+    "退赛不删已打完的比赛"这条检查在真库上永远通过，而生产里历史比赛其实被删了。
     """
     async with Session() as s:
         t = Tournament(creator_id=creator_id, title="check", start_date=datetime.now(),
@@ -116,8 +124,7 @@ async def seed_ongoing(creator_id: int, ids, total: int, played_rounds: int = 0,
             s.add(PlayerStats(tournament_id=t.id, user_id=uid, is_active=True))
         for idx, rs in enumerate(compute_rounds(generate_schedule(list(ids), total), 2), start=1):
             done = idx <= played_rounds
-            r = Round(tournament_id=t.id, round_number=idx,
-                      status=MatchStatus.FINISHED if done else MatchStatus.PENDING)
+            r = Round(tournament_id=t.id, round_number=idx)   # 状态保持 PENDING（同生产）
             s.add(r)
             await s.flush()
             for (a, b), (c, d), *_ in rs:
@@ -432,6 +439,46 @@ async def pending_match_ids(tid):
             Match.tournament_id == tid, Match.status != MatchStatus.FINISHED))).all()}
 
 
+async def first_match_teams(tid):
+    """第 1 轮第 1 场的两队球员（规范键）—— 用来观察"谁打第一场、怎么分组"。"""
+    async with Session() as s:
+        r = (await s.execute(select(Round).where(Round.tournament_id == tid)
+                             .order_by(Round.round_number).limit(1))).scalar_one()
+        m = (await s.execute(select(Match).where(Match.round_id == r.id)
+                             .order_by(Match.id).limit(1))).scalar_one()
+        pa = await s.get(RoundPairing, m.pairing_a_id)
+        pb = await s.get(RoundPairing, m.pairing_b_id)
+        return frozenset((frozenset((pa.player_a_id, pa.player_b_id)),
+                          frozenset((pb.player_a_id, pb.player_b_id))))
+
+
+async def check_start_shuffle():
+    """开赛会真随机打散名单顺序：同一批人、同样报名顺序连开几场，第一场不该总一样。
+
+    机制上是"每次开赛随机"，所以只能做统计断言：4 场里只要不是全都相同即可
+    （4 场全同的概率约 (1/210)^3，可忽略）。同时检查审计记了 shuffle_seed ——
+    没有它，随机就变成不可追溯。
+    """
+    print("\n10) 开赛洗牌：同一批人、同样报名顺序，第一场不再每次都一样")
+    admin, ids = await mk_users("shuf", 8)
+    firsts = []
+    for i in range(4):
+        tid = await seed_open(admin, ids)
+        async with Session() as s:
+            await start_tournament(tournament_id=tid, request=fake_request(),
+                                   body=StartRequest(total_matches=14),
+                                   user=await s.get(User, admin), db=s)
+        firsts.append(await first_match_teams(tid))
+
+    check("4 场的第一场不是同一个（名单顺序被洗过）",
+          len(set(firsts)) > 1, [sorted(map(sorted, f)) for f in firsts])
+    start_audits = [a for a in AUDITS if a.get("action") == "tournament_start"]
+    seeds = [a.get("detail", {}).get("shuffle_seed") for a in start_audits[-4:]]
+    check("开赛审计里记了 shuffle_seed（随机可追溯）",
+          len(seeds) == 4 and all(isinstance(s, int) and s > 0 for s in seeds), seeds)
+    check("4 场的洗牌种子各不相同", len(set(seeds)) == 4, seeds)
+
+
 async def check_reschedule():
     """重排未打完的场次：**只在一场都没开打时可用**，且用完全部换新、每人场次相等。
 
@@ -493,6 +540,12 @@ async def check_reschedule():
     check("重排完仍然没有任何比赛开打", await started_match_count(tid) == 0,
           await started_match_count(tid))
     check("写回真实总场次（= 14）", res["total_matches"] == 14, res["total_matches"])
+    async with Session() as s:
+        rounds = (await s.execute(select(Round).where(Round.tournament_id == tid)
+                                  .order_by(Round.round_number))).scalars().all()
+    check("轮次也是整批重建（7 个轮次、编号 1..7，没有叠着旧轮次）",
+          [r.round_number for r in rounds] == list(range(1, 8)),
+          [r.round_number for r in rounds])
     check("返回的 replaced_matches = 被删掉的场次数",
           res["replaced_matches"] == len(pending_before),
           (res["replaced_matches"], len(pending_before)))
@@ -507,33 +560,131 @@ async def check_reschedule():
           [n.message for n in notes])
 
 
+class _NoShuffleRandom:
+    """只在检查里用的替身：`randrange` 固定、`Random(seed).shuffle` 不动顺序。
+
+    开赛洗牌本身是真随机的（见 check_start_shuffle），但下面这条检查要复现一个**确定性**的
+    死路组合（单测 test_history_dead_end_has_no_history_fallback 固化了它），
+    所以这里把开赛洗牌短路掉。只替换 engine_api 模块里的那个 `random` 名字，
+    调度器（app.engine.scheduler）自己的 random 不受影响。
+    """
+
+    def randrange(self, *args, **kwargs):
+        return 1
+
+    @staticmethod
+    def Random(seed):                     # noqa: N802（模仿 random.Random 的名字）
+        class _R:
+            def shuffle(self, seq):
+                return None
+        return _R()
+
+    @staticmethod
+    def shuffle(seq):
+        return None
+
+
 async def check_start_keeps_requested_matches_with_history():
     """带跨赛事历史时，开赛必须仍然用**用户选的**场次数，而不是被兜底改大。
 
     回归背景：跨赛事避重上线后，"5 人 5 场 + 两场同样 5 人的历史"会让 generate_schedule
     走死路（单测 test_history_dead_end_has_no_history_fallback 固化了这个输入）。
     老兜底只会往上加场次（5 → 10）或 400；现在先不带历史重试同一档，所以必须还是 5 场。
+
+    这条检查自己会先断言"这个输入确实会走死路"，否则它就是在空转（洗牌是随机的，
+    不短路掉的话输入每次都不一样）。
     """
     print("\n3b) 开赛带跨赛事历史时，场次数仍是用户选的那个")
     admin, ids = await mk_users("hist5", 5)
-    # 造两场"上一场"：先按原顺序，再按单测里那个会踩死路的顺序
-    for order in (ids, [ids[2], ids[0], ids[1], ids[3], ids[4]]):
-        prev = await seed_open(admin, order)
+
+    real_random = engine_mod.random
+    engine_mod.random = _NoShuffleRandom()          # 让名单顺序保持报名顺序（可复现的输入）
+    try:
+        # 造两场"上一场"：直接按单测里那两组名单顺序落库（**不经 start_tournament**，
+        # 否则第二场会带上第一场的历史、排出来的就不是单测里那份输入了），
+        # 这样"带历史走死路"的条件与单测完全一致、可复现
+        prev_ids = []
+        for order in (ids, [ids[2], ids[0], ids[1], ids[3], ids[4]]):
+            prev_ids.append(await seed_ongoing(admin, order, total=5, played_rounds=0))
+
+        hist = await _load_history_for_check(prev_ids)
+        try:
+            generate_schedule(ids, 5, *hist)
+            print("   （注意：这组输入现在带历史也能排出来了 —— 算法变强/权重调整后的正常现象，"
+                  "下面只验「场次数不被改大」）")
+        except ValueError:
+            check("前置：这组输入确实会让带历史排程走死路", True)
+
+        tid = await seed_open(admin, ids)
+        async with Session() as s:
+            res = await start_tournament(tournament_id=tid, request=fake_request(),
+                                         body=StartRequest(total_matches=5),
+                                         user=await s.get(User, admin), db=s)
+    finally:
+        engine_mod.random = real_random
+
+    app = await appearances(tid)
+    check("场次数没被兜底改大（仍是 5 场）", res["matches"] == 5, res)
+    check("库里确实排了 5 场", len(app) == 5 and sum(app.values()) == 20, dict(app))
+    check("每人场次相等（5 人 5 场 = 各 4 场）", set(app.values()) == {4}, dict(app))
+
+
+async def _load_history_for_check(tids):
+    """按 engine_api 的口径把几场赛事的搭档/对手/对局统计读出来（检查用）。"""
+    from app.api.engine_api import _load_history
+    async with Session() as s:
+        return await _load_history(s, list(tids))
+
+
+async def check_add_matches_keeps_requested_count_with_history():
+    """追加比赛：带着跨赛事历史排不出来时，也必须先退历史、再改档位。
+
+    实测过的坑（跨赛事避重上线后引入）：5 人局、前面两场各 5 场时，老代码会先带着
+    跨赛事历史把"追加 5 场"一路顶到 10 场，而"只带本赛事历史"其实排得出来。
+    现在每一档都先「跨赛事+本赛事」→「只本赛事」两次尝试，都不行才往上加档位。
+    """
+    print("\n2b) 追加比赛：跨赛事历史排不出来也不能把档位翻倍")
+    admin, ids = await mk_users("addh", 5)
+    for _ in range(2):                       # 两场"上一场"，把跨赛事历史喂满
+        prev = await seed_open(admin, ids)
         async with Session() as s:
             await start_tournament(tournament_id=prev, request=fake_request(),
                                    body=StartRequest(total_matches=5),
                                    user=await s.get(User, admin), db=s)
-
-    tid = await seed_open(admin, ids)
+    tid = await seed_ongoing(admin, ids, total=5, played_rounds=0)
     async with Session() as s:
-        res = await start_tournament(tournament_id=tid, request=fake_request(),
-                                     body=StartRequest(total_matches=5),
-                                     user=await s.get(User, admin), db=s)
-    app = await appearances(tid)
+        res = await add_matches(tournament_id=tid, request=fake_request(),
+                                body=AddMatchesBody(matches=5),
+                                user=await s.get(User, admin), db=s)
+    check("追加数就是请求的 5 场（没被跨赛事历史顶成 10）", res["added"] == 5, res)
+    check("库里确实只多了 5 场", await count_matches(tid) == 10, await count_matches(tid))
 
-    check("场次数没被兜底改大（仍是 5 场）", res["matches"] == 5, res)
-    check("库里确实排了 5 场", len(app) == 5 and sum(app.values()) == 20, dict(app))
-    check("每人场次相等（5 人 5 场 = 各 4 场）", set(app.values()) == {4}, dict(app))
+
+async def check_reschedule_with_started_round():
+    """重排要把**所有**轮次都换掉：`start-round` 只把 Round.status 标成 ONGOING，
+    比赛仍是 PENDING。只按轮次状态过滤会漏掉这个轮次 → 旧的一份 + 新的一份叠加
+    （每人多打一场、与返回的 replaced_matches 也对不上）。"""
+    print("\n8b) 重排：轮次被标成 ongoing（但一场没记分）也必须整批换掉")
+    from app.api.engine_api import reschedule_schedule
+    from app.api.matches import start_round
+
+    admin, ids = await mk_users("reschr", 8)
+    tid = await seed_ongoing(admin, ids, total=14, played_rounds=0)
+    async with Session() as s:
+        r = (await s.execute(select(Round).where(Round.tournament_id == tid)
+                             .order_by(Round.round_number).limit(1))).scalar_one()
+        await start_round(tournament_id=tid, round_id=r.id, request=fake_request(),
+                          user=await s.get(User, admin), db=s)
+
+    check("前置：轮次已标 ongoing，但没有任何比赛开打",
+          await started_match_count(tid) == 0, await started_match_count(tid))
+    async with Session() as s:
+        res = await reschedule_schedule(tournament_id=tid, request=fake_request(),
+                                        user=await s.get(User, admin), db=s)
+    check("重排后总场次仍是 14（没叠加成 16）", res["total_matches"] == 14, res["total_matches"])
+    check("库里确实只有 14 场", await count_matches(tid) == 14, await count_matches(tid))
+    app = await appearances(tid)
+    check("每人场次相等（8 人 14 场 = 各 7 场）", len(app) == 8 and set(app.values()) == {7}, dict(app))
 
 
 async def check_cross_event_avoidance():
@@ -590,18 +741,24 @@ async def main() -> int:
 
     auth_mod.audit = fake_audit
     engine_mod.audit = fake_audit
+    # 也要替换比赛模块的 audit：本脚本会直接调 start_round 等接口，
+    # 它们各自在模块里 import 了 audit，只替换上面两处会让这些调用真的往库里写审计
+    matches_mod.audit = fake_audit
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
     await check_add_matches()
+    await check_add_matches_keeps_requested_count_with_history()
     await check_start()
     await check_start_keeps_requested_matches_with_history()
     await check_withdraw_and_totals()
     await check_owner_and_invite()
     await check_reschedule()
+    await check_reschedule_with_started_round()
     await check_cross_event_avoidance()
+    await check_start_shuffle()
 
     await engine.dispose()
     print(f"\n共 {len(FAILED)} 项失败" + (f"：{FAILED}" if FAILED else "，全部通过 ✓"))
