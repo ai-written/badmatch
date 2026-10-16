@@ -130,24 +130,29 @@ async def start_tournament(
     # 消除贪婪选人的死路），但仍保留一层兜底：万一某个组合排不出来，
     # 退到可行的最小场次，保证赛事总能开起来，而不是 500 回滚后卡在 open。
     # 顺序很重要：必须先试请求值，否则会把用户明确选择的场次无故改小。
+    #
+    # 每一档都先带跨赛事历史试、排不出来就不带历史再试**同一档**：历史只影响打分，
+    # 但它会改变贪心的选择路径，个别组合会因此走死路（实测 5 人 5 场：
+    # 名单顺序 [1,2,3,4,5] + 两场同样 5 人的历史，就不带历史能排、带历史排不出来）。
+    # 先不带历史重试同一档，是为了别把用户选的场次改大（5 → 10），也别直接 400。
     schedule = None
     adjusted_M = M
-    try:
-        schedule = generate_schedule(player_ids, M, partner_history,
-                                     opponent_history, match_history)
-    except ValueError:
-        candidate = compute_match_count(len(player_ids))
-        while candidate <= max(M, 30):
-            if candidate == M:
-                candidate += len(player_ids)
-                continue
+    candidate_Ms = [M]
+    next_M = compute_match_count(len(player_ids))
+    while next_M <= max(M, 30):
+        if next_M != M:
+            candidate_Ms.append(next_M)
+        next_M += len(player_ids)          # 只试整除的组合（与改动前一模一样）
+    for cand_M in candidate_Ms:
+        for hist in ((partner_history, opponent_history, match_history), ({}, {}, {})):
             try:
-                schedule = generate_schedule(player_ids, candidate, partner_history,
-                                             opponent_history, match_history)
-                adjusted_M = candidate
+                schedule = generate_schedule(player_ids, cand_M, *hist)
+                adjusted_M = cand_M
                 break
             except ValueError:
-                candidate += len(player_ids)   # 只试整除的组合
+                continue
+        if schedule is not None:
+            break
     if schedule is None:
         raise HTTPException(
             status_code=400,
@@ -416,7 +421,17 @@ async def add_matches(
         except ValueError:
             added += step
     if schedule is None:
-        raise HTTPException(status_code=400, detail="当前人数排不出更多场次，请减少追加场次后重试")
+        # 每一档都排不出来（带着跨赛事历史时个别组合会走死路，见开赛那边的说明）：
+        # 退回"只避本赛事已排的重复"再试用户请求的档位 —— 这正是加上跨赛事历史之前的行为，
+        # 宁可少一层跨赛事避重，也不要给用户一个 400。仍然要避开本赛事的重复，
+        # 所以这里不干脆把历史清空（那会让同一赛事里出现完全相同的对局）。
+        own_partner, own_opponent, own_match = await _load_history(db, [tournament_id])
+        try:
+            schedule = generate_schedule(players, body.matches,
+                                         own_partner, own_opponent, own_match)
+            added = body.matches
+        except ValueError:
+            raise HTTPException(status_code=400, detail="当前人数排不出更多场次，请减少追加场次后重试")
 
     last_num_row = await db.execute(
         select(func.max(Round.round_number)).where(Round.tournament_id == tournament_id)
@@ -571,15 +586,23 @@ async def reschedule_schedule(
     # 见 docstring：显式重排洗牌，保证"再点一次会换一份"
     random.shuffle(players)
 
-    # 贪心在个别组合下会走死路（与开赛/追加同一层兜底）：先带着"避开旧赛程"排，
-    # 排不出来就只留跨赛事避重，再不行才报错 —— 用户点的是"换一份"，不该收到 500
-    try:
-        schedule = generate_schedule(players, M, partner_history, opponent_history, match_history)
-    except ValueError:
+    # 贪心在个别组合下会走死路（与开赛/追加同一层兜底）：逐级放宽历史 ——
+    # ① 避开"这份旧赛程 + 最近几场" → ② 只避开最近几场 → ③ 不带历史。
+    # 历史只影响打分、不改变每人场次，所以任何一级排出来都比给用户一个 400 好；
+    # 名单顺序已经洗过牌，即使退到 ③ 也基本不会排出和刚才一样的一份。
+    schedule = None
+    for hist in (
+        (partner_history, opponent_history, match_history),
+        (recent_partner, recent_opponent, recent_match),
+        ({}, {}, {}),
+    ):
         try:
-            schedule = generate_schedule(players, M, recent_partner, recent_opponent, recent_match)
+            schedule = generate_schedule(players, M, *hist)
+            break
         except ValueError:
-            raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
+            continue
+    if schedule is None:
+        raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
 
     schedule = shuffle_sides(schedule)          # 与开赛/追加同口径，抹掉"名单靠前者总在左队"
     rounds_data = compute_rounds(schedule, 2)

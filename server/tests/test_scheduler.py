@@ -343,6 +343,32 @@ def test_cross_event_history_covers_the_last_three_events():
         f"最近 3 场用过的对局不该再出现：{set(_match_sigs(nxt)) & used}"
 
 
+def test_history_dead_end_has_no_history_fallback():
+    """5 人 5 场 + 两场同样的历史：带历史会走死路，而**不带历史能排出来**。
+
+    这条不是"算法应该这样"，而是**调用点兜底**的依据：`generate_schedule` 带历史时
+    可能一个组合都排不出来（历史只改打分，但会改变贪心的选择路径），所以开赛 / 追加比赛 /
+    重排都得在排不出来时退到更少的历史再试同一档，而不是把用户选的场次改大或直接 400。
+    算法将来变强、这里不再走死路时，本用例自动退化成"两边都能排出来"，不会误报。
+    """
+    players = [1, 2, 3, 4, 5]
+    histories = _history_of([
+        generate_schedule(players, 5),
+        generate_schedule([3, 1, 2, 4, 5], 5),
+    ])
+    try:
+        generate_schedule(players, 5, *histories)
+        dead_end = False
+    except ValueError:
+        dead_end = True
+
+    if dead_end:
+        # 兜底的依据：不带历史（= 加跨赛事避重之前的行为）必须能排出来，且仍然合法
+        schedule = generate_schedule(players, 5)
+        played = Counter(p for (a, b), (c, d), *_ in schedule for p in (a, b, c, d))
+        assert len(schedule) == 5 and len(played) == 5 and set(played.values()) == {4}
+
+
 # ---- 落库前的左右随机翻边：抹掉「名单第一人永远站左队」 ----
 
 def test_shuffle_sides_only_swaps_the_two_teams():

@@ -507,6 +507,35 @@ async def check_reschedule():
           [n.message for n in notes])
 
 
+async def check_start_keeps_requested_matches_with_history():
+    """带跨赛事历史时，开赛必须仍然用**用户选的**场次数，而不是被兜底改大。
+
+    回归背景：跨赛事避重上线后，"5 人 5 场 + 两场同样 5 人的历史"会让 generate_schedule
+    走死路（单测 test_history_dead_end_has_no_history_fallback 固化了这个输入）。
+    老兜底只会往上加场次（5 → 10）或 400；现在先不带历史重试同一档，所以必须还是 5 场。
+    """
+    print("\n3b) 开赛带跨赛事历史时，场次数仍是用户选的那个")
+    admin, ids = await mk_users("hist5", 5)
+    # 造两场"上一场"：先按原顺序，再按单测里那个会踩死路的顺序
+    for order in (ids, [ids[2], ids[0], ids[1], ids[3], ids[4]]):
+        prev = await seed_open(admin, order)
+        async with Session() as s:
+            await start_tournament(tournament_id=prev, request=fake_request(),
+                                   body=StartRequest(total_matches=5),
+                                   user=await s.get(User, admin), db=s)
+
+    tid = await seed_open(admin, ids)
+    async with Session() as s:
+        res = await start_tournament(tournament_id=tid, request=fake_request(),
+                                     body=StartRequest(total_matches=5),
+                                     user=await s.get(User, admin), db=s)
+    app = await appearances(tid)
+
+    check("场次数没被兜底改大（仍是 5 场）", res["matches"] == 5, res)
+    check("库里确实排了 5 场", len(app) == 5 and sum(app.values()) == 20, dict(app))
+    check("每人场次相等（5 人 5 场 = 各 4 场）", set(app.values()) == {4}, dict(app))
+
+
 async def check_cross_event_avoidance():
     """跨赛事避重：同一批人连开三场，后面的赛事不该重复前面的「同 4 人 + 同分组」对局。
 
@@ -568,6 +597,7 @@ async def main() -> int:
 
     await check_add_matches()
     await check_start()
+    await check_start_keeps_requested_matches_with_history()
     await check_withdraw_and_totals()
     await check_owner_and_invite()
     await check_reschedule()
