@@ -92,6 +92,17 @@ class TournamentCreate(BaseModel):
         return self
 
 
+class TournamentUpdate(TournamentCreate):
+    """编辑报名中的赛事：字段与创建**完全一致**（前端复用同一个表单页）。
+
+    刻意继承而不是另写一份：两边校验（长度/范围/时区换算/结束晚于开始）必须一字不差，
+    否则「创建时能过、编辑时 422」这类偏差会在升级后才被发现。
+
+    唯一的例外是 `preselect_player_ids`：它只在创建时生效（编辑页不提供该入口），
+    接口那边显式忽略 —— 见 `api/tournaments.update_tournament` 的说明。
+    """
+
+
 class TournamentBrief(BaseModel):
     id: int
     title: str

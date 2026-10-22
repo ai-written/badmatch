@@ -1,12 +1,13 @@
 <template>
   <div class="page-container vh-page-scroll">
-    <van-nav-bar title="创建赛事" left-text="取消" left-arrow @click-left="goBack" />
+    <van-nav-bar :title="isEdit ? '编辑赛事' : '创建赛事'" left-text="取消" left-arrow @click-left="goBack" />
 
     <van-form @submit="onSubmit" class="create-form">
       <van-cell-group inset>
         <van-field v-model="form.title" label="赛事名称" placeholder="请输入赛事名称" required :rules="[{ required: true, message: '请输入赛事名称' }]" />
         <van-field v-model="form.location" label="地点" placeholder="比赛地点" />
         <van-field v-model="form.court" label="场地号" placeholder="如 A1、1号场" />
+        <van-field v-model="form.description" label="备注" type="textarea" rows="2" autosize placeholder="可选，显示在赛事详情页" />
 
         <!-- 日期 -->
         <van-field :model-value="dateDisplay" readonly clickable label="日期" placeholder="请选择日期" required :rules="[{ required: true, message: '请选择日期' }]" @click="showCalendar = true" />
@@ -31,13 +32,14 @@
           @click="showOpenCalendar = true"
         />
 
-        <van-field name="halfCourt" label="上下场">
+        <!-- 上下场 = 一次建两条赛事（上半场 + 下半场）。编辑一条已有赛事时没有这个语义 -->
+        <van-field v-if="!isEdit" name="halfCourt" label="上下场">
           <template #input>
             <van-switch v-model="halfCourt" size="20" />
           </template>
         </van-field>
 
-        <van-field v-model.number="form.max_participants" label="最大人数" type="digit" placeholder="8" required :rules="[{ required: true, message: '请输入最大人数' }]" @blur="fetchOptions" />
+        <van-field v-model.number="form.max_participants" label="最大人数" type="digit" :placeholder="maxParticipantsPlaceholder" required :rules="[{ required: true, message: '请输入最大人数' }]" @blur="() => fetchOptions({ preserveTotal: isEdit })" />
         <van-field v-model.number="form.points_to_win" label="计分制" type="digit" placeholder="11" />
 
         <van-field
@@ -48,7 +50,7 @@
         />
 
         <van-field
-          v-if="canPreselect"
+          v-if="canPreselect && !isEdit"
           :model-value="preselectedIds.length ? `${preselectedIds.length} 人已选` : '未选择'"
           readonly clickable label="默认参赛人员"
           placeholder="可选，创建后自动报名"
@@ -57,7 +59,7 @@
       </van-cell-group>
 
       <div style="margin: 16px;">
-        <van-button round block type="primary" native-type="submit" :loading="submitting">创建赛事</van-button>
+        <van-button round block type="primary" native-type="submit" :loading="submitting">{{ isEdit ? '保存修改' : '创建赛事' }}</van-button>
       </div>
     </van-form>
 
@@ -159,23 +161,43 @@
 
 <script setup lang="ts">
 import { reactive, ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useGoBack } from '@/composables/useGoBack'
 import { showToast } from 'vant'
 
+const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const { goBack } = useGoBack()
 const submitting = ref(false)
 const halfCourt = ref(false)
 
+/**
+ * 一页两用：`/create` 是创建，`/tournament/:id/edit` 是编辑。
+ *
+ * 刻意复用同一个页面而不是复制一份：两边的字段、校验、日历/时间选择器、默认名规则
+ * 必须完全一致，否则「创建时能填的东西编辑时填不了」这类偏差迟早出现。
+ * 差异只有三处（都在下面按 isEdit 分出）：初始数据来源、提交的接口、以及
+ * 「上下场」「默认参赛人员」这两个只对创建有意义的入口。
+ */
+const isEdit = computed(() => route.name === 'edit' && Number(route.params.id) > 0)
+const editId = computed(() => Number(route.params.id) || 0)
+// 编辑时原样保留的服务端场地列表（表单只能表达第一个，见 buildCourts）
+const originalCourts = ref<any[]>([])
+// 编辑时最大人数的下限 = 当前已报名人数（后端会再拦一次，这里只是别让人白填一遍）
+const registeredCount = ref(0)
+const maxParticipantsPlaceholder = computed(() =>
+  isEdit.value ? `至少 ${registeredCount.value}` : '8'
+)
+
 // 默认地点：本群固定在这个馆打球，省得每场都手输（仍可改）
 const DEFAULT_LOCATION = '奥体中心'
 
 const form = reactive({
   title: '',
+  description: '',
   location: DEFAULT_LOCATION,
   court: '',
   start_date: '',
@@ -308,6 +330,9 @@ const defaultTitle = ref('')
 let titleSeq = 0
 
 async function fetchDefaultTitle() {
+  // 编辑时不改名字：赛事名可能早就在群里传开了（海报、接龙都写着它），
+  // 改日期就顺手改名等于把名字悄悄换掉
+  if (isEdit.value) return
   const d = selectedDate.value
   const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   const seq = ++titleSeq
@@ -381,12 +406,18 @@ const selectedPerPerson = computed(() => {
   return opt?.per_person || 0
 })
 
-async function fetchOptions() {
+async function fetchOptions(opts: { preserveTotal?: boolean } = {}) {
   const n = form.max_participants
   if (n < 4) return
   try {
     const res = await api.get(`/tournaments/match-options/${n}`)
     matchOptions.value = res.data.options || []
+    // 编辑：原有总场次仍然可选时保留它。否则只是改个名字/地点，总场次就会被
+    // 悄悄改成「离 14 最近」的那一档 —— 用户没动它却变了
+    if (opts.preserveTotal && form.total_matches != null
+        && matchOptions.value.some(o => o.total === form.total_matches)) {
+      return
+    }
     if (matchOptions.value.length > 0) {
       const best = matchOptions.value.reduce((a, b) =>
         Math.abs(a.total - 14) < Math.abs(b.total - 14) ? a : b
@@ -405,9 +436,33 @@ function selectMatch(val: number | null) {
 
 function clean(val: any) { return val === '' || val == null ? null : val }
 
+/**
+ * 场地/时间段。
+ *
+ * 创建时表单只有「一个场地号 + 一个时间段」，所以就是一整块写进去。
+ * 编辑时多一层考虑：后端允许一场赛事有多个场地（接口支持数组，只是界面从来只建一个），
+ * 而表单只能表达第一个 —— 直接按单场地覆盖会把其余场地悄悄删掉（那是真数据丢失）。
+ * 所以编辑路径下：只替换第一个场地，其余原样带回去；场地号填空 = 清空场地（与创建一致）。
+ */
+function buildCourts(start: string, end: string) {
+  if (!form.court) return []
+  const first = {
+    name: form.court,
+    sort_order: originalCourts.value[0]?.sort_order ?? 0,
+    time_slots: [{ start_time: start.slice(11), end_time: end.slice(11) }],
+  }
+  if (!isEdit.value) return [first]
+  return [first, ...originalCourts.value.slice(1).map(c => ({
+    name: c.name,
+    sort_order: c.sort_order,
+    time_slots: (c.time_slots || []).map((s: any) => ({ start_time: s.start_time, end_time: s.end_time })),
+  }))]
+}
+
 function buildPayload(title: string, start: string, end: string) {
   return {
     title,
+    description: clean(form.description),
     location: clean(form.location),
     start_date: start,
     end_date: end,
@@ -416,18 +471,27 @@ function buildPayload(title: string, start: string, end: string) {
     points_to_win: Number(form.points_to_win) || 11,
     enable_scheduled_registration: form.enable_scheduled_registration,
     registration_open_at: form.enable_scheduled_registration ? form.registration_open_at : null,
-    preselect_player_ids: preselectedIds.value,
-    courts: form.court ? [{
-      name: form.court,
-      sort_order: 0,
-      time_slots: [{ start_time: start.slice(11), end_time: end.slice(11) }],
-    }] : [],
+    // 预选名单只在创建时生效（编辑路径上后端会忽略它），编辑页也不提供这个入口
+    preselect_player_ids: isEdit.value ? [] : preselectedIds.value,
+    courts: buildCourts(start, end),
   }
 }
 
 async function onSubmit() {
   submitting.value = true
   try {
+    if (isEdit.value) {
+      // 前端先拦一次「最大人数 < 已报名人数」：后端也会返回同样的 400，
+      // 但等一个来回才发现填错了，不如立刻说
+      if (Number(form.max_participants) < registeredCount.value) {
+        showToast(`最大人数不能小于已报名人数（${registeredCount.value} 人）`)
+        return
+      }
+      await api.put(`/tournaments/${editId.value}`, buildPayload(form.title, form.start_date, form.end_date))
+      showToast('已保存')
+      router.replace(`/tournament/${editId.value}`)
+      return
+    }
     if (halfCourt.value) {
       const sh = startHour.value * 60 + startMinute.value
       const eh = endHour.value * 60 + endMinute.value
@@ -454,8 +518,59 @@ async function onSubmit() {
   } catch {} finally { submitting.value = false }
 }
 
+// 编辑：把赛事详情填回表单。后端返回的是**本地 naive 时间**（如 2026-10-23T19:00:00），
+// new Date() 解析无 offset 的 ISO 串就是本地时间，与创建时提交的口径一致。
+function snapMinute(m: number) {
+  // 分钟列表是 5 分钟一档；历史数据万一不是整数档，就近取整（避免选择器没有该项）
+  return Math.min(55, Math.max(0, Math.round(m / 5) * 5))
+}
+
+async function initEdit() {
+  const res = await api.get(`/tournaments/${editId.value}`)
+  const t = res.data
+  registeredCount.value = Number(t.registered_count) || 0
+  originalCourts.value = t.courts || []
+  form.title = t.title || ''
+  form.description = t.description || ''
+  form.location = t.location || ''
+  form.court = t.courts?.[0]?.name || ''
+  form.max_participants = t.max_participants
+  form.points_to_win = t.points_to_win || 11
+  form.total_matches = t.total_matches ?? null
+
+  const s = new Date(t.start_date)
+  const e = new Date(t.end_date)
+  selectedDate.value = new Date(s.getFullYear(), s.getMonth(), s.getDate())
+  startHourIdx.value = [s.getHours()]
+  startMinuteIdx.value = [snapMinute(s.getMinutes())]
+  endHourIdx.value = [e.getHours()]
+  endMinuteIdx.value = [snapMinute(e.getMinutes())]
+  syncDateTime()
+
+  // 定时开放报名：只有「还没到开放时间」才算开着。已经开放过的（时间在过去，或本来
+  // 就是立即开放）显示为关闭 —— 提交时开关为关 → 写 NULL = 现在就开放，语义不变
+  const openAt = t.registration_open_at ? new Date(t.registration_open_at) : null
+  form.enable_scheduled_registration = !!openAt && openAt.getTime() > Date.now()
+  if (openAt && form.enable_scheduled_registration) {
+    openDate.value = new Date(openAt.getFullYear(), openAt.getMonth(), openAt.getDate())
+    openHourIdx.value = [openAt.getHours()]
+    openMinuteIdx.value = [snapMinute(openAt.getMinutes())]
+    syncOpenTime()
+  }
+}
+
 onMounted(async () => {
-  await Promise.all([auth.fetchMe(), fetchOptions(), fetchDefaultTitle()])
+  try {
+    if (isEdit.value) {
+      // 先拿到赛事（人数上下限、原有总场次），再按人数拉场次档位
+      await initEdit()
+      await Promise.all([auth.fetchMe(), fetchOptions({ preserveTotal: true })])
+    } else {
+      await Promise.all([auth.fetchMe(), fetchOptions(), fetchDefaultTitle()])
+    }
+  } catch {
+    // 拦截器已弹过提示；编辑页拉不到详情时表单是空的，用户返回即可
+  }
 })
 </script>
 

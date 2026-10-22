@@ -23,6 +23,9 @@ const router = createRouter({
     { path: '/tournament/:id/rankings', name: 'rankings', component: () => import('@/views/RankingsView.vue'), meta: { public: true } },
     { path: '/tournament/:id/score/:matchId', name: 'score', component: () => import('@/views/ScoreView.vue') },
     { path: '/create', name: 'create', component: () => import('@/views/CreateTournament.vue') },
+    // 编辑赛事：与创建复用同一个表单页（只是初始值与提交的接口不同）。
+    // 只有「报名中」的赛事能编辑，入口在详情页右上角（后端 assert_can_edit 同一套规则）
+    { path: '/tournament/:id/edit', name: 'edit', component: () => import('@/views/CreateTournament.vue') },
     { path: '/profile', name: 'profile', component: () => import('@/views/ProfileView.vue'), meta: { public: true } },
     { path: '/forgot-password', name: 'forgot-password', component: () => import('@/views/ForgotPasswordView.vue'), meta: { public: true } },
     // 令牌放在 URL 的 # 之后（fragment）：不会发给服务器、不进日志与 Referer

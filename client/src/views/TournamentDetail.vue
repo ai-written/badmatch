@@ -3,9 +3,12 @@
     <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
       <template #right>
         <!-- 分享海报：报名中用来说服球友报名，进行中用来把赛程/积分榜发出去。
-             删除入口：超管任意状态都能删，创建者/管理员只限报名中（与后端 assert_can_delete 一致） -->
+             删除入口：超管任意状态都能删，创建者/管理员只限报名中（与后端 assert_can_delete 一致）
+             编辑入口：房主/管理员/超管，且只限报名中（与后端 assert_can_edit 一致）——
+             开赛后赛程已按当时人数排好，改人数/名称不会让赛程跟着变 -->
         <span class="nav-right">
           <van-icon v-if="canSharePoster" name="share-o" size="19" @click="openPoster" />
+          <van-icon v-if="canEdit" name="edit" size="19" @click="openEdit" />
           <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
         </span>
       </template>
@@ -108,6 +111,9 @@
       </div>
 
       <div class="creator-block" v-if="canManage && tournament.status === 'open'">
+        <!-- 报名中才给改：改名称/地点/时间/人数/计分制/总场次（最大人数不能低于已报名人数）。
+             顶栏那个编辑图标是同一个入口，这里再给一个带文字的更显眼 -->
+        <van-button plain type="primary" block round :loading="submitting" :disabled="submitting" @click="openEdit" style="margin-bottom:10px">编辑赛事信息</van-button>
         <van-button type="danger" block round :loading="submitting" :disabled="submitting || tournament.registered_count < 4" @click="doStart">
           开始比赛<template v-if="tournament.registered_count < 4">（还需 {{ 4 - tournament.registered_count }} 人）</template>
         </van-button>
@@ -346,6 +352,13 @@ const canDelete = computed(() => {
   return auth.user.role === 'admin' || auth.user.id === tournament.value.creator_id
 })
 const statusType = computed(() => tournament.value?.status === 'open' ? 'primary' : tournament.value?.status === 'ongoing' ? 'success' : 'default')
+// 编辑赛事：与后端 assert_can_edit 同一套规则 —— 房主/管理员/超管，且只限报名中。
+// 已开赛/已结束一律只读（赛程已按当时人数排好，改人数不会让赛程跟着变；
+// 要调赛程只有「追加比赛 / 重排赛程」这两个入口）
+const canEdit = computed(() => canManage.value && tournament.value?.status === 'open')
+function openEdit() {
+  router.push(`/tournament/${tid}/edit`)
+}
 /** 总场次：开赛前 total_matches 为空（由后端在开赛时按人数自动算），此时如实说明 */
 const totalMatchesText = computed(() => {
   const n = tournament.value?.total_matches
@@ -839,8 +852,10 @@ async function onRefresh() {
 watch(lastMessage, (msg) => {
   const t = msg?.type
   // schedule_updated：赛中追加了比赛（总场次变了，本页要跟着刷）
+  // tournament_updated：有人改了赛事信息（名称/地点/时间/人数）—— 报名或开赛前很常见
   if (t === 'registration_updated' || t === 'tournament_started'
-      || t === 'tournament_finished' || t === 'schedule_updated') {
+      || t === 'tournament_finished' || t === 'schedule_updated'
+      || t === 'tournament_updated') {
     refreshBothIfNotJustRefreshed()
   }
   // 取消记录弹层开着时跟着刷新：别人刚取消，这边列表要立刻变

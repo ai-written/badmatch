@@ -17,6 +17,8 @@
  *   9 赛事详情：进行中「追加比赛」与「重排赛程」（档位来自服务端、按倍数追加、
  *     重排要先确认且取消不发请求、非创建者看不到入口）
  *  10 管理面板：用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程、权限收窄的菜单
+ *  11 赛事详情：报名中「编辑赛事信息」（入口/权限/表单预填/最大人数不低于已报名人数/保存）
+ *  12 创建页：与编辑页共用同一表单组件后，单场与上下场创建发出的 payload 仍与改动前一致
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -211,6 +213,35 @@ function assert(name, ok, detail = '') {
 }
 
 const P = (id, username) => ({ id, username, avatar: '' })
+
+// ---- 表单/导航小工具（编辑页与创建页共用同一个组件，两个场景都要用）----
+/** 按 van-field 的标签定位那一行的表达式 */
+const fieldByLabel = (label) => `[...document.querySelectorAll('.van-field')]
+  .find(c => (c.querySelector('.van-field__label')?.textContent || '').trim() === ${JSON.stringify(label)})`
+const toastText = (page) => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
+const navTitleOf = (page) => page.ev(`(document.querySelector('.van-nav-bar__title')?.textContent || '').trim()`)
+const hasFieldOf = (page, label) => page.ev(`[...document.querySelectorAll('.van-field__label')]
+  .some(e => (e.textContent || '').trim() === ${JSON.stringify(label)})`)
+/** 读值：日期/时间段是只读字段，Vant 渲染成 div，取 textContent */
+const fieldValueOf = (page, label) => page.ev(`(() => {
+  const cell = ${fieldByLabel(label)}
+  if (!cell) return 'NOTFOUND'
+  const el = cell.querySelector('input, textarea, .van-field__control')
+  if (!el) return 'NOINPUT'
+  return el.tagName === 'DIV' ? (el.textContent || '').trim() : el.value
+})()`)
+/** 写值：改 value 后派发 input/change，让 v-model 跟着更新 */
+const setFieldOf = (page, label, value) => page.ev(`(() => {
+  const cell = ${fieldByLabel(label)}
+  if (!cell) return 'NOTFOUND'
+  const input = cell.querySelector('input, textarea')
+  if (!input) return 'NOINPUT'
+  input.value = ${JSON.stringify(String(value))}
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
+  return 'OK'
+})()`)
+
 const matchPayload = (over = {}) => ({
   id: 101, round_id: 11, round_number: 1, status: 'ongoing', tournament_status: 'ongoing',
   score_a: 11, score_b: 3, winner_pairing_id: null, is_swapped: false, court_name: '1号场',
@@ -1355,8 +1386,245 @@ async function scenarioAdminUserActions(page) {
     adminActions.includes('恢复账号') && adminActions.includes('删除用户'), JSON.stringify(adminActions))
 }
 
+/** 场景 11：报名中赛事的「编辑赛事信息」（入口/权限/预填/人数下限/保存） */
+async function scenarioEditTournament(page) {
+  console.log('11) 赛事详情：报名中「编辑赛事信息」')
+  const registrations = Array.from({ length: 5 }, (_, i) => ({
+    id: i + 1, user_id: i + 1, username: `p${i + 1}`, avatar: '', is_active: true,
+    created_at: '2026-10-10T09:00:00',
+  }))
+  let me = { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  let detail = {
+    id: 2, creator_id: 1, title: '10月16日养生局', description: '老备注', location: '奥体中心',
+    start_date: '2026-10-16T19:00:00', end_date: '2026-10-16T21:00:00',
+    max_participants: 8, status: 'open',
+    courts: [{ id: 1, name: 'A1', sort_order: 0, time_slots: [{ id: 1, start_time: '19:00:00', end_time: '21:00:00' }] }],
+    registered_count: 5, cancelled_count: 0, pending_referee_count: 0, started_match_count: 0,
+    total_matches: 10, points_to_win: 11, registration_open_at: null,
+    server_now: '2026-10-14T08:00:00', is_registered: false, created_at: '2026-10-10T09:00:00',
+  }
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/\/registrations$/.test(path)) return registrations
+    if (/match-options\//.test(path)) return { options: [{ total: 10, per_person: 8 }], per_person: 8 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    if (/\/tournaments\/2$/.test(path)) {
+      if (entry.method === 'PUT') {
+        const body = JSON.parse(entry.body || '{}')
+        detail = {
+          ...detail, ...body,
+          courts: (body.courts || []).map((c, i) => ({ id: i + 1, ...c })),
+        }
+        return detail
+      }
+      return detail
+    }
+    return {}
+  })
+  await page.setToken()
+
+  const btnTexts = () => page.ev(`[...document.querySelectorAll('.creator-block .van-button')].map(b => (b.textContent || '').trim())`)
+  const navIcons = () => page.ev(`[...document.querySelectorAll('.nav-right .van-icon')].map(e => e.className)`)
+  const toast = () => toastText(page)
+  const navTitle = () => navTitleOf(page)
+  const hasField = (label) => hasFieldOf(page, label)
+  // 按标签找那一行的输入框/只读展示区（日期、时间段是只读字段，渲染成 div）
+  const fieldValue = (label) => fieldValueOf(page, label)
+  const setField = (label, value) => setFieldOf(page, label, value)
+  const puts = () => page.requests.filter((r) => r.method === 'PUT' && /\/tournaments\/2$/.test(r.path))
+
+  // ---- 报名中 + 创建者：入口可见 ----
+  await page.goto('/tournament/2', 2400)
+  assert('报名中：创建者能看到「编辑赛事信息」',
+    (await btnTexts()).includes('编辑赛事信息'), JSON.stringify(await btnTexts()))
+  assert('顶栏有编辑图标（与底部按钮同一个入口）',
+    (await navIcons()).some(c => c.includes('van-icon-edit')), JSON.stringify(await navIcons()))
+
+  // ---- 进编辑页：同一套表单，预填原有值 ----
+  assert('点「编辑赛事信息」进编辑页', (await page.clickText('编辑赛事信息')) === true)
+  await sleep(900)
+  assert('路由是 /tournament/2/edit', (await page.ev('location.pathname')) === '/tournament/2/edit',
+    await page.ev('location.pathname'))
+  assert('标题栏是「编辑赛事」', (await navTitle()) === '编辑赛事', await navTitle())
+  assert('赛事名称已预填', (await fieldValue('赛事名称')) === '10月16日养生局', await fieldValue('赛事名称'))
+  assert('备注已预填', (await fieldValue('备注')) === '老备注', await fieldValue('备注'))
+  assert('地点已预填', (await fieldValue('地点')) === '奥体中心', await fieldValue('地点'))
+  assert('场地号已预填', (await fieldValue('场地号')) === 'A1', await fieldValue('场地号'))
+  assert('最大人数已预填', String(await fieldValue('最大人数')) === '8', String(await fieldValue('最大人数')))
+  assert('日期已回填', (await fieldValue('日期')).includes('10月16日'), await fieldValue('日期'))
+  assert('时间段已回填', (await fieldValue('时间段')) === '19:00 ~ 21:00', await fieldValue('时间段'))
+  assert('编辑页没有「上下场」（那是"一次建两条赛事"）', (await hasField('上下场')) === false)
+  assert('编辑页没有「默认参赛人员」（预选只在创建时生效）', (await hasField('默认参赛人员')) === false)
+
+  // ---- 最大人数下限：低于已报名人数（5）时前端直接拦住，不发请求 ----
+  page.requests = []
+  assert('把最大人数改成 4', (await setField('最大人数', 4)) === 'OK')
+  assert('点「保存修改」', (await page.clickText('保存修改')) === true)
+  await sleep(600)
+  assert('低于已报名人数：一个 PUT 都不发', puts().length === 0, `实际 ${puts().length}`)
+  assert('提示写明当前已报名人数', (await toast()) === '最大人数不能小于已报名人数（5 人）', await toast())
+  assert('没有离开编辑页', (await page.ev('location.pathname')) === '/tournament/2/edit')
+
+  // ---- 改成 5（正好等于已报名人数）+ 改名/换场地：允许保存 ----
+  page.requests = []
+  assert('最大人数改成 5', (await setField('最大人数', 5)) === 'OK')
+  assert('赛事改名', (await setField('赛事名称', '10月16日养生局（改）')) === 'OK')
+  assert('场地号改成 B2', (await setField('场地号', 'B2')) === 'OK')
+  assert('再次点「保存修改」', (await page.clickText('保存修改')) === true)
+  await sleep(900)
+  const saved = puts()
+  assert('恰好 1 个 PUT /tournaments/2', saved.length === 1, `实际 ${saved.length}`)
+  const body = saved[0]?.body || ''
+  assert('请求体带上新的最大人数', /"max_participants":5/.test(body), body)
+  assert('请求体带上新名称', body.includes('养生局（改）'), body)
+  assert('请求体带上新场地', body.includes('"name":"B2"'), body)
+  assert('编辑路径不带预选名单', /"preselect_player_ids":\[\]/.test(body), body)
+  assert('提示已保存', (await toast()) === '已保存', await toast())
+  assert('保存后回到详情页', (await page.ev('location.pathname')) === '/tournament/2', await page.ev('location.pathname'))
+  await sleep(600)
+  assert('详情页显示新名称',
+    await page.ev(`(document.body.textContent || '').includes('10月16日养生局（改）')`))
+
+  // ---- 非创建者（普通用户）：看不到入口 ----
+  me = { ...me, id: 7, username: 'p7' }
+  await page.goto('/tournament/2', 2200)
+  assert('非创建者看不到「编辑赛事信息」',
+    !(await btnTexts()).includes('编辑赛事信息'), JSON.stringify(await btnTexts()))
+  assert('非创建者顶栏没有编辑图标',
+    !(await navIcons()).some(c => c.includes('van-icon-edit')), JSON.stringify(await navIcons()))
+
+  // ---- 管理员：能改别人的报名中赛事 ----
+  me = { ...me, id: 9, username: 'adm', role: 'admin' }
+  await page.goto('/tournament/2', 2200)
+  assert('管理员能编辑别人创建的报名中赛事',
+    (await btnTexts()).includes('编辑赛事信息'), JSON.stringify(await btnTexts()))
+
+  // ---- 多场地：表单只能表达第一个，其余必须原样带回去（不能悄悄删掉） ----
+  me = { ...me, id: 1, username: 'p1', role: 'user' }
+  detail = {
+    ...detail, creator_id: 1, status: 'open',
+    courts: [
+      { id: 1, name: 'A1', sort_order: 0, time_slots: [{ id: 1, start_time: '19:00:00', end_time: '21:00:00' }] },
+      { id: 2, name: 'B1', sort_order: 1, time_slots: [{ id: 2, start_time: '20:00:00', end_time: '21:00:00' }] },
+    ],
+  }
+  await page.goto('/tournament/2', 2200)
+  await page.clickText('编辑赛事信息')
+  await sleep(900)
+  assert('多场地时表单只回填第一个场地号', (await fieldValue('场地号')) === 'A1', await fieldValue('场地号'))
+  assert('改第一个场地号', (await setField('场地号', 'B9')) === 'OK')
+  page.requests = []
+  await page.clickText('保存修改')
+  await sleep(900)
+  const multi = JSON.parse(puts()[0]?.body || '{}')
+  assert('第二个场地没有被吞掉（两条都发出去）', multi.courts?.length === 2,
+    JSON.stringify(multi.courts?.map((x) => x.name)))
+  assert('第一个场地用新名字 + 新时间段',
+    multi.courts?.[0]?.name === 'B9'
+    && multi.courts[0].time_slots[0].start_time === '19:00:00'
+    && multi.courts[0].time_slots[0].end_time === '21:00:00',
+    JSON.stringify(multi.courts?.[0]))
+  assert('第二个场地原样保留（名字/次序/时间段都没动）',
+    multi.courts?.[1]?.name === 'B1' && multi.courts[1].sort_order === 1
+    && multi.courts[1].time_slots[0].start_time === '20:00:00'
+    && multi.courts[1].time_slots[0].end_time === '21:00:00',
+    JSON.stringify(multi.courts?.[1]))
+
+  // ---- 已开赛：完全只读（超管也不行） ----
+  me = { ...me, id: 1, username: 'p1', role: 'superadmin' }
+  detail = { ...detail, creator_id: 1, status: 'ongoing' }
+  await page.goto('/tournament/2', 2200)
+  assert('已开赛（超管）：看不到「编辑赛事信息」',
+    !(await btnTexts()).includes('编辑赛事信息'), JSON.stringify(await btnTexts()))
+  assert('已开赛（超管）：顶栏没有编辑图标',
+    !(await navIcons()).some(c => c.includes('van-icon-edit')), JSON.stringify(await navIcons()))
+}
+
+/** 场景 12：创建页（与编辑页共用同一个表单组件）的创建路径没被改坏 */
+async function scenarioCreateStillWorks(page) {
+  console.log('12) 创建赛事：共用表单的创建路径照旧（单场 + 上下场）')
+  let posted = null
+  let batchPosted = null
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) {
+      return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'admin', invite_code: 'x' }
+    }
+    if (/tournaments\/default-title/.test(path)) return { title: '10月23日养生局' }
+    if (/match-options\//.test(path)) return { options: [{ total: 14, per_person: 7 }], per_person: 7 }
+    if (path === '/api/tournaments' && entry.method === 'POST') {
+      posted = JSON.parse(entry.body || '{}')
+      return { id: 9 }
+    }
+    if (/tournaments\/batch$/.test(path)) {
+      batchPosted = JSON.parse(entry.body || '[]')
+      return { ok: true, tournament_ids: [10, 11] }
+    }
+    if (path === '/api/tournaments') return { items: [], total: 0, has_more: false }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+
+  // ---- 单场创建 ----
+  await page.goto('/create', 2400)
+  assert('创建页标题栏是「创建赛事」', (await navTitleOf(page)) === '创建赛事', await navTitleOf(page))
+  assert('创建页有「上下场」（编辑页才隐藏）', (await hasFieldOf(page, '上下场')) === true)
+  assert('创建页管理员能看到「默认参赛人员」', (await hasFieldOf(page, '默认参赛人员')) === true)
+  assert('创建页最大人数默认 8', String(await fieldValueOf(page, '最大人数')) === '8',
+    String(await fieldValueOf(page, '最大人数')))
+  assert('默认名按日期回填', (await fieldValueOf(page, '赛事名称')) === '10月23日养生局',
+    await fieldValueOf(page, '赛事名称'))
+  assert('填赛事名称', (await setFieldOf(page, '赛事名称', '10月23日养生局（e2e）')) === 'OK')
+  assert('填场地号', (await setFieldOf(page, '场地号', 'C3')) === 'OK')
+  assert('点「创建赛事」', (await page.clickText('创建赛事')) === true)
+  await sleep(900)
+  assert('发出 1 个 POST /tournaments', posted !== null, String(posted))
+  assert('名称取自表单', posted?.title === '10月23日养生局（e2e）', String(posted?.title))
+  assert('最大人数 8', posted?.max_participants === 8, String(posted?.max_participants))
+  assert('备注留空发 null', posted?.description === null, String(posted?.description))
+  assert('未开定时报名时 registration_open_at 为 null',
+    posted?.registration_open_at === null && posted?.enable_scheduled_registration === false,
+    JSON.stringify({ r: posted?.registration_open_at, e: posted?.enable_scheduled_registration }))
+  assert('场地结构与改动前一致（sort_order 0 + 时间段取表单）',
+    posted?.courts?.length === 1
+    && posted.courts[0].name === 'C3' && posted.courts[0].sort_order === 0
+    && posted.courts[0].time_slots[0].start_time === '19:00:00'
+    && posted.courts[0].time_slots[0].end_time === '21:00:00',
+    JSON.stringify(posted?.courts))
+  assert('创建路径不带预选名单', Array.isArray(posted?.preselect_player_ids)
+    && posted.preselect_player_ids.length === 0, JSON.stringify(posted?.preselect_player_ids))
+
+  // ---- 上下场（一次建两条赛事）也走同一个 payload 构造器 ----
+  await page.goto('/create', 2400)
+  assert('填赛事名称', (await setFieldOf(page, '赛事名称', '10月23日养生局')) === 'OK')
+  assert('填场地号', (await setFieldOf(page, '场地号', 'A9')) === 'OK')
+  const switchOn = (index) => page.ev(`(() => {
+    const sw = document.querySelectorAll('.van-switch')[${index}]
+    if (!sw) return 'NOTFOUND'
+    sw.click(); return 'OK'
+  })()`)
+  assert('打开「上下场」开关', (await switchOn(1)) === 'OK')
+  await sleep(300)
+  assert('点「创建赛事」', (await page.clickText('创建赛事')) === true)
+  await sleep(900)
+  assert('发出 1 个 POST /tournaments/batch', Array.isArray(batchPosted) && batchPosted.length === 2,
+    String(batchPosted))
+  assert('上下半场标题各自加后缀',
+    batchPosted?.[0]?.title === '10月23日养生局（上半场）'
+    && batchPosted?.[1]?.title === '10月23日养生局（下半场）',
+    JSON.stringify(batchPosted?.map((b) => b.title)))
+  assert('上下半场时间首尾相接（19:00~20:00 / 20:00~21:00）',
+    batchPosted?.[0]?.courts?.[0]?.time_slots?.[0]?.start_time === '19:00:00'
+    && batchPosted?.[0]?.courts?.[0]?.time_slots?.[0]?.end_time === '20:00:00'
+    && batchPosted?.[1]?.courts?.[0]?.time_slots?.[0]?.start_time === '20:00:00'
+    && batchPosted?.[1]?.courts?.[0]?.time_slots?.[0]?.end_time === '21:00:00',
+    JSON.stringify(batchPosted?.map((b) => b.courts?.[0]?.time_slots)))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

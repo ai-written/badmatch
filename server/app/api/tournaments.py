@@ -17,8 +17,8 @@ from app.core.mailer import send_tournament_invite
 from app.engine.scheduler import fairness_step
 from app.core.config import get_settings
 from app.schemas.tournament import (
-    TournamentCreate, TournamentBrief, TournamentListOut, TournamentDetail,
-    RegistrationOut, CourtOut, TimeSlotOut, CancellationOut,
+    TournamentCreate, TournamentUpdate, TournamentBrief, TournamentListOut, TournamentDetail,
+    RegistrationOut, CourtOut, TimeSlotOut, CancellationOut, CourtCreate,
 )
 
 router = APIRouter(prefix="/api/tournaments", tags=["tournaments"])
@@ -186,17 +186,27 @@ async def create_tournaments_batch(
     return {"ok": True, "tournament_ids": tournament_ids}
 
 
-async def _create_tournament(
-    data: TournamentCreate,
-    user: User,
-    db: AsyncSession,
-    background_tasks: BackgroundTasks,
-    email_tasks: list | None = None,
-) -> Tournament:
-    if data.max_participants < 4:
-        raise HTTPException(status_code=400, detail="最大人数至少为 4")
+def _check_capacity(max_participants: int, registered: int = 0) -> None:
+    """人数上下限校验（创建与修改共用）。
 
-    # 定时开放报名：启用时必须选择未来时间；未启用则一律立即开放
+    `registered` 是**当前已报名人数**：编辑时下调上限不能低于它 —— 报名行是既成事实
+    （is_active=True 的那些人确实报名了），把上限改到人数之下只会得到「9/8 人」这种
+    自相矛盾的状态，而且这些人没有地方可去。
+    """
+    if max_participants < 4:
+        raise HTTPException(status_code=400, detail="最大人数至少为 4")
+    if max_participants < registered:
+        raise HTTPException(
+            status_code=400,
+            detail=f"最大人数不能小于当前已报名人数（{registered} 人）",
+        )
+
+
+def _resolve_registration_open_at(data: TournamentCreate) -> datetime | None:
+    """定时开放报名：启用时必须选择未来时间；未启用则一律立即开放。
+
+    创建与修改共用：编辑时把开关关掉就等于「现在就能报名」（写 NULL）。
+    """
     registration_open_at = data.registration_open_at
     if registration_open_at is not None and registration_open_at.tzinfo is not None:
         # 统一转为本地 naive 时间，避免与 datetime.now()/TIMESTAMP 列比较或写入报错
@@ -206,8 +216,19 @@ async def _create_tournament(
             raise HTTPException(status_code=400, detail="启用定时报名必须选择开放时间")
         if registration_open_at <= datetime.now():
             raise HTTPException(status_code=400, detail="报名开放时间必须晚于当前时间")
-    else:
-        registration_open_at = None
+        return registration_open_at
+    return None
+
+
+async def _create_tournament(
+    data: TournamentCreate,
+    user: User,
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    email_tasks: list | None = None,
+) -> Tournament:
+    _check_capacity(data.max_participants)
+    registration_open_at = _resolve_registration_open_at(data)
 
     preselected = list(dict.fromkeys(data.preselect_player_ids))
     if preselected:
@@ -414,6 +435,141 @@ async def delete_tournament(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
     return {"ok": True}
+
+
+def assert_can_edit(t: Tournament, user: User) -> None:
+    """修改赛事的权限与状态判定（抽成纯函数，便于不起库就单测）。
+
+    - 角色与删除一致：创建者、管理员、超级管理员
+    - 但**状态只限报名中（open）**，超级管理员也不例外 —— 这是与删除唯一的不同：
+      已开赛的赛事赛程已经排好，已结束的赛事比分与战绩都已产生，此时改名称/人数/时间
+      没有任何意义，能改的只有赛程本身（走「重排赛程 / 追加比赛」）。超管真要改，
+      删掉重建即可；留一个「赛中也能改人数」的口子，只会让人误以为赛程会跟着变
+      （实际不会：赛程是开赛那一刻按当时的人数排好的）。
+    """
+    if t.creator_id != user.id and user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="只有创建者可以修改赛事")
+    if t.status != TournamentStatus.OPEN:
+        raise HTTPException(status_code=400, detail="只能修改报名中的赛事")
+
+
+async def _replace_courts(
+    tournament_id: int, courts: list[CourtCreate], db: AsyncSession
+) -> None:
+    """整体替换赛事的场地与时间段（编辑赛事用）。
+
+    只在**报名中**调用：此时还没排赛程，matches 表里没有这场赛事的行、也就没有
+    court_id / time_slot_id 引用，删掉重建不会留下悬挂外键（调用方还会再防一层）。
+    """
+    old_courts = await db.execute(select(Court).where(Court.tournament_id == tournament_id))
+    for old in old_courts.scalars().all():
+        await db.execute(delete(TimeSlot).where(TimeSlot.court_id == old.id))
+        await db.delete(old)
+    await db.flush()
+    for c_data in courts:
+        court = Court(tournament_id=tournament_id, name=c_data.name, sort_order=c_data.sort_order)
+        db.add(court)
+        await db.flush()
+        for ts_data in c_data.time_slots:
+            db.add(TimeSlot(court_id=court.id, start_time=ts_data.start_time, end_time=ts_data.end_time))
+    await db.flush()
+
+
+@router.put("/{tournament_id}", response_model=TournamentDetail)
+async def update_tournament(
+    tournament_id: int,
+    data: TournamentUpdate,
+    request: Request,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """修改**报名中**的赛事（已开赛 / 已结束一律只读，见 `assert_can_edit`）。
+
+    字段与创建完全一致（前端复用同一个表单页），只多两条约束：
+    - 最大人数不能小于**当前已报名人数**（`_check_capacity`）；
+    - 场地号/时间段整体替换（`_replace_courts`）。
+
+    `preselect_player_ids` 在编辑路径上**刻意忽略**：预选名单只在创建时生效
+    （那时人还没报名，预选等于替他们报名并发邀请邮件）。编辑页也不提供这个入口，
+    静默忽略比直接 400 更稳妥 —— 万一有客户端把整个创建表单原样 PUT 回来，
+    不该因为一个用不到的字段被拒绝。
+    """
+    # 行锁与 register / cancel_register / start 是同一把：报名流程是「先锁赛事行、
+    # 再数人数、再插报名」，这里也锁着数，才不会出现「第 6 人正在报名 vs 同时把上限
+    # 改成 5」这种交叉提交（两边各自读到的都是旧数据，最终落成 6/5）。
+    result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+    )
+    t = result.scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    assert_can_edit(t, user)
+
+    cnt_result = await db.execute(
+        select(func.count(Registration.id)).where(
+            Registration.tournament_id == tournament_id, Registration.is_active == True
+        )
+    )
+    registered = cnt_result.scalar() or 0
+    _check_capacity(data.max_participants, registered)
+
+    registration_open_at = _resolve_registration_open_at(data)
+
+    # 防御：报名中理论上不可能已有比赛（赛程是开赛那一刻才排的）。但真遇到脏数据时，
+    # 下面删场地会被 matches.court_id 的外键挡住打成 500；明确拒绝比 500 好排查。
+    match_cnt = (await db.execute(
+        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+    )).scalar() or 0
+    if match_cnt:
+        raise HTTPException(status_code=400, detail="该赛事已有赛程，无法修改")
+
+    # 改之前的快照：审计里只记「真变了」的字段，否则每次保存都是十几行噪音，
+    # 事后根本看不出这次到底动了什么
+    before = {
+        "title": t.title,
+        "description": t.description,
+        "location": t.location,
+        "start_date": t.start_date,
+        "end_date": t.end_date,
+        "max_participants": t.max_participants,
+        "total_matches": t.total_matches,
+        "points_to_win": t.points_to_win,
+        "registration_open_at": t.registration_open_at,
+    }
+
+    t.title = data.title
+    t.description = data.description
+    t.location = data.location
+    t.start_date = data.start_date
+    t.end_date = data.end_date
+    t.max_participants = data.max_participants
+    t.total_matches = data.total_matches
+    t.points_to_win = data.points_to_win
+    t.registration_open_at = registration_open_at
+    await _replace_courts(t.id, data.courts, db)
+
+    def _jsonable(v):
+        return v.isoformat(sep=" ") if isinstance(v, datetime) else v
+
+    after = {k: getattr(t, k) for k in before}
+    changes = {
+        k: [_jsonable(before[k]), _jsonable(after[k])]
+        for k in before
+        if before[k] != after[k]
+    }
+
+    # 响应在事务内构造（同创建）：序列化失败就整体回滚，不会出现「改成功但返回 500」
+    detail = await _tournament_detail(t, db, user)
+    # 先提交再广播再审计：审计遇到请求取消会向上抛，写在广播前会让别人的界面停在旧数据
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "tournament_updated"})
+    await audit(
+        user=user, action="tournament_update",
+        target_type="tournament", target_id=t.id,
+        detail={"title": t.title, "registered": registered, "changes": changes},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return detail
 
 
 @router.post("/{tournament_id}/register")
