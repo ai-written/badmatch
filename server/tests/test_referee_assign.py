@@ -20,14 +20,17 @@ def test_current_scope_only_for_players_on_site():
     assert can_assign("current", **dict(kwargs, user_id=3)) is False
 
 
-def test_all_scope_only_for_creator_or_admin():
-    """详情页「一次性分配」：房主/管理员/超管；在场选手反而不行。"""
+def test_all_scope_allows_creator_admin_and_on_site_players():
+    """详情页「一次性分配」：房主/管理员/超管 + 本赛事在场选手（普通选手也能点）。"""
     kwargs = dict(user_id=9, role="user", creator_id=1, candidate_ids=[9, 10])
-    assert can_assign("all", **kwargs) is False              # 普通在场选手
+    assert can_assign("all", **kwargs) is True                      # 普通在场选手
     assert can_assign("all", **dict(kwargs, user_id=1)) is True     # 房主（非选手）
     assert can_assign("all", **dict(kwargs, user_id=2, role="admin")) is True
     assert can_assign("all", **dict(kwargs, user_id=2, role="superadmin")) is True
     assert can_assign("all", **dict(kwargs, user_id=3)) is False    # 路人
+    # 退赛之后就出局了（候选人池里没有他），管理者身份仍然有效
+    assert can_assign("all", **dict(kwargs, candidate_ids=[10])) is False
+    assert can_assign("all", **dict(kwargs, user_id=2, role="admin", candidate_ids=[10])) is True
 
 
 def test_never_picks_a_player_of_that_match():

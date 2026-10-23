@@ -16,15 +16,20 @@ import random
 
 
 def can_assign(scope, *, user_id, role, creator_id, candidate_ids):
-    """谁能点「分配裁判」——两种入口两套规则（产品确认过，抽成纯函数便于单测）：
+    """谁能点「分配裁判」——两种入口的口径（抽成纯函数便于单测）：
 
     - scope="current"（对阵表筛选行那个按钮，只分当前这一批）：**本赛事在场选手**；
     - scope="all"（赛事详情页的「一次性分配裁判」，一次分完整局）：
-      **房主 / 管理员 / 超级管理员**。刻意不给「在场选手」开口子 ——
-      一次性把整局分完影响面大，普通选手用按批次那个入口就够了。
+      **房主 / 管理员 / 超级管理员 / 本赛事在场选手**。
+      在场选手这条是后加的（原先只给管理者）：整局分比赛本来就是场上这帮人的事
+      —— 组织者常常就是选手本人，他得先退出比赛界面去详情页点，反而不如直接点。
+      风险也可控：这个接口**只填空缺、从不覆盖已有裁判**（想换裁判走「顶替」），
+      而且按钮上直接写着还剩几场、点之前还有确认弹窗，所以不存在"一键毁掉赛程"。
+      `candidate_ids` 就是「在场选手」（未退赛、账号未禁用）—— 与候选人池同一口径，
+      不额外查库；不在场的人（已退赛/路人）依然不行。
     """
     if scope == "all":
-        return user_id == creator_id or role in ("admin", "superadmin")
+        return user_id == creator_id or role in ("admin", "superadmin") or user_id in candidate_ids
     return user_id in candidate_ids
 
 

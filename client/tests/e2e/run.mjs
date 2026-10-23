@@ -19,6 +19,7 @@
  *  10 管理面板：用户行（状态标签 + 操作收进动作面板）与禁用/恢复流程、权限收窄的菜单
  *  11 赛事详情：报名中「编辑赛事信息」（入口/权限/表单预填/最大人数不低于已报名人数/保存）
  *  12 创建页：与编辑页共用同一表单组件后，单场与上下场创建发出的 payload 仍与改动前一致
+ *  13 赛事详情：一次性分配裁判（在场选手能点、已退赛/路人不能点、管理者仍然可以）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1623,8 +1624,95 @@ async function scenarioCreateStillWorks(page) {
     JSON.stringify(batchPosted?.map((b) => b.courts?.[0]?.time_slots)))
 }
 
+/** 场景 13：详情页「一次性分配裁判」对在场选手开放（管理者仍然可以） */
+async function scenarioAssignRefereesAll(page) {
+  console.log('13) 赛事详情：一次性分配裁判（在场选手 / 管理者 / 已退赛）')
+  const players = Array.from({ length: 8 }, (_, i) => ({
+    id: i + 1, user_id: i + 1, username: `p${i + 1}`, avatar: '', is_active: true,
+    created_at: '2026-10-10T09:00:00',
+  }))
+  let me = { id: 3, username: 'p3', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  let detail = {
+    id: 2, creator_id: 1, title: 'T', location: 'L', status: 'ongoing', max_participants: 8,
+    courts: [], registered_count: 8, cancelled_count: 0, total_matches: 14, points_to_win: 11,
+    server_now: '2026-10-23T09:00:00', is_registered: true, is_on_site: true,
+    started_match_count: 6, pending_referee_count: 3, created_at: '2026-10-10T09:00:00',
+  }
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/auto-assign-referees$/.test(path)) {
+      return { ok: true, scope: 'all', assigned: [1, 2, 3], skipped: [] }
+    }
+    if (/\/registrations$/.test(path)) return players
+    if (/\/tournaments\/2$/.test(path)) return detail
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+
+  const assignBtn = () => page.ev(`(() => {
+    const b = [...document.querySelectorAll('button, .van-button')]
+      .find(x => (x.textContent || '').trim().startsWith('一次性分配裁判'))
+    if (!b) return null
+    return { text: b.textContent.trim(), inActionBlock: !!b.closest('.action-block') }
+  })()`)
+  const clickAssign = () => page.ev(`(() => {
+    const b = [...document.querySelectorAll('button, .van-button')]
+      .find(x => (x.textContent || '').trim().startsWith('一次性分配裁判'))
+    if (!b) return false
+    b.click(); return true
+  })()`)
+  const assignPosts = () => page.requests.filter((r) => r.method === 'POST' && /auto-assign-referees$/.test(r.path))
+
+  // ---- 普通在场选手：能看到、能点 ----
+  await page.goto('/tournament/2', 2400)
+  const btn = await assignBtn()
+  assert('在场选手能看到「一次性分配裁判」', btn !== null, JSON.stringify(btn))
+  assert('按钮上写着还剩几场', btn?.text === '一次性分配裁判（3 场）', btn?.text)
+  assert('入口在选手也看得到的动作区（不是房主专属区）', btn?.inActionBlock === true, JSON.stringify(btn))
+
+  page.requests = []
+  assert('点开弹确认框', (await clickAssign()) === true)
+  await sleep(500)
+  const dlg = await page.dialog()
+  assert('确认框标题正确', dlg?.标题 === '一次性分配裁判', dlg?.标题)
+  await page.cancelDialog()
+  await sleep(500)
+  assert('取消后不发请求', assignPosts().length === 0, `实际 ${assignPosts().length}`)
+
+  assert('再点一次', (await clickAssign()) === true)
+  await sleep(500)
+  await page.confirmDialog()
+  const posts = assignPosts()
+  assert('确认后恰好 1 个 auto-assign 请求', posts.length === 1, `实际 ${posts.length}`)
+  assert('请求体是 scope=all（整局一次分完）', /"scope":"all"/.test(posts[0]?.body || ''), posts[0]?.body)
+  assert('提示已分配场数', (await toastText(page)) === '已分配 3 场裁判', await toastText(page))
+
+  // ---- 已退赛（不在场、也不是管理者）：入口消失 ----
+  detail = { ...detail, is_registered: false, is_on_site: false }
+  await page.goto('/tournament/2', 2200)
+  assert('已退赛的普通选手看不到入口', (await assignBtn()) === null, JSON.stringify(await assignBtn()))
+
+  // ---- 房主（不是选手）/ 管理员：仍然可以 ----
+  detail = { ...detail, creator_id: 3, is_registered: false, is_on_site: false }
+  await page.goto('/tournament/2', 2200)
+  assert('房主不在场也能看到入口', (await assignBtn()) !== null, JSON.stringify(await assignBtn()))
+
+  me = { ...me, id: 9, username: 'adm', role: 'admin' }
+  detail = { ...detail, creator_id: 1, is_registered: false, is_on_site: false }
+  await page.goto('/tournament/2', 2200)
+  assert('管理员不在场也能看到入口', (await assignBtn()) !== null, JSON.stringify(await assignBtn()))
+
+  // ---- 没有缺裁判的场次：谁都看不到 ----
+  me = { ...me, id: 3, username: 'p3', role: 'user' }
+  detail = { ...detail, creator_id: 1, is_on_site: true, pending_referee_count: 0 }
+  await page.goto('/tournament/2', 2200)
+  assert('pending_referee_count=0 时入口消失', (await assignBtn()) === null, JSON.stringify(await assignBtn()))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

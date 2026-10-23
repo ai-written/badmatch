@@ -57,6 +57,15 @@
         </van-button>
       </div>
 
+      <!-- 一次性把全部还没裁判的场次分完：房主/管理员/超管，或**本赛事在场选手**
+           （与对阵表按批次那个入口同一套候选人池，后端 can_assign 同一套判据）。
+           分完后 pending_referee_count 归零，这个入口和对阵表里的按钮都会自动消失 -->
+      <div class="action-block" v-if="canAssignAllReferees">
+        <van-button plain type="primary" block round :loading="submitting" :disabled="submitting" @click="doAssignReferees">
+          一次性分配裁判（{{ tournament.pending_referee_count }} 场）
+        </van-button>
+      </div>
+
       <div class="player-section">
         <div class="player-head">
           <span class="ph-title">已报名 ({{ tournament.registered_count }})</span>
@@ -93,13 +102,8 @@
         <van-button v-if="tournament.started_match_count === 0" plain type="primary" block round
                     :loading="submitting" :disabled="submitting" style="margin-top:10px"
                     @click="doReschedule">重排赛程</van-button>
-        <!-- 一次性把全部还没裁判的场次分完（房主/管理员/超管）。分完后还剩 0 场，
-             这个入口和对阵表里的「分配裁判」按钮都会自动消失，所以实际上只能点一次 -->
-        <van-button v-if="tournament.pending_referee_count > 0" plain type="primary" block round
-                    :loading="submitting" :disabled="submitting" style="margin-top:10px"
-                    @click="doAssignReferees">
-          一次性分配裁判（{{ tournament.pending_referee_count }} 场）
-        </van-button>
+        <!-- 一次性把全部还没裁判的场次分完（房主/管理员/超管，或本赛事在场选手）。
+             入口在上面的 action-block 里（普通选手也要能看到），这里不再重复 -->
         <van-button type="danger" block round :loading="submitting" :disabled="submitting" style="margin-top:10px" @click="doEndTournament">提前结束赛事</van-button>
       </div>
 
@@ -356,6 +360,15 @@ const statusType = computed(() => tournament.value?.status === 'open' ? 'primary
 // 已开赛/已结束一律只读（赛程已按当时人数排好，改人数不会让赛程跟着变；
 // 要调赛程只有「追加比赛 / 重排赛程」这两个入口）
 const canEdit = computed(() => canManage.value && tournament.value?.status === 'open')
+// 一次性分配裁判：进行中 + 还有场次缺裁判 + （管理者 或 本赛事在场选手）。
+// `is_on_site` 由后端按「未退赛 + 账号未禁用」算好（与裁判候选人池同一口径），
+// 前端不用自己去猜报名/战绩哪张表为准
+const canAssignAllReferees = computed(() => {
+  const t = tournament.value
+  if (!t || t.status !== 'ongoing') return false
+  if ((t.pending_referee_count ?? 0) <= 0) return false
+  return canManage.value || !!t.is_on_site
+})
 function openEdit() {
   router.push(`/tournament/${tid}/edit`)
 }
@@ -744,8 +757,8 @@ async function doReschedule() {
 }
 
 /** 一次性分配裁判：把**全部**还没打完、还没裁判的场次一次分完。
- *  房主/管理员/超管可点（后端同一套判据）；分完后 pending_referee_count 归零，
- *  这个入口和对阵表里的「分配裁判」按钮都会自动消失。 */
+ *  房主/管理员/超管、以及本赛事在场选手都可点（后端 can_assign 同一套判据）；
+ *  分完后 pending_referee_count 归零，这个入口和对阵表里的「分配裁判」按钮都会自动消失。 */
 async function doAssignReferees() {
   const n = tournament.value?.pending_referee_count || 0
   try {

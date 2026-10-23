@@ -123,7 +123,7 @@ class AutoAssignBody(BaseModel):
     """scope:
     - current：只分「当前要打的那一批」——对阵表筛选行那个按钮，任何在场选手可点；
     - all：把**全部**还没打完、还没裁判的场次一次分完——赛事详情页「一次性分配裁判」，
-      房主/管理员/超管可点（他们可能不是参赛选手）。
+      房主/管理员/超管、以及**本赛事在场选手**都可点（管理者可能不是参赛选手）。
 
     注意：不带 body / `null` / `{}` 都会当成 current（后端不区分「没传」和「传了空」）；
     这个参数只认 body，写成 `?scope=all` 是无效的（会被忽略）。
@@ -167,7 +167,7 @@ async def auto_assign_referees(
     if not can_assign(scope, user_id=user.id, role=user.role,
                       creator_id=tournament.creator_id, candidate_ids=candidates):
         raise HTTPException(status_code=403, detail=(
-            "只有房主、管理员或超级管理员可以一次性分配裁判" if scope == "all"
+            "只有房主、管理员、超级管理员或本赛事在场选手可以一次性分配裁判" if scope == "all"
             else "只有本赛事在场选手可以分配裁判"))
 
     r_stmt = (

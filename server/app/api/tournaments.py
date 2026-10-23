@@ -818,6 +818,25 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         )
         is_registered = reg.scalar_one_or_none() is not None
 
+    # 「在场」= 未退赛 + 账号未禁用（与裁判候选人池 _active_player_ids 同一口径）。
+    # 报名中还没有 PlayerStats，此时有效报名就等于在场，不必多查一次库；
+    # 开赛后必须以 PlayerStats 为准：退赛只把 PlayerStats 置失效的场景（历史数据）
+    # 不该给他放出「分配裁判」的入口。
+    is_on_site = is_registered
+    if user and t.status != TournamentStatus.OPEN:
+        on_site = await db.execute(
+            select(PlayerStats.id)
+            .join(User, User.id == PlayerStats.user_id)
+            .where(
+                PlayerStats.tournament_id == t.id,
+                PlayerStats.user_id == user.id,
+                PlayerStats.is_active == True,
+                User.is_active == True,
+            )
+            .limit(1)
+        )
+        is_on_site = on_site.scalar_one_or_none() is not None
+
     return TournamentDetail(
         id=t.id,
         creator_id=t.creator_id,
@@ -838,6 +857,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
         pending_referee_count=pending_referee_count,
         started_match_count=started_match_count,
         is_registered=is_registered,
+        is_on_site=is_on_site,
         created_at=t.created_at.isoformat() if t.created_at else "",
     )
 

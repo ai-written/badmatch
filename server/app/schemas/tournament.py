@@ -153,6 +153,10 @@ class TournamentDetail(BaseModel):
     registration_open_at: datetime | None = None
     server_now: datetime
     is_registered: bool = False
+    # 「在场选手」：未退赛、且账号未被禁用（与裁判候选人池 `_active_player_ids` 同一口径）。
+    # 详情页据此决定要不要给**普通选手**显示「一次性分配裁判」——
+    # 房主/管理员/超管那一路由前端 canManage 判定，两者取或（后端 can_assign 同一套规则）
+    is_on_site: bool = False
     created_at: str
 
     class Config:
