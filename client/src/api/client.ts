@@ -62,6 +62,12 @@ api.interceptors.response.use(
     const status = err.response?.status
     const detail = err.response?.data?.detail
 
+    // 乐观锁冲突（409）：调用方（记分页）会自己把「我这一分」叠到最新比分上重试，
+    // 这里弹一句「请求失败」只会让裁判以为没记上、反而再去多点一下
+    if (status === 409 && (err.config as any)?.skipConflictToast) {
+      return Promise.reject(err)
+    }
+
     if (status === 401) {
       localStorage.removeItem('token')
       // 保存当前路径，登录后跳回

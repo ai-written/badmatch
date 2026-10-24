@@ -263,6 +263,16 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
                     "ADD COLUMN is_swapped BOOLEAN NOT NULL DEFAULT false"
                 )
             )
+        # 比分版本号（乐观锁）：两个人同时记分时，用它发现"你的基线已经过期了"，
+        # 而不是让后到的那次覆盖掉先到的那一分
+        if not await _column_exists(conn, "matches", "score_version"):
+            logger.info("migration: adding matches.score_version column")
+            await conn.execute(
+                text(
+                    "ALTER TABLE matches "
+                    "ADD COLUMN score_version INTEGER NOT NULL DEFAULT 0"
+                )
+            )
         # 裁判卸任时间：referee_id 保留为执裁历史，是否在任由本列判断
         if not await _column_exists(conn, "matches", "referee_released_at"):
             logger.info("migration: adding matches.referee_released_at column")

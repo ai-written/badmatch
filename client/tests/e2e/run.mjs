@@ -20,6 +20,8 @@
  *  11 赛事详情：报名中「编辑赛事信息」（入口/权限/表单预填/最大人数不低于已报名人数/保存）
  *  12 创建页：与编辑页共用同一表单组件后，单场与上下场创建发出的 payload 仍与改动前一致
  *  13 赛事详情：一次性分配裁判（在场选手能点、已退赛/路人不能点、管理者仍然可以）
+ *  14 记分页：弱网下「慢 GET 带回旧比分」不会把刚点的分覆盖回去（点了 3 不跳回 2）
+ *  15 记分页：两台设备同时记分不丢分（服务端 409 乐观锁 + 客户端增量重试）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -135,16 +137,23 @@ class Page {
     }
     const entry = { method: params.request.method, path: url.pathname, search: url.search, body: params.request.postData }
     this.requests.push(entry)
-    const body = this.mock ? this.mock(url.pathname, entry) : {}
-    // mock 可以返回 { __status: 4xx/5xx } 表示"这个接口失败"（例如验证赛程拉取失败时
-    // 不会把用户存的筛选条件清掉）
-    const status = (body && typeof body === 'object' && body.__status) || 200
-    this.send('Fetch.fulfillRequest', {
+    const raw = this.mock ? this.mock(url.pathname, entry) : {}
+    // mock 可以返回：
+    //   { __status: 4xx/5xx }  表示"这个接口失败"（例如验证赛程拉取失败时不会清掉筛选条件）
+    //   { __status: 4xx, __body: {...} }  失败时还要带自定义响应体（如 409 的当前比分）
+    //   { __delayMs: 1200 }    表示"晚点再回这个响应"——模拟弱网里**慢请求**：
+    //                          响应内容按**发出时**的数据生成，回来时可能已经过时
+    const status = (raw && typeof raw === 'object' && raw.__status) || 200
+    const delay = (raw && typeof raw === 'object' && raw.__delayMs) || 0
+    const payload = status === 200 ? (raw ?? {}) : (raw?.__body ?? { detail: 'mock error' })
+    const fulfill = () => this.send('Fetch.fulfillRequest', {
       requestId: params.requestId,
       responseCode: status,
       responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-      body: Buffer.from(JSON.stringify(status === 200 ? (body ?? {}) : { detail: 'mock error' })).toString('base64'),
+      body: Buffer.from(JSON.stringify(payload)).toString('base64'),
     })
+    if (delay > 0) setTimeout(fulfill, delay)
+    else fulfill()
   }
   async enableMock(mock) {
     this.mock = mock
@@ -214,6 +223,17 @@ function assert(name, ok, detail = '') {
 }
 
 const P = (id, username) => ({ id, username, avatar: '' })
+
+/** 按人数算「每人场次相同」的合法档位（与后端 fairness_step 同源：步长 = N/gcd(4,N)）。
+ *  用它当 mock 的 /match-options 响应，前端就会像真服务端一样"按当前人数给档位"——
+ *  「改完人数立刻保存」那条回归必须有它，否则 mock 永远返回旧档位、测不出对齐。 */
+function matchOptionsFor(n) {
+  const gcd = (a, b) => (b ? gcd(b, a % b) : a)
+  const step = n / gcd(4, n)
+  const options = []
+  for (let m = step; m <= 30; m += step) options.push({ total: m, per_person: (4 * m) / n })
+  return { options, per_person: (4 * step) / n }
+}
 
 // ---- 表单/导航小工具（编辑页与创建页共用同一个组件，两个场景都要用）----
 /** 按 van-field 的标签定位那一行的表达式 */
@@ -1407,7 +1427,7 @@ async function scenarioEditTournament(page) {
   await page.enableMock((path, entry) => {
     if (/auth\/me$/.test(path)) return me
     if (/\/registrations$/.test(path)) return registrations
-    if (/match-options\//.test(path)) return { options: [{ total: 10, per_person: 8 }], per_person: 8 }
+    if (/match-options\//.test(path)) return matchOptionsFor(Number(path.split('/').pop()))
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
     if (/\/tournaments\/2$/.test(path)) {
@@ -1532,6 +1552,26 @@ async function scenarioEditTournament(page) {
     && multi.courts[1].time_slots[0].end_time === '21:00:00',
     JSON.stringify(multi.courts?.[1]))
 
+  // ---- 改完人数「立刻」保存：总场次必须按新人数对齐（否则开赛时会被临时换档）----
+  // 场景：8 人 / 14 场左右，报名期间把上限改成 12。档位重算挂在 @blur 上是异步的，
+  // 提交若抢在它前面就会把 10 场（对 12 人不整除）原样送上去 —— 这条就是盯这个的。
+  detail = {
+    ...detail, creator_id: 1, status: 'open', max_participants: 8, total_matches: 10,
+    courts: [{ id: 1, name: 'A1', sort_order: 0,
+               time_slots: [{ id: 1, start_time: '19:00:00', end_time: '21:00:00' }] }],
+  }
+  await page.goto('/tournament/2', 2200)
+  await page.clickText('编辑赛事信息')
+  await sleep(900)
+  assert('最大人数改成 12（不离开输入框就保存）', (await setField('最大人数', 12)) === 'OK')
+  page.requests = []
+  assert('立刻点「保存修改」', (await page.clickText('保存修改')) === true)
+  await sleep(900)
+  const aligned = JSON.parse(puts()[0]?.body || '{}')
+  assert('PUT 里的总场次已按新人数对齐（15，而不是旧的 10）',
+    aligned.max_participants === 12 && aligned.total_matches === 15,
+    JSON.stringify({ max: aligned.max_participants, total: aligned.total_matches }))
+
   // ---- 已开赛：完全只读（超管也不行） ----
   me = { ...me, id: 1, username: 'p1', role: 'superadmin' }
   detail = { ...detail, creator_id: 1, status: 'ongoing' }
@@ -1552,7 +1592,7 @@ async function scenarioCreateStillWorks(page) {
       return { id: 1, username: 'p1', avatar: '', gender: 'M', role: 'admin', invite_code: 'x' }
     }
     if (/tournaments\/default-title/.test(path)) return { title: '10月23日养生局' }
-    if (/match-options\//.test(path)) return { options: [{ total: 14, per_person: 7 }], per_person: 7 }
+    if (/match-options\//.test(path)) return matchOptionsFor(Number(path.split('/').pop()))
     if (path === '/api/tournaments' && entry.method === 'POST') {
       posted = JSON.parse(entry.body || '{}')
       return { id: 9 }
@@ -1596,6 +1636,18 @@ async function scenarioCreateStillWorks(page) {
     JSON.stringify(posted?.courts))
   assert('创建路径不带预选名单', Array.isArray(posted?.preselect_player_ids)
     && posted.preselect_player_ids.length === 0, JSON.stringify(posted?.preselect_player_ids))
+
+  // ---- 创建页同样：改完人数立刻提交，总场次也得按新人数对齐 ----
+  // 原先 8 人默认 14 场是合法的；人数改成 12 后 14 场不可能均分（4*14 不能被 12 整除），
+  // 若不重新对齐就提交，这条赛事到开赛时会被临时换档 —— 用户看到「14 场」变别的数字。
+  await page.goto('/create', 2400)
+  assert('填赛事名称', (await setFieldOf(page, '赛事名称', '改完人数立刻创建')) === 'OK')
+  assert('最大人数改成 12（不离开输入框就提交）', (await setFieldOf(page, '最大人数', 12)) === 'OK')
+  assert('立刻点「创建赛事」', (await page.clickText('创建赛事')) === true)
+  await sleep(900)
+  assert('创建提交的总场次已按新人数对齐（15，而不是默认的 14）',
+    posted?.max_participants === 12 && posted?.total_matches === 15,
+    JSON.stringify({ max: posted?.max_participants, total: posted?.total_matches }))
 
   // ---- 上下场（一次建两条赛事）也走同一个 payload 构造器 ----
   await page.goto('/create', 2400)
@@ -1711,8 +1763,129 @@ async function scenarioAssignRefereesAll(page) {
   assert('pending_referee_count=0 时入口消失', (await assignBtn()) === null, JSON.stringify(await assignBtn()))
 }
 
+/** 场景 14：弱网下「慢 GET 带回旧比分」不能把刚点的分覆盖回去（点了 3 不会跳回 2） */
+async function scenarioScoreNoFlicker(page) {
+  console.log('14) 记分页：慢 GET 带回旧快照，不会让 3 跳回 2')
+  let serverScore = 2          // 服务端当前的 a 队比分
+  let slowNextGet = false      // 下一次 GET 晚 1200ms 才回（内容按发出时的 serverScore 生成）
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) {
+      return { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    }
+    if (/\/score$/.test(path) && entry.method === 'PUT') {
+      const body = JSON.parse(entry.body || '{}')
+      if (body.score_a != null) serverScore = body.score_a
+      return { ok: true }
+    }
+    if (/\/matches\/101$/.test(path)) {
+      const snapshot = matchPayload({ status: 'ongoing', referee: P(1, '李祥'), active_referee: P(1, '李祥'),
+                                      score_a: serverScore })
+      return slowNextGet ? { ...snapshot, __delayMs: 1200 } : snapshot
+    }
+    if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/tournament/2/score/101?num=1')
+
+  const leftScore = () => page.ev(`(document.querySelectorAll('.sb-big')[0]?.textContent || '').trim()`)
+  assert('首屏显示 2 分', (await leftScore()) === '2', await leftScore())
+
+  // 模拟一次「慢读」：先让一次 GET 发出去（读到 2，但 1200ms 后才回来），
+  // 紧接着裁判点加号 —— 这正是弱网里真实发生的时序（观众点加油触发 fetchMatch 也一样）
+  slowNextGet = true
+  await page.ev(`(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    return true
+  })()`)
+  await sleep(120)
+  await page.ev(`document.querySelectorAll('.wheel-btn.plus')[0].click(); true`)
+  await sleep(200)
+  assert('点完立刻显示 3 分（乐观更新）', (await leftScore()) === '3', await leftScore())
+
+  // 等那份慢 GET 回来（它带的是落库前的 2 分）
+  await sleep(1800)
+  assert('慢 GET 回来后仍是 3 分（旧快照被丢弃）', (await leftScore()) === '3', await leftScore())
+  assert('服务端确实落了 3 分', serverScore === 3, String(serverScore))
+
+  // 反向确认闸门不会把正常更新也挡掉：服务端值更新、且本地无待提交时应当采纳
+  serverScore = 5
+  slowNextGet = false
+  await page.ev(`(() => {
+    document.dispatchEvent(new Event('visibilitychange'))
+    return true
+  })()`)
+  await sleep(900)
+  assert('本地空闲时服务端的新比分会被采纳（5）', (await leftScore()) === '5', await leftScore())
+}
+
+/** 场景 15：两台设备同时记分 —— 服务端 409 乐观锁，客户端把增量叠上去重试（不丢分） */
+async function scenarioScoreOptimisticLock(page) {
+  console.log('15) 记分页：两台设备同时记分不丢分（409 + 增量重试）')
+  let server = { score_a: 2, score_b: 0, score_version: 7 }
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) {
+      return { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    }
+    if (/\/score$/.test(path) && entry.method === 'PUT') {
+      const body = JSON.parse(entry.body || '{}')
+      if (body.expected_version != null && body.expected_version !== server.score_version) {
+        // 基线过期：别人先记过这一场
+        return { __status: 409, __body: { detail: { message: '比分已被其他人更新，请重试',
+                                                   ...server } } }
+      }
+      server = { score_a: body.score_a, score_b: body.score_b, score_version: server.score_version + 1 }
+      return { ok: true, score_version: server.score_version }
+    }
+    if (/\/matches\/101$/.test(path)) {
+      return matchPayload({ status: 'ongoing', referee: P(1, '李祥'), active_referee: P(1, '李祥'),
+                            score_a: server.score_a, score_b: server.score_b,
+                            score_version: server.score_version })
+    }
+    if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/tournament/2/score/101?num=1')
+
+  const leftScore = () => page.ev(`(document.querySelectorAll('.sb-big')[0]?.textContent || '').trim()`)
+  assert('首屏 2 分、基线版本 7', (await leftScore()) === '2', await leftScore())
+
+  // 模拟「另一台设备先记了一分」：服务端变成 3 分 / 版本 8，而本页基线仍是 7
+  server = { score_a: 3, score_b: 0, score_version: 8 }
+  page.requests = []
+  await page.ev(`document.querySelectorAll('.wheel-btn.plus')[0].click(); true`)
+  await sleep(1200)
+  const puts = scorePuts(page)
+  assert('发生了重试（2 个记分请求）', puts.length === 2, `实际 ${puts.length}`)
+  const first = JSON.parse(puts[0]?.body || '{}')
+  const second = JSON.parse(puts[1]?.body || '{}')
+  assert('第一次带的是本地基线版本 7', first.expected_version === 7, JSON.stringify(first))
+  assert('第一次提交的是我以为的 3 分', first.score_a === 3, JSON.stringify(first))
+  assert('409 后带上服务端新版本 8 重试', second.expected_version === 8, JSON.stringify(second))
+  assert('重试值是「服务端 3 + 我的这一分」= 4（两分都不丢）',
+    second.score_a === 4, JSON.stringify(second))
+  assert('界面上也是 4 分', (await leftScore()) === '4', await leftScore())
+  assert('服务端最终 4 分 / 版本 9',
+    server.score_a === 4 && server.score_version === 9, JSON.stringify(server))
+
+  // 基线已经更新到 9：再点一次要带 9，不应该再触发一次 409
+  page.requests = []
+  await page.ev(`document.querySelectorAll('.wheel-btn.plus')[0].click(); true`)
+  await sleep(900)
+  const puts2 = scorePuts(page)
+  assert('第二次点击只发 1 个请求（基线已同步）', puts2.length === 1, `实际 ${puts2.length}`)
+  assert('带的是最新版本 9', JSON.parse(puts2[0]?.body || '{}').expected_version === 9, puts2[0]?.body)
+  assert('最终 5 分', (await leftScore()) === '5', await leftScore())
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

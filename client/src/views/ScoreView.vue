@@ -178,6 +178,7 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { serverElapsedSeconds, displayElapsedSeconds, timerDisplay, ONGOING_DISPLAY_LIMIT_SECONDS } from '@/utils/timer'
 import { useGoBack } from '@/composables/useGoBack'
+import { keepLocalScore, planScoreRetry } from '@/utils/scoreSync'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
 
@@ -420,15 +421,28 @@ async function swapTeams() {
 function swapSide(side: string) { return (!swapped.value) ? side : (side === 'a' ? 'b' : 'a') }
 
 async function fetchMatch() {
+  // 记下发请求那一刻的「本地确认代数」：响应回来时若代数已经变了，说明这次读到的
+  // 是**我们自己的记分落库之前**的旧快照（弱网下 GET 可能比 PUT 慢），必须丢掉，
+  // 否则界面会从 3 跳回 2（观众点加油触发的 fetchMatch 尤其频繁）。
+  const epoch = scoreEpoch
   try {
     const res = await api.get(`/tournaments/${route.params.id}/matches/${route.params.matchId}`, { skipLoading: true } as any)
-    // 本地有尚未提交的乐观比分时予以保留：否则响应里还是旧比分，
+    // 本地有尚未被服务端确认的比分时予以保留：否则响应里还是旧比分，
     // 会把裁判刚点的那一分覆盖回去（随后 flush 才写回，表现为闪一下）
-    if (pendingScore && match.value) {
+    const keep = keepLocalScore({ pending: !!pendingScore, inFlight: inFlightScore,
+                                  requestEpoch: epoch, currentEpoch: scoreEpoch })
+    if (keep && match.value) {
+      // 本地有尚未被服务端确认的比分：保留本地值，否则响应里还是旧比分，
+      // 会把裁判刚点的那一分覆盖回去（随后 flush 才写回，表现为闪一下）。
+      // 注意**不能**顺带采用它的 score_version：本地比分不是基于那个版本，
+      // 拿它当基线提交会让服务端以为我们看的是最新比分（等于放弃乐观锁）。
+      // 不知道自己的基线（老服务端 / 首屏即连点）时保持 null = 这次不做乐观锁。
       res.data.score_a = match.value.score_a
       res.data.score_b = match.value.score_b
+      res.data.score_version = scoreVersion ?? null
     }
     match.value = res.data
+    scoreVersion = res.data.score_version ?? scoreVersion
     syncTimerAnchor()
     loadFailed.value = false
   } catch (e: any) {
@@ -442,6 +456,28 @@ async function fetchMatch() {
     if (!match.value) loadFailed.value = true
     throw e
   }
+}
+
+// 加油票触发的回查节流：观众每点一次加油就是一条 support_updated 广播，而整场 GET
+// 的响应比这条广播重两个数量级。低带宽部署下这是记分页最大的流量来源（也顺带解释了
+// 为什么"记分跳回去"在热闹的比赛里更容易出现——每次回查都可能读到旧快照）。
+const SUPPORT_REFRESH_MIN_MS = 1500
+let supportRefreshAt = 0
+let supportRefreshTimer: ReturnType<typeof setTimeout> | null = null
+/** 尾随节流：窗口内第一次立刻查，后面的合并成一次（最多每 1.5s 一次） */
+function scheduleSupportRefresh() {
+  const wait = SUPPORT_REFRESH_MIN_MS - (Date.now() - supportRefreshAt)
+  if (wait <= 0) {
+    supportRefreshAt = Date.now()
+    fetchMatch().catch(() => {})
+    return
+  }
+  if (supportRefreshTimer) return   // 已经排队一次，合并掉
+  supportRefreshTimer = setTimeout(() => {
+    supportRefreshTimer = null
+    supportRefreshAt = Date.now()
+    fetchMatch().catch(() => {})
+  }, wait)
 }
 
 async function doSupport(side: string) {
@@ -458,6 +494,14 @@ async function doSupport(side: string) {
 
 let scoreTimer: ReturnType<typeof setTimeout> | null = null
 let pendingScore: { score_a: number; score_b: number } | null = null
+// 记分请求「已发出、服务端还没确认」：这段窗口里本地比分是唯一可信的，
+// 任何服务端旧值（滞后广播、慢 GET）都不许覆盖（见 utils/scoreSync.ts）
+let inFlightScore = false
+// 本地确认代数：每成功/失败确认一次写入就 +1。GET 响应据此判断自己是不是旧快照
+let scoreEpoch = 0
+// 服务端比分版本号（乐观锁基线）：记分时原样带回去，服务端发现它过期就回 409，
+// 我们再把「自己这一分」叠到服务端最新比分上重试（两台设备同时记分不会丢分）
+let scoreVersion: number | null = null
 // 乐观改动前的「已确认」比分，用于写库失败时回滚。
 // 必须在改动之前记录：flushScoreNow 是防抖后 300ms 才执行的，
 // 那时 match.value 里已经是加过的值，在那里取 prev 等于没回滚。
@@ -467,25 +511,61 @@ let wheelGesture: { id: number; y: number; acc: number; side: string } | null = 
 
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
-  const data = pendingScore
-  // 回滚目标：本批乐观改动之前的已确认比分
-  const prev = confirmedScore ?? { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
+  let data = pendingScore
+  // 基线（服务端当前比分）与回滚目标：本批乐观改动之前的已确认比分。
+  // 基线必须与 scoreVersion 配套：409 时用它算出「我这一批加了/减了多少」。
+  let base = confirmedScore ?? { score_a: match.value.score_a ?? 0, score_b: match.value.score_b ?? 0 }
   pendingScore = null
   confirmedScore = null
+  // 从这一刻到响应回来，本地分是唯一可信的：置位后，滞后的广播 / 慢 GET 都不会覆盖它
+  inFlightScore = true
   try {
-    await api.put(
-      `/tournaments/${route.params.id}/matches/${route.params.matchId}/score`,
-      data, { skipLoading: true } as any,
-    )
-  } catch {
-    // 写库失败（例如刚被卸任 → 403、比赛已结束 → 400、网络异常）：
-    // 乐观加的那一分服务端并不存在，必须回滚，否则界面会长期显示一个幻影比分。
-    if (match.value) {
-      match.value.score_a = prev.score_a
-      match.value.score_b = prev.score_b
+    // 最多重试 2 次：每次都是「别人先改了，把我们的增量叠到最新比分上」
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await api.put(
+          `/tournaments/${route.params.id}/matches/${route.params.matchId}/score`,
+          { ...data, expected_version: scoreVersion },
+          // skipConflictToast：409 由下面自己重试，别弹「请求失败」吓裁判
+          { skipLoading: true, skipConflictToast: true } as any,
+        )
+        // 落库成功：代数 +1 —— 期间发起的 GET（可能读到落库前的旧值）回来时会被判定为旧快照
+        scoreEpoch++
+        // 版本号以服务端回带的为准（拿不到就按 +1 兜底）
+        const v = res.data?.score_version
+        if (typeof v === 'number') scoreVersion = v
+        else if (scoreVersion != null) scoreVersion += 1
+        break
+      } catch (e: any) {
+        const conflict = e?.response?.status === 409 ? e.response.data?.detail : null
+        if (conflict && attempt < 2 && match.value) {
+          // 基线过期：别人先记过分。把「我这批的增量」叠到服务端最新比分上重发，
+          // 而不是用我的绝对值把它覆盖掉（那就是丢分）。
+          const srvA = Number(conflict.score_a ?? 0)
+          const srvB = Number(conflict.score_b ?? 0)
+          data = planScoreRetry(data, base, { score_a: srvA, score_b: srvB })
+          base = { score_a: srvA, score_b: srvB }
+          scoreVersion = Number(conflict.score_version ?? 0)
+          // 界面跟着走到「服务端 + 我的增量」：用户点的那一分不能凭空消失
+          match.value.score_a = data.score_a
+          match.value.score_b = data.score_b
+          continue
+        }
+        // 写库失败（例如刚被卸任 → 403、比赛已结束 → 400、网络异常/超时）：
+        // 乐观改的那一分服务端并不存在，必须回滚，否则界面会长期显示幻影比分。
+        if (match.value) {
+          match.value.score_a = base.score_a
+          match.value.score_b = base.score_b
+        }
+        scoreEpoch++
+        // 以服务端为准再拉一次：超时的情况下请求可能其实已经落库（响应丢在路上），
+        // 盲回滚就会把真实比分显示少一分。这次 GET 用的是新代数，会被正常采纳。
+        await fetchMatch().catch(() => {})
+        break
+      }
     }
-    await fetchMatch().catch(() => {})
-    // 期间用户又点了，按回滚后的基准重新提交
+  } finally {
+    inFlightScore = false
   }
   // await 期间用户又点击了，需要继续冲刷，避免丢分
   if (pendingScore) scheduleFlush()
@@ -603,9 +683,14 @@ watch(lastMessage, (msg) => {
   // 否则下面几处 match.value.x 会抛 TypeError，这次实时更新就丢了
   if (!match.value) return
   if (msg.type === 'match_updated' && msg.match_id === Number(route.params.matchId)) {
-    if (!pendingScore) {
+    // 本地有未提交/未确认的分数时，广播里的比分是旧的（它来自更早的落库），不能覆盖；
+    // 否则弱网下会看到「刚加到 3 又跳回 2」。状态/计时/胜方等字段照常采用。
+    if (!pendingScore && !inFlightScore) {
       if (msg.score_a != null) match.value.score_a = msg.score_a
       if (msg.score_b != null) match.value.score_b = msg.score_b
+      // 只有真的采纳了服务端比分，才同步版本基线（否则下次记分会带着
+      // 一个和本地比分不匹配的基线提交，等于绕过乐观锁）
+      if (msg.score_version != null) scoreVersion = msg.score_version
     }
     if (msg.status) {
       const wasPending = match.value.status !== 'ongoing'
@@ -631,9 +716,13 @@ watch(lastMessage, (msg) => {
     if (msg.is_swapped != null) match.value.is_swapped = msg.is_swapped
   }
   if (msg.type === 'support_updated' && msg.match_id === Number(route.params.matchId)) {
+    // 票数广播里已经带了，先立刻更新（不依赖回查）
     match.value.support_a = msg.support_a
     match.value.support_b = msg.support_b
-    fetchMatch().catch(() => {})
+    // 投票者头像是广播里没有的，所以要回查一次 —— 但**不能每票都查**：
+    // 一场球观众每点一次加油就是一条广播，整场 GET 的流量比记分本身重得多，
+    // 而且每次都是一次「可能读到旧快照」的机会。这里做 1.5s 节流（尾随补一次）。
+    scheduleSupportRefresh()
   }
   // 认领 / 卸任 / 被顶替：裁判身份变了，权限与页面状态要立刻跟上。
   // 尤其「自己认领的场次被别人顶替」时，不刷新的话按钮还停在记分态，
@@ -694,6 +783,9 @@ onMounted(async () => {
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   clearInterval(calibrateTimer)
+  // 记分防抖 / 投票回查的定时器也要清掉：页面已经销毁，回调里再碰 match 只是白发请求
+  if (scoreTimer) clearTimeout(scoreTimer)
+  if (supportRefreshTimer) clearTimeout(supportRefreshTimer)
 })
 </script>
 

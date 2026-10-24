@@ -79,6 +79,11 @@ class Match(Base):
     time_slot_id: Mapped[int | None] = mapped_column(ForeignKey("time_slots.id"), nullable=True)
     score_a: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_b: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 比分版本号：**每次改比分 +1**，供客户端做乐观锁。
+    # 记分请求是「把比分设成这个绝对值」，两个人同时记分时后到的那次会覆盖先到的那一分
+    # （丢分）；客户端带上自己读到的版本号，服务端发现版本已变就回 409，
+    # 客户端把「自己的增量」叠到最新比分上重试（见 api/matches.update_score）
+    score_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     winner_pairing_id: Mapped[int | None] = mapped_column(
         ForeignKey("round_pairings.id"), nullable=True
     )

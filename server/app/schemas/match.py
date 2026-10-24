@@ -29,6 +29,8 @@ class MatchOut(BaseModel):
     end_time: time | None = None
     score_a: int | None = None
     score_b: int | None = None
+    # 比分版本号：客户端记分时原样带回来做乐观锁（见 ScoreUpdate.expected_version）
+    score_version: int = 0
     winner_pairing_id: int | None = None
     # referee 是「谁执裁过」的历史记录，卸任后仍保留；
     # active_referee 才是当前在任裁判（为空表示该场暂无裁判可记分）
@@ -73,6 +75,10 @@ class ScoreUpdate(BaseModel):
     score_a: int
     score_b: int
     force_end: bool = False
+    # 乐观锁：客户端读到的 score_version 原样带回来。
+    # 服务端发现版本已变（别人先改过）→ 409 + 当前比分与版本，客户端把增量叠上去重试。
+    # 不传（旧客户端）就退化成原来的"后写覆盖"，保证升级期间不 500/不阻断。
+    expected_version: int | None = None
 
 
 class ClaimRefereeRequest(BaseModel):

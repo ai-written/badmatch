@@ -164,6 +164,22 @@ async def update_score(
     if score.score_a < 0 or score.score_b < 0:
         raise HTTPException(status_code=400, detail="比分不能为负数")
 
+    # 乐观锁：客户端带回来的基线版本已经过期（别人先改过这一场）。
+    # 记分请求是「设成绝对值」，直接放行就会把别人刚记的那一分覆盖掉（丢分）；
+    # 这里回 409 + 当前真实比分与版本，让客户端把**自己的增量**叠上去重试。
+    # 不带 expected_version（旧客户端）时按老行为处理，升级期间不会互相阻断。
+    current_version = m.score_version or 0
+    if score.expected_version is not None and score.expected_version != current_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "比分已被其他人更新，请重试",
+                "score_a": m.score_a or 0,
+                "score_b": m.score_b or 0,
+                "score_version": current_version,
+            },
+        )
+
     # 首次记分视为比赛开始
     if m.status == MatchStatus.PENDING:
         m.status = MatchStatus.ONGOING
@@ -171,6 +187,8 @@ async def update_score(
 
     m.score_a = score.score_a
     m.score_b = score.score_b
+    # 每次改比分都 +1：客户端靠它判断自己的基线是否还新（见上面的 409 分支）
+    m.score_version = current_version + 1
 
     # Only end via explicit force_end
     if score.force_end:
@@ -196,7 +214,7 @@ async def update_score(
             detail={"score_a": sa, "score_b": sb, "winner_pairing_id": winner},
             ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         )
-        return {"ok": True, "finished": True}
+        return {"ok": True, "finished": True, "score_version": m.score_version}
 
     # 同上：先提交再广播，缩短持锁时间（记分是最高频的写操作，影响最明显）
     await db.commit()
@@ -209,7 +227,8 @@ async def update_score(
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         high_freq=True,
     )
-    return {"ok": True}
+    # 回带新的版本号：客户端据此更新自己的基线（不用猜"一定 +1"）
+    return {"ok": True, "score_version": m.score_version}
 
 
 @router.post("/matches/{match_id}/swap-sides")
@@ -582,6 +601,7 @@ async def _build_matches_out(
             end_time=end_time,
             score_a=m.score_a,
             score_b=m.score_b,
+            score_version=m.score_version or 0,
             winner_pairing_id=m.winner_pairing_id,
             referee=referee,
             active_referee=active_referee,
@@ -690,6 +710,9 @@ async def _broadcast_match(m: Match, tournament_id: int) -> None:
         "match_id": m.id,
         "score_a": m.score_a,
         "score_b": m.score_b,
+        # 版本号随广播下发：各端据此判断"这条广播是不是比本地基线更新"，
+        # 也是记分时填 expected_version 的依据
+        "score_version": m.score_version or 0,
         # 胜方必须带上：观众端靠它渲染胜方高亮与 🏆。
         # 缺了它的话，比赛结束的广播里 status 已是 finished，而胜方永远是空的——
         # 且此后不会再有任何补拉（30 秒校准只在 ongoing 时执行），
