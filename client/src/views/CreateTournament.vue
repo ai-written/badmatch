@@ -480,6 +480,12 @@ function buildPayload(title: string, start: string, end: string) {
 async function onSubmit() {
   submitting.value = true
   try {
+    // 提交前先把场次档位按当前人数对齐（编辑与创建都要）：
+    // 最大人数那一栏的档位重算挂在 @blur 上、是异步的 ——「改完人数立刻点保存」时
+    // 它还没回来，buildPayload 就会把**上一个档位**一起送上去（典型：8 人 14 场，
+    // 人数改成 12 后仍提交 14，而 14 场在 12 人下不可能均分，开赛时会被临时换档）。
+    // 这里 await 一次，保证送到服务端的就是合法值；后端也会再对齐一次兜底。
+    await fetchOptions({ preserveTotal: true })
     if (isEdit.value) {
       // 前端先拦一次「最大人数 < 已报名人数」：后端也会返回同样的 400，
       // 但等一个来回才发现填错了，不如立刻说

@@ -12,6 +12,7 @@ from app.engine.scheduler import (
     compute_rounds,
     fairness_step,
     generate_schedule,
+    nearest_valid_total,
     shuffle_sides,
 )
 
@@ -20,6 +21,54 @@ def test_compute_match_count_divisibility():
     for n in range(4, 41):
         M = compute_match_count(n)
         assert (4 * M) % n == 0, f"n={n}, M={M}"
+
+
+# ---- 存量场次与当前人数不整除时，换成哪个档（别缩到最小）----
+
+def test_nearest_valid_total_keeps_an_already_valid_value():
+    """原值本来就能整除：一个数字都不许动（8 人 14 场 → 还是 14）。"""
+    for n in (4, 6, 8, 9, 10, 12, 16):
+        for m in range(1, 31):
+            if (4 * m) % n == 0:
+                assert nearest_valid_total(n, m) == m, (n, m)
+
+
+def test_nearest_valid_total_picks_the_closest_tier_not_the_minimum():
+    """人一变就不整除时，取最接近原值的档 —— 绝不掉到 compute_match_count 的最小档。
+
+    这条盯的是一个真出过的 bug：8 人 14 场，报名期间把上限改成 12，报满后开赛
+    14 场直接变 3 场（每人只打一场），用户看到的就是「改了个名额，场次没了」。
+    """
+    # 12 人：合法档 3,6,9,12,15,18…；14 → 15（离 12 更远，离 15 只差 1）
+    assert nearest_valid_total(12, 14) == 15
+    # 10 人：合法档 5,10,15,20…；14 → 15
+    assert nearest_valid_total(10, 14) == 15
+    # 6 人：合法档 3,6,9,12,15…；14 → 15
+    assert nearest_valid_total(6, 14) == 15
+    # 对比：最小档会掉到多少（这就是修掉之前的行为）
+    assert compute_match_count(12) == 3 and compute_match_count(10) == 5
+
+
+def test_nearest_valid_total_breaks_ties_upward():
+    """正好卡在两档中间时取大的：宁可多打一场，也不要莫名缩水。"""
+    assert nearest_valid_total(8, 5) == 6      # 8 人步长 2：4 与 6 等距 → 6
+    assert nearest_valid_total(16, 6) == 8     # 16 人步长 4：4 与 8 等距 → 8
+    assert nearest_valid_total(12, 13) == 12   # 不是并列：13 离 12 更近，就该保持 12
+
+
+def test_nearest_valid_total_respects_the_hard_cap():
+    """上限 100 场是硬约束：合法档超出上限时截到最大合法值。"""
+    for n in range(4, 41):
+        M = nearest_valid_total(n, 100)
+        assert (4 * M) % n == 0, (n, M)
+        assert M <= 100, (n, M)
+    assert nearest_valid_total(9, 100) == 99    # 9 人步长 9 → 99
+
+
+def test_nearest_valid_total_without_a_usable_preference():
+    """没有原值（None/0）时退回「最小可行场次」，与「从没设过总场次」的语义一致。"""
+    assert nearest_valid_total(8, None) == compute_match_count(8)
+    assert nearest_valid_total(8, 0) == compute_match_count(8)
 
 
 def test_schedule_validity_and_equal_play():

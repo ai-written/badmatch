@@ -14,7 +14,7 @@ from app.models.tournament import (
 )
 from app.core.websocket import manager
 from app.core.mailer import send_tournament_invite
-from app.engine.scheduler import fairness_step
+from app.engine.scheduler import fairness_step, nearest_valid_total
 from app.core.config import get_settings
 from app.schemas.tournament import (
     TournamentCreate, TournamentUpdate, TournamentBrief, TournamentListOut, TournamentDetail,
@@ -220,6 +220,21 @@ def _resolve_registration_open_at(data: TournamentCreate) -> datetime | None:
     return None
 
 
+def _align_total_matches(max_participants: int, total_matches: int | None) -> int | None:
+    """把总场次对齐到「与人数相容」的合法值（None 原样返回 = 开赛时自动算）。
+
+    「每人场次相同」要求 4M 能被人数整除。前端只从合法档位里选，正常不会送不合法值；
+    但「改完人数立刻保存」时，blur 触发的档位重算是异步的，提交会带上前一个档位
+    （典型：8 人 14 场 → 人数改成 12，提交上去还是 14）。不合法值一旦入库，开赛时
+    只能临时换档，用户就会看到「共 14 场」变成别的数字。与其等开赛才对，不如在写入
+    这一刻就对齐 —— 规则与前端 blur 时重算完全一致：**取离原值最近的合法档**
+    （`scheduler.nearest_valid_total`，并列取大）。
+    """
+    if total_matches is None:
+        return None
+    return nearest_valid_total(max_participants, total_matches)
+
+
 async def _create_tournament(
     data: TournamentCreate,
     user: User,
@@ -256,7 +271,7 @@ async def _create_tournament(
         start_date=data.start_date,
         end_date=data.end_date,
         max_participants=data.max_participants,
-        total_matches=data.total_matches,
+        total_matches=_align_total_matches(data.max_participants, data.total_matches),
         points_to_win=data.points_to_win,
         registration_open_at=registration_open_at,
     )
@@ -543,7 +558,7 @@ async def update_tournament(
     t.start_date = data.start_date
     t.end_date = data.end_date
     t.max_participants = data.max_participants
-    t.total_matches = data.total_matches
+    t.total_matches = _align_total_matches(data.max_participants, data.total_matches)
     t.points_to_win = data.points_to_win
     t.registration_open_at = registration_open_at
     await _replace_courts(t.id, data.courts, db)

@@ -7,13 +7,17 @@
   超管能跨状态删除，但同样不能跨状态修改（真要改，删掉重建）。
 - **最大人数不能小于当前已报名人数**：报名行是既成事实，改到人数之下会得到
   「9/8 人」这种自相矛盾的状态，而且被裁掉的人没有地方可去。
+- **总场次必须与人数相容**（4M 能被人数整除，即每人场次相等）：保存时按人数把
+  场次就近对齐，别把不整除的值写进库 —— 那种值开赛时只能临时换档，用户会看到
+  「共 14 场」突然变成另一个数字。
 """
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
-from app.api.tournaments import _check_capacity, assert_can_edit
+from app.api.tournaments import _align_total_matches, _check_capacity, assert_can_edit
+from app.engine.scheduler import compute_match_count
 from app.models.tournament import TournamentStatus
 
 
@@ -90,3 +94,31 @@ def test_capacity_checks_registered_before_anything_else():
     with pytest.raises(HTTPException) as e:
         _check_capacity(3, 8)
     assert "4" in str(e.value.detail)
+
+
+# --- 总场次与人数对齐（保存时就把不整除的值修掉）---
+
+def test_total_matches_none_stays_auto():
+    """没选总场次（“自动”）就保持自动，别凭空钉一个数。"""
+    assert _align_total_matches(8, None) is None
+
+
+def test_total_matches_kept_when_it_still_fits():
+    """能整除就不动 —— 用户选的 20 场在 8 人下合法，凭什么改。"""
+    assert _align_total_matches(8, 20) == 20
+
+
+def test_total_matches_realigned_when_headcount_changed():
+    """8 人 14 场改成 12 人：14 不可能均分，就近对齐到 15（不是缩到最小的 3）。"""
+    assert _align_total_matches(12, 14) == 15
+    assert _align_total_matches(12, 14) != compute_match_count(12)
+    assert _align_total_matches(10, 14) == 15
+
+
+def test_total_matches_alignment_always_yields_equal_play():
+    """对齐后的值必须真的合法：4M 能被人数整除，且不超过 100 场上限。"""
+    for n in range(4, 41):
+        for m in (1, 7, 14, 20, 33, 100):
+            got = _align_total_matches(n, m)
+            assert (4 * got) % n == 0, (n, m, got)
+            assert 1 <= got <= 100, (n, m, got)

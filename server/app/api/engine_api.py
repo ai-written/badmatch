@@ -19,7 +19,7 @@ from app.models.round import MatchSupport
 from pydantic import BaseModel
 from app.engine.scheduler import (
     generate_schedule, compute_match_count, compute_rounds, shuffle_sides,
-    fairness_step, _pair_key, _match_key,
+    fairness_step, nearest_valid_total, _pair_key, _match_key,
 )
 
 # 总场次上限：与开赛时的校验同一个数（原先是硬编码两处，追加比赛也要用同一个上限）
@@ -130,10 +130,13 @@ async def start_tournament(
             )
         tournament.total_matches = requested
         M = requested
-    elif tournament.total_matches and (4 * tournament.total_matches) % len(player_ids) == 0:
-        M = tournament.total_matches
+    elif tournament.total_matches:
+        # 存量值与当前人数不整除（报名人数变了、上限被改过、或库里的老数据）：
+        # 取**离它最近**的合法档，而不是最小档 —— 用最小值会把「8 人 14 场」在
+        # 人数变动后直接砍成 3 场（每人只打一场），用户看到的就是「场次没了」
+        M = nearest_valid_total(len(player_ids), tournament.total_matches)
     else:
-        # 未设置，或存量值与当前人数不匹配：按当前人数取最小可行场次
+        # 从未设过总场次（直接调接口建的赛事）：按当前人数取最小可行场次
         M = compute_match_count(len(player_ids))
 
     # 跨赛事避重：把最近几场赛事的搭档/对手/对局统计喂给排程器（本赛事此时还没排过赛程，
@@ -173,9 +176,11 @@ async def start_tournament(
             detail="当前人数无法排出赛程，请调整报名人数后重试",
         )
     if adjusted_M != M:
-        # 写回实际使用的场次，避免详情与后续重排继续用那个排不出来的值
-        tournament.total_matches = adjusted_M
+        # 排程在个别组合下排不出请求的场次，会退到可行的档位
         M = adjusted_M
+    # 一律写回**实际使用**的场次：存量值对当前人数不整除时，上面已经把它就近换档了，
+    # 不写回的话详情页会一直显示旧数字（「共 14 场」而实际排了 15 场）
+    tournament.total_matches = M
 
     matches_per_round = 2
     # 左右随机：排程本身是确定性的（见 scheduler），并列时总是让名单靠前的人进 A 队，
@@ -619,8 +624,9 @@ async def reschedule_schedule(
         await db.execute(delete(Round).where(Round.id == r.id))
         replaced_rounds += 1
 
-    if tournament.total_matches and (4 * tournament.total_matches) % n == 0:
-        M = tournament.total_matches
+    if tournament.total_matches:
+        # 与开赛同一口径：不整除时取**离原值最近**的合法档，别缩到最小档
+        M = nearest_valid_total(n, tournament.total_matches)
     else:
         M = compute_match_count(n)
 
@@ -948,8 +954,10 @@ async def withdraw_player(
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
-    if tournament.total_matches and (4 * tournament.total_matches) % remaining_count == 0:
-        new_M = tournament.total_matches
+    if tournament.total_matches:
+        # 与开赛/重排同一口径：不整除时取**离原值最近**的合法档（退赛后人数变了，
+        # 用最小档会把 14 场砍成 3 场）
+        new_M = nearest_valid_total(remaining_count, tournament.total_matches)
     else:
         new_M = compute_match_count(remaining_count)
     # 跨赛事避重：重排出来的、一场没打的轮次也不该跟最近几场赛事撞车（见 RECENT_EVENT_HISTORY）。

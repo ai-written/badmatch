@@ -367,6 +367,33 @@ def compute_match_count(num_players):
     return M
 
 
+def nearest_valid_total(num_players, preferred, max_total=100):
+    """「离 preferred 最近」的合法总场次（4M 能被 N 整除，即每人场次相等）。
+
+    为什么需要它：库里的 `total_matches` 是**按当时的人数**选的（创建/编辑时的
+    下拉档位）。人一变——编辑把人数改大、报名人数没报满、退赛后人数减少——旧值
+    就不一定还能整除。这时开赛/重排必须换一个档，问题是换成哪个：
+
+    - `compute_match_count(N)` 是**最小**合法值。真踩到过：8 人 14 场，报名期间把
+      上限改成 12，报满后点「开始比赛」→ 14 场当场掉成 **3 场**（每人只打一场），
+      用户看到的就是「改了个名额，场次没了」。
+    - 这里取最接近旧值的档（并列取大的，宁可多排一场也别缩水），把「人数变了」
+      的代价压到最小：14 场 + 12 人 → 15 场。
+
+    纯函数（不查库），便于单测；调用方（开赛/重排/退赛/创建/编辑）共用同一个口径，
+    否则会出现「界面显示 15 场、开赛排 12 场」这类口径分裂。
+    """
+    if not preferred or preferred < 1:
+        return compute_match_count(num_players)
+    step = fairness_step(num_players)
+    if step <= 0:
+        return 1
+    # 合法值 = step 的正整数倍，且不超过硬上限（100 场）
+    values = list(range(step, max_total + 1, step)) or [step]
+    # 并列（preferred 正好落在两档中间）取大的：宁可多打一场，也不要莫名缩水
+    return min(values, key=lambda v: (abs(v - preferred), -v))
+
+
 def compute_rounds(matches, matches_per_round=2):
     """Group matches into rounds."""
     rounds = []
