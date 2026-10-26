@@ -33,6 +33,15 @@ docker compose -f docker-compose.prod.yml up -d
 
 访问 `http://localhost`（端口由 `.env` 中 `PORT` 控制，默认 80）
 
+> **对外只暴露 `${PORT}` 一个端口**：`server`（8000）与 `db`（5432）都不发布到宿主机，
+> 只在 compose 网络内互通。云主机上安全组也只放行这一个（和你要用的 443）。
+> 早先的 `docker-compose.prod.yml` 把 5432 发布了出来，配合默认口令 `badminton` 等于
+> 把库挂在公网上，现已移除；要本机连库调试用
+> `docker compose -f docker-compose.prod.yml exec db psql -U badminton -d badminton`。
+>
+> **公网直连部署请顺手关掉 Docker 的 userland-proxy**（否则日志里的访客 IP 全是网桥网关，
+> 按 IP 的限流会把所有人当成同一个人），见下文「真实客户端 IP」。
+
 > 服务启动时会自动执行幂等迁移（补齐 `users.email`、唯一约束、`matches.started_at/ended_at`、`matches.score_version`、`users.token_version` 等缺失列，以及 `matches.tournament_id` 的索引 `ix_matches_tournament_id`），老库升级无需手动执行 SQL。
 
 ### 首次初始化（超级管理员）
@@ -95,30 +104,67 @@ docker compose -f docker-compose.prod.yml up -d
   - 走 Cloudflare 时需**同时**设置 `TRUST_CF_CONNECTING_IP=true`，否则限流会按 Cloudflare/nginx 的 IP 计数
 - **token 版本号机制**：登出、修改密码、管理员重置密码都会使该用户所有 token 立即失效，并主动断开其全部 WebSocket 连接；升级/重启后旧 token 按版本 0 兼容处理，**已登录用户无需重新登录**
 
-### Cloudflare 部署（推荐）
+### 真实客户端 IP（先看这一节）
+
+**默认部署是「公网 IP:端口 直连容器」，`nginx.conf` 里刻意不启用 `realip`**：直连时
+`$remote_addr` 就是访客公网 IP，nginx 以覆盖式 `X-Real-IP` 转发给后端（后端
+`TRUST_PROXY_HEADERS=true` 时采信它）。此时若启用 realip 并信任私有网段，能连到端口的人
+只要自带一个头就能把来源伪装成任意地址。
+
+> ⚠️ **踩过的坑**：Docker 默认开着 `userland-proxy`，发布端口的连接会被改写成**网桥网关**
+> （日志里所有访客都是 `172.27.0.1`）。后果不只是日志难看：
+> - 按 IP 的限流会「连坐」——`login_ip_limiter` 是 30 次失败/10 分钟，任何人刷 30 次失败
+>   登录就能让**整群人**都登不上；
+> - 审计里查不到真实来源。
+>
+> 修法（宿主机执行，之后容器内才能看到真实公网 IP）：
+> ```bash
+> # /etc/docker/daemon.json 里加一行（首次部署时顺便做掉）
+> { "userland-proxy": false }
+> systemctl restart docker && docker compose -f docker-compose.prod.yml up -d
+> ```
+> 验证：访问一次站点后看 `logs/access.log` 的 `ip` 字段，或管理面板「访问日志」。
+
+前面若要再加一层代理，按 `nginx.conf` 顶部注释里的对应拓扑打开 realip（信任段只留该代理
+的地址段），并把对外端口限制成只允许代理回源。
+
+### Cloudflare 部署（可选）
 
 **场景 A：Cloudflare Tunnel（Zero Trust）——内网/无公网 IP 服务器**
 
 - 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源 HTTP
 - 浏览器侧 HTTPS 和 HTTP/2 由 Cloudflare 提供，服务器**无需配置证书/443**
-- 真实客户端 IP 由 **client 容器里的 nginx 还原**：`nginx.conf` 用 `realip` 按 `CF-Connecting-IP`
-  覆盖 `$remote_addr`（信任范围 = 私有网段 + Cloudflare 网段），再以 `X-Real-IP` 覆盖式转发。
-  因此后端只需 **`TRUST_PROXY_HEADERS=true`**（prod compose 默认即是）；**不必**再开
-  `TRUST_CF_CONNECTING_IP` —— nginx 转发前会把该头清空（防伪造）
-- ⚠️ 安全：把 client 端口绑到回环（`127.0.0.1:${PORT}:80`）或只放行隧道来源。realip 的信任
-  范围含私有网段，若该端口对同内网开放，直连者可自带伪造的 `CF-Connecting-IP`，把自己的
-  来源说成任意地址（按 IP 的限流与审计随之失效）
+- **需要在 `nginx.conf` 里打开 realip**（注释里有现成片段）：Tunnel 是从宿主机回源的，
+  容器看到的 `$remote_addr` 是 Docker 网桥网关，必须信任该网关地址并用
+  `real_ip_header CF-Connecting-IP` 还原；随后 nginx 以覆盖式 `X-Real-IP` 转发，
+  后端只需 `TRUST_PROXY_HEADERS=true`（prod compose 默认即是），**不必**开
+  `TRUST_CF_CONNECTING_IP`（nginx 转发前会把该头清空，防伪造）
+- ⚠️ 安全：把 client 端口绑到回环（`127.0.0.1:${PORT}:80`）或只放行隧道来源 ——
+  一旦信任了私有网段，同内网直连者自带伪造的 `CF-Connecting-IP` 就能伪装来源
 
 **场景 B：Cloudflare 代理（橙色云，服务器有公网 IP）**
 
 - Cloudflare 面板 **SSL/TLS 模式保持 Flexible**（回源 HTTP）；若设为 Full/Full(strict) 会回源 TLS 失败（521/525）
 - ⚠️ 防火墙/安全组**只放行 Cloudflare IP 段**（https://www.cloudflare.com/ips/ ），否则直连可伪造 `CF-Connecting-IP`
-- 真实客户端 IP 同样由 nginx 的 `realip` 还原（`nginx.conf` 里已列出 CF 网段），后端仍是 `TRUST_PROXY_HEADERS=true`
+- 真实客户端 IP：在 `nginx.conf` 打开 `real_ip_header CF-Connecting-IP` + 只信任 CF 网段
+  （不要信任私有网段），后端仍是 `TRUST_PROXY_HEADERS=true`
 
-**场景 C：直接经 nginx 暴露（无 Cloudflare）**
+**场景 C：直接经 nginx 暴露（无 Cloudflare）——默认就是这种**
 
 - nginx 已用 `$remote_addr` 覆盖式写入 `X-Real-IP`，因此设置 `TRUST_PROXY_HEADERS=true` 即可拿到真实客户端 IP
 - `docker-compose.prod.yml` 默认即为 `true`；**若服务会被绕过 nginx 直接访问，必须改回 `false`**
+- 别忘了上面的 `userland-proxy: false`，否则拿到的仍是 `172.27.0.1`
+
+### 门卫层防护（nginx）
+
+- **拦扫描器**：`/.env`、`/.git`、`/wp-admin`、`/phpmyadmin` 等常见探测路径直接
+  `return 444` 且 `access_log off`（僵尸网络每天都会扫这些，以前每一条都会打到后端再回 404）
+- **按 IP 限流**：`/` 20r/s、`/api/` 15r/s，各带 `burst=60 nodelay`。
+  超限**直接 429**而不是排队（排队才会让正常用户觉得卡）；额度按「打开一个页面
+  ≈ 10~20 个请求」给足，正常使用（含多人共用同一 NAT 出口）碰不到。
+  `/assets/`（构建产物）与 `/ws/`（长连接）不限流
+- 应用层限流照旧（按账号 + 按 IP：登录 5 次/600s、按 IP 30 次/600s、邀请码、找回密码、头像上传等）
+
 
 ## 核心功能
 

@@ -11,8 +11,11 @@ services:
       POSTGRES_DB: badminton
       TZ: Asia/Shanghai
       PGTZ: Asia/Shanghai
-    ports:
-      - "5432:5432"
+    # 刻意**不发布** 5432：server 通过 compose 网络（db:5432）访问它，
+    # 宿主/公网完全不需要这个端口。以前这里写着 "5432:5432"，等于把数据库
+    # 暴露到宿主机 —— 云主机上只要安全组放行，任何人都能直接来试口令
+    # （而默认口令是 badminton）。要本机 psql 调试时临时用：
+    #   docker compose -f docker-compose.prod.yml exec db psql -U badminton -d badminton
     volumes:
       - ./pgdata:/var/lib/postgresql/data
     restart: always
@@ -55,6 +58,8 @@ services:
 
   client:
     image: hsiangleev/badmatch:client-latest
+    # 全站只对外暴露这一个端口（${PORT}）；server 与 db 都不发布到宿主机。
+    # 安全组也只应放行这一个（以及你要用的 443，如果前面加 TLS 代理）。
     ports:
       - "${PORT:-80}:80"
     environment:
