@@ -486,6 +486,15 @@ async function onSubmit() {
     // 人数改成 12 后仍提交 14，而 14 场在 12 人下不可能均分，开赛时会被临时换档）。
     // 这里 await 一次，保证送到服务端的就是合法值；后端也会再对齐一次兜底。
     await fetchOptions({ preserveTotal: true })
+    // 定时开放报名：所选时间已经过去了 → 按「立即开放」提交。
+    // 后端对「开关开着 + 时间在过去」会回 400「报名开放时间必须晚于当前时间」；
+    // 编辑页开着不动、到点之后再保存（哪怕只是改个名字）就会撞上这个 400，非常费解。
+    // 语义上「定的时刻已经过了」就等于「现在就开放」，所以这里就地纠正并明确告知。
+    if (form.enable_scheduled_registration && form.registration_open_at
+        && new Date(form.registration_open_at).getTime() <= Date.now()) {
+      form.enable_scheduled_registration = false
+      showToast('所选开放时间已过，改为立即开放报名')
+    }
     if (isEdit.value) {
       // 前端先拦一次「最大人数 < 已报名人数」：后端也会返回同样的 400，
       // 但等一个来回才发现填错了，不如立刻说

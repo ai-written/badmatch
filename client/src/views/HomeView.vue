@@ -57,7 +57,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useTournamentStore } from '@/stores/tournament'
 
 const store = useTournamentStore()
@@ -77,8 +77,16 @@ const firstLoadFailed = ref(false)
 let firstLoadDone = false
 
 function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
-function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.registration_open_at).getTime() > Date.now() }
+// 列表上的「未开始」要随时间自己翻转：只在渲染时算一次的话，开放时刻到了之后卡片会
+// 一直停在「未开始」，直到用户下拉刷新。每 30s 触发一次重算（纯本地比较，不发请求）。
+// 注意：列表接口不返回 server_now，这里用的是手机时钟（偏差通常几秒，无感）；
+// 详情页的倒计时用服务端时间校准过，那里才是权威显示。
+const nowTick = ref(Date.now())
+let tickTimer: ReturnType<typeof setInterval> | null = null
+function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.registration_open_at).getTime() > nowTick.value }
 function statusLabel(t: any) { return t.status === 'open' ? (isRegLocked(t) ? '未开始' : '报名中') : t.status === 'ongoing' ? '进行中' : '已结束' }
+onMounted(() => { tickTimer = setInterval(() => { nowTick.value = Date.now() }, 30000) })
+onUnmounted(() => { if (tickTimer) clearInterval(tickTimer) })
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 function fmtDateTime(start: string, end: string) {
   if (!start || !end) return ''

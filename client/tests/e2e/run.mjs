@@ -23,6 +23,7 @@
  *  14 记分页：弱网下「慢 GET 带回旧比分」不会把刚点的分覆盖回去（点了 3 不跳回 2）
  *  15 记分页：两台设备同时记分不丢分（服务端 409 乐观锁 + 客户端增量重试）
  *  16 访问控制：未登录访问积分榜 → 登录页（并记住原目标）；登录后正常打开
+ *  17 定时报名：创建页带开放时间、未开放时详情页锁定报名、过期后保存自动按立即开放
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1916,8 +1917,90 @@ async function scenarioAuthGuard(page) {
   assert('页面标题是「积分榜」', title === '积分榜', title)
 }
 
+/** 场景 17：定时开放报名 —— 创建带开放时间、未开放时详情页锁住、过期时间自动按立即开放 */
+async function scenarioScheduledRegistration(page) {
+  console.log('17) 定时报名：创建带开放时间 / 未开放锁定报名 / 过期即立即开放')
+  const pad = (n) => String(n).padStart(2, '0')
+  // 与服务端同口径的**本地 naive** 时间串（app 内部就是这么解析/提交的）
+  const naive = (dt) => `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`
+    + `T${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`
+
+  let posted = null
+  let putBody = null
+  const detail = {
+    id: 2, creator_id: 1, title: '定时报名赛', description: null, location: 'L',
+    start_date: '2026-11-06T19:00:00', end_date: '2026-11-06T21:00:00',
+    max_participants: 8, status: 'open', courts: [], registered_count: 0, cancelled_count: 0,
+    pending_referee_count: 0, started_match_count: 0, total_matches: 14, points_to_win: 11,
+    registration_open_at: naive(new Date(Date.now() + 10 * 60 * 1000)),   // 10 分钟后开放
+    server_now: naive(new Date()), is_registered: false, is_on_site: false,
+    created_at: '2026-10-20T09:00:00',
+  }
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) {
+      return { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    }
+    if (path === '/api/tournaments' && entry.method === 'POST') {
+      posted = JSON.parse(entry.body || '{}')
+      return { id: 9 }
+    }
+    if (/\/tournaments\/2$/.test(path) && entry.method === 'PUT') {
+      putBody = JSON.parse(entry.body || '{}')
+      return detail
+    }
+    if (/tournaments\/default-title/.test(path)) return { title: '11月6日养生局' }
+    if (/match-options\//.test(path)) return matchOptionsFor(Number(path.split('/').pop()))
+    if (/\/registrations$/.test(path)) return []
+    if (/\/tournaments\/2$/.test(path)) return detail
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+
+  // ---- A) 创建页开启「定时开放报名」→ payload 里带上开放时间 ----
+  await page.goto('/create', 2400)
+  assert('填赛事名称', (await setFieldOf(page, '赛事名称', '定时报名赛')) === 'OK')
+  assert('打开「定时开放报名」开关', (await page.ev(`(() => {
+    const sw = document.querySelectorAll('.van-switch')[0]
+    if (!sw) return 'NOTFOUND'
+    sw.click(); return 'OK' })()`)) === 'OK')
+  await sleep(300)
+  assert('出现「报名开放时间」一栏', (await hasFieldOf(page, '报名开放时间')) === true)
+  assert('点「创建赛事」', (await page.clickText('创建赛事')) === true)
+  await sleep(900)
+  assert('提交时带 enable_scheduled_registration=true',
+    posted?.enable_scheduled_registration === true, JSON.stringify(posted?.enable_scheduled_registration))
+  assert('提交时带具体的开放时间（默认下一个整点，未过期）',
+    typeof posted?.registration_open_at === 'string' && posted.registration_open_at.length >= 16,
+    String(posted?.registration_open_at))
+
+  // ---- B) 未开放时：详情页锁住报名并显示倒计时 ----
+  await page.goto('/tournament/2', 2400)
+  const tag = await page.ev(`(document.querySelector('.van-tag')?.textContent || '').trim()`)
+  assert('状态标签显示「即将开放」', tag === '即将开放', tag)
+  const countdown = await page.ev(`(document.querySelector('.reg-countdown')?.textContent || '').trim()`)
+  assert('显示「距报名开放还有 …」倒计时', countdown.startsWith('距报名开放还有'), countdown)
+  const btnState = await page.ev(`(() => {
+    const b = [...document.querySelectorAll('button')].find(x => (x.textContent || '').trim().startsWith('立即报名'))
+    return b ? (b.disabled ? 'disabled' : 'enabled') : 'NOTFOUND' })()`)
+  assert('「立即报名」按钮被禁用', btnState === 'disabled', btnState)
+
+  // ---- C) 编辑页：开放时间在停留期间已过 → 保存时自动按「立即开放」提交 ----
+  detail.registration_open_at = naive(new Date(Date.now() + 1200))   // 1.2 秒后开放
+  await page.goto('/tournament/2', 2200)
+  await page.clickText('编辑赛事信息')
+  await sleep(1500)              // 等它"过期"
+  assert('点「保存修改」', (await page.clickText('保存修改')) === true)
+  await sleep(900)
+  assert('过期后保存：按「立即开放」提交（enable=false）',
+    putBody?.enable_scheduled_registration === false, JSON.stringify(putBody?.enable_scheduled_registration))
+  assert('过期后保存：registration_open_at 为 null',
+    putBody?.registration_open_at === null, JSON.stringify(putBody?.registration_open_at))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)
