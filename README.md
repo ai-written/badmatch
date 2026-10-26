@@ -41,6 +41,10 @@ docker compose -f docker-compose.prod.yml up -d
 >
 > **公网直连部署请顺手关掉 Docker 的 userland-proxy**（否则日志里的访客 IP 全是网桥网关，
 > 按 IP 的限流会把所有人当成同一个人），见下文「真实客户端 IP」。
+>
+> ⚠️ **`docker-compose.prod.yml` 与 `client/nginx.conf` 不在 Docker 镜像里**：升级时除了
+> `pull` 新镜像，还要把仓库里这两个文件同步到服务器（nginx.conf 在 client 镜像内，
+> 所以改它必须换镜像；compose 文件则是服务器上那一份）。只改 `nginx.conf` 不换镜像 = 没有效果。
 
 > 服务启动时会自动执行幂等迁移（补齐 `users.email`、唯一约束、`matches.started_at/ended_at`、`matches.score_version`、`users.token_version` 等缺失列，以及 `matches.tournament_id` 的索引 `ix_matches_tournament_id`），老库升级无需手动执行 SQL。
 
