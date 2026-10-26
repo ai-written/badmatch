@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import lazyload
+from sqlalchemy.orm import lazyload, noload
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
@@ -20,6 +20,52 @@ from app.schemas.match import (
 )
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["matches"])
+
+
+_user_brief_cache: tuple | None = None
+_pairing_brief_cache: tuple | None = None
+_court_brief_cache: tuple | None = None
+
+
+def _user_brief() -> tuple:
+    """「只要用户基本字段」时的加载选项。
+
+    `User` 的 4 个集合关系全是 `lazy="selectin"`：不显式关掉的话，**每次** `select(User)`
+    都会再发 4 条查询把「他报名过的赛事 / 战绩 / 创建的赛事 / 执裁过的比赛」整批拉回来；
+    而 `created_tournaments` 里的 Tournament 又自带 5 个 selectin 集合（registrations/
+    courts/rounds/matches/player_stats），一条链能炸出几十条 SQL —— 实测一次 `/rounds`
+    因此执行了 **136 条** 查询、本地就要 90ms+（线上经 frp 转发更明显）。
+
+    这和 tournaments.py 的 `_brief_loads()` 是同一个坑、同一套解法：读接口自己用
+    `id.in_(...)` 批量取需要的字段就够了，别让 ORM 顺藤摸瓜。
+
+    必须在**调用时**构建：noload() 会立即触发 mapper 配置，import 阶段有些模型还没注册。
+    """
+    global _user_brief_cache
+    if _user_brief_cache is None:
+        _user_brief_cache = (
+            noload(User.registrations), noload(User.player_stats),
+            noload(User.created_tournaments), noload(User.refereed_matches),
+        )
+    return _user_brief_cache
+
+
+def _pairing_brief() -> tuple:
+    """配对只要两个选手 id：`matches_as_a/matches_as_b` 也是 selectin，一并关掉。"""
+    global _pairing_brief_cache
+    if _pairing_brief_cache is None:
+        _pairing_brief_cache = (
+            noload(RoundPairing.matches_as_a), noload(RoundPairing.matches_as_b),
+        )
+    return _pairing_brief_cache
+
+
+def _court_brief() -> tuple:
+    """场地只要名字：时间段由调用方单独批量查（Court.time_slots 也是 selectin）。"""
+    global _court_brief_cache
+    if _court_brief_cache is None:
+        _court_brief_cache = (noload(Court.time_slots),)
+    return _court_brief_cache
 
 
 async def load_writable_tournament(db: AsyncSession, tournament_id: int) -> Tournament:
@@ -63,41 +109,60 @@ async def list_rounds(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_user),
 ):
+    # 轮次与比赛各查一次，比赛按 tournament_id 一次取全再在内存里按轮次分组。
+    # 原先这里是「先查轮次、再对每一轮单独查一次比赛」，而且两处都没关掉 selectin
+    # （Round.matches / Round.pairings 都是 selectin），一次请求因此要跑上百条 SQL。
     result = await db.execute(
-        select(Round).where(Round.tournament_id == tournament_id).order_by(Round.round_number)
+        select(Round).where(Round.tournament_id == tournament_id)
+        .order_by(Round.round_number)
+        .options(noload(Round.matches), noload(Round.pairings))
     )
     rounds = result.scalars().all()
 
-    # 读取赛事状态：已结束时前端据此把整页置为只读（这里不抛错，只用于展示）
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
-    tournament = t.scalar_one_or_none()
+    # 读取赛事状态：已结束时前端据此把整页置为只读（这里不抛错，只用于展示）。
+    # 只取 status 这一列 —— 整行 ORM 会把赛事的 5 个 selectin 集合也一起拉回来。
+    status_row = await db.execute(
+        select(Tournament.status).where(Tournament.id == tournament_id)
+    )
+    t_status_value = status_row.scalar_one_or_none()
     # 赛事不存在时返回 404，而不是「200 + 空数组」：
     # 后者会让前端把「赛事已被删除/链接失效」显示成「该赛事还没有赛程」
-    if tournament is None:
+    if t_status_value is None:
         raise HTTPException(status_code=404, detail="赛事不存在")
-    t_status = tournament.status.value if tournament else None
+    t_status = t_status_value.value
+
+    # 必须显式按 id 排序：PostgreSQL 无 ORDER BY 时按堆内物理顺序返回，而 UPDATE（认领裁判、
+    # 记分）会把行写成新版本并挪到堆尾，导致同一场比赛在刷新后位置漂移、对阵表顺序跳动。
+    # 一条查询按 id 排全局顺序，下面按 round_id 分组时组内顺序自然也是 id 升序。
+    matches_result = await db.execute(
+        select(Match).where(Match.tournament_id == tournament_id).order_by(Match.id)
+    )
+    matches_by_round: dict[int, list[Match]] = {}
+    for m in matches_result.scalars().all():
+        matches_by_round.setdefault(m.round_id, []).append(m)
 
     bye_map = await _get_bye_players(rounds, db)
+
+    # 一次批量组装所有比赛（内部按 id.in_ 批量查配对/用户/场地/时间段/应援），
+    # 再按轮次分组拼装，避免每轮重复付一次批量查询的钱
+    all_matches = [m for rid_matches in matches_by_round.values() for m in rid_matches]
+    match_outs = await _build_matches_out(all_matches, db, user, t_status)
+    out_by_id = {mo.id: mo for mo in match_outs}
+    round_number_of = {
+        m.id: r.round_number for r in rounds for m in matches_by_round.get(r.id, [])
+    }
+    for mo in match_outs:
+        mo.round_number = round_number_of.get(mo.id, 0)
+
     out = []
     for r in rounds:
-        # 必须显式按 id 排序：PostgreSQL 无 ORDER BY 时按堆内物理顺序返回，
-        # 而 UPDATE（如认领裁判、记分）会把行写成新版本并挪到堆尾，
-        # 导致同一场比赛在刷新后位置漂移、整张对阵表顺序跳动。
-        matches_result = await db.execute(
-            select(Match).where(Match.round_id == r.id).order_by(Match.id)
-        )
-        matches = matches_result.scalars().all()
-        match_outs = await _build_matches_out(matches, db, user, t_status)
-        for mo in match_outs:
-            mo.round_number = r.round_number
-        bye_player = bye_map.get(r.id)
         out.append(RoundOut(
             id=r.id,
             round_number=r.round_number,
             status=r.status.value,
             is_regenerated=r.is_regenerated,
-            matches=match_outs,
-            bye_player=bye_player,
+            matches=[out_by_id[m.id] for m in matches_by_round.get(r.id, []) if m.id in out_by_id],
+            bye_player=bye_map.get(r.id),
         ))
     return out
 
@@ -447,7 +512,9 @@ async def _build_matches_out(
 
     pairings_map: dict[int, RoundPairing] = {}
     if pairing_ids:
-        pairings = await db.execute(select(RoundPairing).where(RoundPairing.id.in_(pairing_ids)))
+        pairings = await db.execute(
+            select(RoundPairing).where(RoundPairing.id.in_(pairing_ids)).options(*_pairing_brief())
+        )
         pairings_map = {p.id: p for p in pairings.scalars().all()}
 
     user_ids = {m.referee_id for m in matches if m.referee_id}
@@ -457,13 +524,13 @@ async def _build_matches_out(
 
     users_map: dict[int, User] = {}
     if user_ids:
-        users = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users = await db.execute(select(User).where(User.id.in_(user_ids)).options(*_user_brief()))
         users_map = {u.id: u for u in users.scalars().all()}
 
     courts_map: dict[int, Court] = {}
     court_ids = {m.court_id for m in matches if m.court_id}
     if court_ids:
-        courts = await db.execute(select(Court).where(Court.id.in_(court_ids)))
+        courts = await db.execute(select(Court).where(Court.id.in_(court_ids)).options(*_court_brief()))
         courts_map = {c.id: c for c in courts.scalars().all()}
 
     slots_map: dict[int, TimeSlot] = {}
@@ -802,6 +869,7 @@ async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, P
     paired_by_round: dict[int, set[int]] = {rid: set() for rid in round_ids}
     pairings = await db.execute(
         select(RoundPairing).where(RoundPairing.round_id.in_(round_ids))
+        .options(*_pairing_brief())
     )
     for p in pairings.scalars().all():
         paired_by_round.setdefault(p.round_id, set()).add(p.player_a_id)
@@ -817,7 +885,7 @@ async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, P
 
     users_map: dict[int, User] = {}
     if all_player_ids:
-        rows = await db.execute(select(User).where(User.id.in_(all_player_ids)))
+        rows = await db.execute(select(User).where(User.id.in_(all_player_ids)).options(*_user_brief()))
         users_map = {u.id: u for u in rows.scalars().all()}
 
     result: dict[int, PlayerInfo | None] = {}

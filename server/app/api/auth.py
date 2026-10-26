@@ -4,7 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update, text
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
-from app.core.security import create_access_token, get_current_user, hash_password, verify_password, require_user
+from app.core.security import (
+    create_access_token, get_current_user, hash_password, verify_password, require_user,
+    _auth_user_loads,
+)
 from app.core.config import get_settings
 from app.core.ratelimit import RateLimiter
 from app.core.audit import audit, get_client_ip
@@ -102,12 +105,16 @@ async def register(
         raise HTTPException(status_code=400, detail="邮箱不能为空")
     if not _is_valid_email(email):
         raise HTTPException(status_code=400, detail="邮箱格式不正确")
-    exist = await db.execute(select(User).where(User.username == req.username))
+    exist = await db.execute(
+        select(User).where(User.username == req.username).options(*_auth_user_loads())
+    )
     if exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
     # 用 lower() 比较：历史数据里可能存了带大写的邮箱（早期 update_profile
     # 只做了 strip 没做 lower），只比 == 会让 a@x.com 与 A@x.com 同时被占用
-    email_exist = await db.execute(select(User).where(func.lower(User.email) == email))
+    email_exist = await db.execute(
+        select(User).where(func.lower(User.email) == email).options(*_auth_user_loads())
+    )
     if email_exist.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="邮箱已被使用")
 
@@ -166,7 +173,9 @@ async def login(
     ip = get_client_ip(request)
     if not login_ip_limiter.check(ip):
         raise HTTPException(status_code=429, detail=f"登录尝试次数过多，请 {_settings.LOGIN_IP_WINDOW_SECONDS // 60} 分钟后再试")
-    result = await db.execute(select(User).where(User.username == req.username))
+    result = await db.execute(
+        select(User).where(User.username == req.username).options(*_auth_user_loads())
+    )
     user = result.scalar_one_or_none()
     if not user:
         # 用户不存在时也做一次 bcrypt 校验：否则「查不到用户」会立刻返回，
@@ -275,7 +284,8 @@ async def forgot_password(
         # 永远收不到重置邮件，且现象是「明明填过邮箱却提示未注册」。
         # with_for_update：与签发令牌处的用户行锁配合，把同一用户的并发申请串行化
         result = await db.execute(
-            select(User).where(func.lower(User.email) == email).with_for_update()
+            select(User).where(func.lower(User.email) == email)
+            .options(*_auth_user_loads()).with_for_update()
         )
         user = result.scalar_one_or_none()
 
@@ -323,7 +333,9 @@ async def reset_password(
         reset_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="重置链接无效或已过期，请重新申请")
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    result = await db.execute(
+        select(User).where(User.id == user_id).options(*_auth_user_loads())
+    )
     user = result.scalar_one_or_none()
     if user is None:
         reset_limiter.record_failure(ip)
@@ -663,7 +675,9 @@ async def user_stats_by_id(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    u = await db.execute(select(User).where(User.id == user_id))
+    u = await db.execute(
+        select(User).where(User.id == user_id).options(*_auth_user_loads())
+    )
     if not u.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="用户不存在")
     result = await db.execute(select(PlayerStats).where(PlayerStats.user_id == user_id))
@@ -856,7 +870,7 @@ async def list_users(
 ):
     if admin.role != "superadmin":
         raise HTTPException(status_code=403)
-    result = await db.execute(select(User).order_by(User.id))
+    result = await db.execute(select(User).order_by(User.id).options(*_auth_user_loads()))
     users = result.scalars().all()
     inviter_ids = {u.invited_by for u in users if u.invited_by}
     inviters: dict[int, str] = {}
@@ -884,7 +898,7 @@ async def selectable_users(
     if admin.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403)
     # 过滤放在服务端而不是只靠前端：旧页面/直接调接口都会绕过前端校验
-    stmt = select(User).order_by(User.id)
+    stmt = select(User).order_by(User.id).options(*_auth_user_loads())
     if not include_disabled:
         stmt = stmt.where(User.is_active == True)
     result = await db.execute(stmt)
@@ -1160,7 +1174,9 @@ async def delete_user(
     # 「admin 可删任意用户（含其他 admin）」，因为那两条规则已经不生效了。
     if admin.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403)
-    u = await db.execute(select(User).where(User.id == user_id))
+    u = await db.execute(
+        select(User).where(User.id == user_id).options(*_auth_user_loads())
+    )
     user = u.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404)

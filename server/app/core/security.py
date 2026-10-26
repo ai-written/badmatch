@@ -11,6 +11,32 @@ from app.core.database import get_db
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
 
+_auth_user_loads_cache: tuple | None = None
+
+
+def _auth_user_loads() -> tuple:
+    """鉴权只需要 User 自己的列（id / role / token_version / is_active …）。
+
+    `User` 的 4 个集合关系都是 `lazy="selectin"`：不显式关掉的话，**每一个带登录态的请求**
+    都会顺带把「他报名过的赛事 / 战绩 / 创建的赛事 / 执裁过的比赛」整批拉回来；
+    而 `created_tournaments` 里的 Tournament 又自带 5 个 selectin 集合
+    （registrations/courts/rounds/matches/player_stats），再往下是 matches→pairings→users
+    —— 一层层 selectin 级联。实测一次 `/tournaments/{id}/rounds` 因此从 ~12 条 SQL
+    涨到 **136 条**、本地 95ms（线上经 frp 转发被放大到几百 ms），且**随该用户的历史数据增长**。
+
+    目前没有任何接口依赖这些集合（用到时都是自己 `id.in_(...)` 批量查）。
+    必须在调用时构建：noload() 会立刻触发 mapper 配置。
+    """
+    global _auth_user_loads_cache
+    if _auth_user_loads_cache is None:
+        from sqlalchemy.orm import noload
+        from app.models.user import User
+        _auth_user_loads_cache = (
+            noload(User.registrations), noload(User.player_stats),
+            noload(User.created_tournaments), noload(User.refereed_matches),
+        )
+    return _auth_user_loads_cache
+
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -55,7 +81,9 @@ async def get_current_user(
         return None
     from app.models.user import User
     from sqlalchemy import select
-    result = await db.execute(select(User).where(User.id == user_id))
+    result = await db.execute(
+        select(User).where(User.id == user_id).options(*_auth_user_loads())
+    )
     user = result.scalar_one_or_none()
     if user is None:
         return None

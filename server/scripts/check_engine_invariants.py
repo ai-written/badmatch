@@ -913,6 +913,49 @@ async def check_cross_event_avoidance():
               len(app) == 8 and set(app.values()) == {7}, dict(app))
 
 
+
+async def check_read_query_budget():
+    """读接口的 SQL 条数上限（防 selectin 级联回归）。
+
+    为什么只有真库能测：这是**加载策略**的问题 —— `User` / `Tournament` / `Round` /
+    `RoundPairing` / `Court` 的集合关系都是 `lazy="selectin"`，一旦哪个读接口漏了
+    `noload`，一次请求就会顺藤摸瓜把整棵对象图拉一遍。曾经实测 `/rounds`（7 轮 14 场）
+    跑出 **136 条** SQL、本地 95ms（线上经 frp 转发被放大到 580ms 才被用户发现）。
+    修好后是 12 条 / 14ms。
+
+    这里只卡上限（< 30 条），不钉具体数字：以后加字段、加关联允许小波动，
+    但不允许回到"一条链拉整棵树"的老路。
+    """
+    print("\n13) 读接口的 SQL 条数（防 selectin 级联）")
+    from sqlalchemy import event
+    from app.api.matches import list_rounds
+    from app.core.database import engine
+
+    admin, ids = await mk_users("perf", 8)
+    tid = await seed_ongoing(admin, ids, total=14, played_rounds=0)
+
+    counter = {"n": 0}
+
+    def _count_selects(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            counter["n"] += 1
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _count_selects)
+    try:
+        async with Session() as s:
+            user = await s.get(User, admin)     # 取用户本身不计入（各接口都是 FastAPI 依赖注入的）
+            counter["n"] = 0
+            rounds = await list_rounds(tournament_id=tid, db=s, user=user)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _count_selects)
+
+    payload_ok = bool(rounds) and bool(rounds[0].matches) and bool(
+        rounds[0].matches[0].pairing_a.player_a.username
+    )
+    check("赛程接口数据完整（noload 没把要用的字段关掉）", payload_ok, len(rounds) if rounds else 0)
+    check("赛程接口的 SQL 条数 < 30（曾因 selectin 级联涨到 136）",
+          counter["n"] < 30, f'{counter["n"]} 条 SQL')
+
 async def main() -> int:
     global Session
     parser = argparse.ArgumentParser(description="赛程/账号不变量检查（需一次性试点库）")
@@ -959,6 +1002,7 @@ async def main() -> int:
     await check_start_shuffle()
     await check_in_event_opponent_balance()
     await check_referee_balance()
+    await check_read_query_budget()
 
     await engine.dispose()
     print(f"\n共 {len(FAILED)} 项失败" + (f"：{FAILED}" if FAILED else "，全部通过 ✓"))

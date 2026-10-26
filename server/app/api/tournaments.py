@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
-from app.core.security import require_user
+from app.core.security import require_user, _auth_user_loads
 from app.core.audit import audit, get_client_ip
 from app.models.user import User
 from app.models.round import Match, MatchStatus
@@ -251,7 +251,9 @@ async def _create_tournament(
             raise HTTPException(status_code=403, detail="只有管理员可以预选参赛人员")
         if len(preselected) > data.max_participants:
             raise HTTPException(status_code=400, detail="预选人数超过最大人数")
-        users_result = await db.execute(select(User).where(User.id.in_(preselected)))
+        users_result = await db.execute(
+            select(User).where(User.id.in_(preselected)).options(*_auth_user_loads())
+        )
         found_users = users_result.scalars().all()
         found_ids = {u.id for u in found_users}
         missing = [uid for uid in preselected if uid not in found_ids]

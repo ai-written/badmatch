@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
-from app.core.security import require_user
+from app.core.security import require_user, _auth_user_loads
 from app.core.audit import audit, get_client_ip
 from app.api.matches import load_writable_tournament
 from app.api.engine_api import _active_player_ids
@@ -269,7 +269,9 @@ async def auto_assign_referees(
         return {"ok": True, "scope": scope, "assigned": [], "skipped": [],
                 "message": f"第 {no_of(already_ok)} 场已有裁判，无需再次分配"}
 
-    u_res = await db.execute(select(User).where(User.id.in_({uid for _m, uid in picks})))
+    u_res = await db.execute(
+        select(User).where(User.id.in_({uid for _m, uid in picks})).options(*_auth_user_loads())
+    )
     users_map = {u.id: u for u in u_res.scalars().all()}
 
     assigned = []
