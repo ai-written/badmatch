@@ -52,8 +52,8 @@ def _brief_loads() -> tuple:
     return _brief_loads_cache
 
 
-# 访问策略：本站是邀请制的封闭群，除积分榜（唯一对外的只读展示面）外，
-# 赛事列表/详情/报名名单/战绩/比分这些读取接口都要求登录。
+# 访问策略：本站是邀请制的封闭群，赛事列表/详情/报名名单/战绩/比分/积分榜
+# 这些读取接口全部要求登录（没有任何匿名的赛事读取接口）。
 # 前端路由守卫只是把人引到登录页，真正的边界在这里——直接调接口的人绕不过去。
 @router.get("", response_model=TournamentListOut)
 async def list_tournaments(

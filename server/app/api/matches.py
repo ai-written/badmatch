@@ -56,8 +56,7 @@ async def load_writable_tournament(db: AsyncSession, tournament_id: int) -> Tour
     return tournament
 
 
-# 读取接口统一要求登录：对阵/单场/应援票数都不再匿名可读
-# （唯一例外的公开读取是积分榜，见 rankings.py）。写操作的边界不受影响。
+# 读取接口统一要求登录：对阵/单场/应援票数/积分榜都不再匿名可读。写操作的边界不受影响。
 @router.get("/rounds", response_model=list[RoundOut])
 async def list_rounds(
     tournament_id: int,

@@ -71,8 +71,8 @@ export function useWebSocket(tournamentId: number | null) {
 
   async function connect() {
     if (!tournamentId || disposed) return
-    // 未登录就别连了：实时推送本来就要鉴权（服务端 4401），匿名访问公开页面
-    // （积分榜/对阵表/赛事详情都是可匿名读的）时反复去换票据只会一直收 401。
+    // 未登录就别连了：实时推送本来就要鉴权（服务端 4401），没有登录态时反复去换票据
+    // 只会一直收 401（现在所有赛事页面都要求登录，积分榜也不例外）。
     if (!hasToken() || authFailed) return
     // 已有一个正在连接或已连接的实例时不要重复创建
     if (ws.value && (ws.value.readyState === WebSocket.CONNECTING || ws.value.readyState === WebSocket.OPEN)) {

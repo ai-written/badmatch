@@ -1,18 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 /**
- * 访问策略：除标注 `meta.public` 的四处入口外，所有页面都要求登录。
+ * 访问策略：除标注 `meta.public` 的**三处**入口外，所有页面都要求登录。
  *
- * 这里只是"把人引到登录页"的体验层——真正的边界在后端：除积分榜外，
- * 赛事列表/详情/报名名单/对阵/单场/战绩这些读取接口都要求登录（见 server/app/api/），
- * 只靠前端守卫挡不住直接调接口的人。
+ * 这里只是"把人引到登录页"的体验层——真正的边界在后端：除这几次登录相关入口外，
+ * 赛事列表/详情/报名名单/对阵/单场/战绩/积分榜这些读取接口都要求登录
+ * （见 server/app/api/），只靠前端守卫挡不住直接调接口的人。
  *
- * 保留匿名的四处，少一个就会死锁或功能不可用：
+ * 保留匿名的三处，少一个就会死锁或功能不可用：
  * - /profile                 登录注册页，也是邀请链接的落地页（?invite=邀请码）
  * - /forgot-password         忘记密码入口（走到这里时必然没有登录态）
  * - /reset-password          邮件里的重置链接，令牌在 # 里，打开时本来就没登录态
- * - /tournament/:id/rankings 积分榜：只读、无隐私，是这个封闭群唯一对外的展示面
- *                            （分享图也是从这里生成的），刻意留公开
+ *
+ * 积分榜（/tournament/:id/rankings）原本是公开的只读展示面，现已改为**需要登录**：
+ * 本站是邀请制的封闭群，赛外任何人拿到链接都能看全部选手的姓名与战绩并不合适。
+ * 分享图仍然是本地 canvas 画出来的 PNG，发到群里照样能看（图片不涉及登录）。
  */
 const router = createRouter({
   history: createWebHistory(),
@@ -20,7 +22,7 @@ const router = createRouter({
     { path: '/', name: 'home', component: () => import('@/views/HomeView.vue') },
     { path: '/tournament/:id', name: 'tournament', component: () => import('@/views/TournamentDetail.vue') },
     { path: '/tournament/:id/schedule', name: 'schedule', component: () => import('@/views/ScheduleView.vue') },
-    { path: '/tournament/:id/rankings', name: 'rankings', component: () => import('@/views/RankingsView.vue'), meta: { public: true } },
+    { path: '/tournament/:id/rankings', name: 'rankings', component: () => import('@/views/RankingsView.vue') },
     { path: '/tournament/:id/score/:matchId', name: 'score', component: () => import('@/views/ScoreView.vue') },
     { path: '/create', name: 'create', component: () => import('@/views/CreateTournament.vue') },
     // 编辑赛事：与创建复用同一个表单页（只是初始值与提交的接口不同）。

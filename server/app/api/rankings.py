@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
+from app.core.security import require_user
 from app.models.tournament import Tournament, PlayerStats
 from app.models.user import User
 from app.schemas.ranking import PlayerRanking, RankingResponse
@@ -13,6 +14,10 @@ router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["rankings"])
 async def get_rankings(
     tournament_id: int,
     db: AsyncSession = Depends(get_db),
+    # 以前这是全站唯一的匿名只读接口（积分榜曾被当成"对外展示面"）。现在改成与其它
+    # 读取接口一致：本站是邀请制封闭群，匿名不该看到选手姓名与战绩。
+    # 分享图不受影响 —— 那是前端 canvas 画的 PNG，登录后生成、发到群里照样能看。
+    user: User = Depends(require_user),
 ):
     t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
     tournament = t.scalar_one_or_none()
