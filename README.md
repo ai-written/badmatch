@@ -162,7 +162,12 @@ docker compose -f docker-compose.prod.yml up -d
 ### 门卫层防护（nginx）
 
 - **拦扫描器**：`/.env`、`/.git`、`/wp-admin`、`/phpmyadmin` 等常见探测路径直接
-  `return 444` 且 `access_log off`（僵尸网络每天都会扫这些，以前每一条都会打到后端再回 404）
+  `return 444`，**不再打到后端**（以前每一条都会进应用、再回 404）。
+  命中仍然**记录**，但走单独的日志格式（`blocked=1` 标记），方便事后查"谁在扫"：
+  ```bash
+  docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'
+  ```
+  这些请求被 nginx 断在门口，所以管理面板「访问日志」里依然是干净的
 - **按 IP 限流**：`/` 与 `/api/` 都是 30r/s，`/api/` 带 `burst=200`、`/` 带 `burst=120`，
   一律 `nodelay` —— 超限**直接 429**（回 JSON `{"detail":"操作太频繁，请稍候再试"}`，
   前端会弹出来），不排队（排队才会让正常用户觉得卡）。
