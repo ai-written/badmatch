@@ -2,6 +2,7 @@ import os, re, secrets, uuid, logging, json, asyncio
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update, text
+from sqlalchemy.orm import lazyload
 from sqlalchemy.exc import IntegrityError
 from app.core.database import get_db
 from app.core.security import (
@@ -960,11 +961,14 @@ async def _transfer_ownership_from(db: AsyncSession, user_id: int) -> int:
         Registration, Tournament, TournamentStatus, PlayerStats,
     )
 
+    # 要读 t.status 并回写 creator_id，所以取整行；但必须 lazyload("*")：
+    # 不关掉的话 Tournament 的 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）会跟着每个
+    # 赛事各拉一遍 —— 禁用账号时按赛事条数成倍放大
     rows = await db.execute(
         select(Tournament).where(
             Tournament.creator_id == user_id,
             Tournament.status.in_([TournamentStatus.OPEN, TournamentStatus.ONGOING]),
-        )
+        ).options(lazyload("*"))
     )
     moved = 0
     for t in rows.scalars().all():
@@ -1191,7 +1195,7 @@ async def delete_user(
     from app.models.round import Match, MatchSupport, Notification, RoundPairing
 
     created = await db.execute(
-        select(Tournament).where(Tournament.creator_id == user.id).limit(1)
+        select(Tournament.id).where(Tournament.creator_id == user.id).limit(1)
     )
     if created.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该用户创建过赛事，请先删除其赛事")

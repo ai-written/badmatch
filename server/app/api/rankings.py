@@ -19,9 +19,13 @@ async def get_rankings(
     # 分享图不受影响 —— 那是前端 canvas 画的 PNG，登录后生成、发到群里照样能看。
     user: User = Depends(require_user),
 ):
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
-    tournament = t.scalar_one_or_none()
-    if not tournament:
+    # 只取「存在 + 标题」两列：整行 Tournament 会把它的 5 个 selectin 集合
+    # （报名/场地/轮次/比赛/战绩）连带拉回来，而这里一个都用不上
+    t = await db.execute(
+        select(Tournament.id, Tournament.title).where(Tournament.id == tournament_id)
+    )
+    row = t.first()
+    if row is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="赛事不存在")
 
@@ -61,6 +65,6 @@ async def get_rankings(
 
     return RankingResponse(
         tournament_id=tournament_id,
-        tournament_title=tournament.title,
+        tournament_title=row.title,
         rankings=rankings,
     )

@@ -515,7 +515,7 @@ async def update_tournament(
     # 再数人数、再插报名」，这里也锁着数，才不会出现「第 6 人正在报名 vs 同时把上限
     # 改成 5」这种交叉提交（两边各自读到的都是旧数据，最终落成 6/5）。
     result = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads()).with_for_update()
     )
     t = result.scalar_one_or_none()
     if not t:
@@ -597,7 +597,7 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads()).with_for_update()
     )
     t = result.scalar_one_or_none()
     if not t:
@@ -656,7 +656,7 @@ async def cancel_register(
     db: AsyncSession = Depends(get_db),
 ):
     t_result = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads()).with_for_update()
     )
     t = t_result.scalar_one_or_none()
     if not t:

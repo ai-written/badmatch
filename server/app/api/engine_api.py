@@ -7,7 +7,8 @@ from collections import Counter
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, func, delete
+from sqlalchemy.orm import lazyload
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
@@ -54,7 +55,10 @@ async def start_tournament(
 ):
     # 行级锁：并发退赛时串行化读取-修改-写入，避免房主转让被后提交的事务覆盖丢失
     t = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id)
+        # 只要赛事自己的列：整行会把 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）一起拉回来，
+        # 而这些写路径（开赛/加赛/重排/退赛/结束）全都不看它们
+        .options(lazyload('*')).with_for_update()
     )
     tournament = t.scalar_one_or_none()
     if not tournament:
@@ -364,7 +368,9 @@ async def extra_match_options(
     约束是"每人新增场次相同"：追加数只能是 fairness_step(N) 的倍数。
     可选项由服务端算、前端只负责展示，免得「界面能选、提交却被接口拒」。
     """
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
+    t = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).options(lazyload('*'))
+    )
     tournament = t.scalar_one_or_none()
     if not tournament:
         raise HTTPException(status_code=404, detail="赛事不存在")
@@ -418,7 +424,10 @@ async def add_matches(
     只追加、不动已有比赛：新比赛接在最后一个轮次之后，没开打的旧轮次原样保留。
     """
     t = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id)
+        # 只要赛事自己的列：整行会把 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）一起拉回来，
+        # 而这些写路径（开赛/加赛/重排/退赛/结束）全都不看它们
+        .options(lazyload('*')).with_for_update()
     )
     tournament = t.scalar_one_or_none()
     if not tournament:
@@ -559,7 +568,10 @@ async def reschedule_schedule(
     RECENT_EVENT_HISTORY）都算"用过的"，新的一份尽量避开它们。
     """
     t = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id)
+        # 只要赛事自己的列：整行会把 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）一起拉回来，
+        # 而这些写路径（开赛/加赛/重排/退赛/结束）全都不看它们
+        .options(lazyload('*')).with_for_update()
     )
     tournament = t.scalar_one_or_none()
     if not tournament:
@@ -736,7 +748,10 @@ async def withdraw_player(
     db: AsyncSession = Depends(get_db),
 ):
     t = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id)
+        # 只要赛事自己的列：整行会把 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）一起拉回来，
+        # 而这些写路径（开赛/加赛/重排/退赛/结束）全都不看它们
+        .options(lazyload('*')).with_for_update()
     )
     tournament = t.scalar_one_or_none()
     if not tournament:
@@ -1051,7 +1066,10 @@ async def end_tournament(
     # 结果是两条 tournament_end 审计（一条 title、一条 auto）+ 两次广播。
     # 同时也与正在记分的请求（它们持赛事的 FOR SHARE 锁）互斥，保证不会改到一半就被结束。
     t = await db.execute(
-        select(Tournament).where(Tournament.id == tournament_id).with_for_update()
+        select(Tournament).where(Tournament.id == tournament_id)
+        # 只要赛事自己的列：整行会把 5 个 selectin 集合（报名/场地/轮次/比赛/战绩）一起拉回来，
+        # 而这些写路径（开赛/加赛/重排/退赛/结束）全都不看它们
+        .options(lazyload('*')).with_for_update()
     )
     tournament = t.scalar_one_or_none()
     if not tournament:

@@ -940,12 +940,28 @@ async def check_read_query_budget():
         if statement.lstrip().upper().startswith("SELECT"):
             counter["n"] += 1
 
+    # 一次装好计数器，把几个"首屏/轮询"接口都量一遍：
+    # 这些是用户每天反复打开的页面，SQL 条数一旦退化成"拉整棵树"，体感立刻变慢。
+    from app.api.matches import get_match
+    from app.api.rankings import get_rankings
+
     event.listen(engine.sync_engine, "before_cursor_execute", _count_selects)
     try:
         async with Session() as s:
             user = await s.get(User, admin)     # 取用户本身不计入（各接口都是 FastAPI 依赖注入的）
+
             counter["n"] = 0
             rounds = await list_rounds(tournament_id=tid, db=s, user=user)
+            n_rounds = counter["n"]
+            first_match_id = rounds[0].matches[0].id
+
+            counter["n"] = 0
+            one = await get_match(tournament_id=tid, match_id=first_match_id, db=s, user=user)
+            n_match = counter["n"]
+
+            counter["n"] = 0
+            ranking = await get_rankings(tournament_id=tid, db=s, user=user)
+            n_rankings = counter["n"]
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", _count_selects)
 
@@ -953,8 +969,13 @@ async def check_read_query_budget():
         rounds[0].matches[0].pairing_a.player_a.username
     )
     check("赛程接口数据完整（noload 没把要用的字段关掉）", payload_ok, len(rounds) if rounds else 0)
-    check("赛程接口的 SQL 条数 < 30（曾因 selectin 级联涨到 136）",
-          counter["n"] < 30, f'{counter["n"]} 条 SQL')
+    check("赛程接口的 SQL 条数 < 30（曾因 selectin 级联涨到 136）", n_rounds < 30, f"{n_rounds} 条 SQL")
+    check("记分页单场数据完整（选手都在）",
+          bool(one.pairing_a.player_a.username) and bool(one.pairing_b.player_b.username), one.id)
+    check("记分页单场的 SQL 条数 < 20（整行 Tournament 会白拉 9 条）", n_match < 20, f"{n_match} 条 SQL")
+    check("积分榜的 SQL 条数 < 10（整行 Tournament 会白拉 9 条）", n_rankings < 10, f"{n_rankings} 条 SQL")
+    check("积分榜内容正常", ranking.tournament_id == tid, f"{len(ranking.rankings)} 人")
+
 
 async def main() -> int:
     global Session

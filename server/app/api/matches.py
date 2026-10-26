@@ -180,10 +180,12 @@ async def get_match(
     m = result.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="比赛不存在")
-    # 带上赛事状态，前端据此决定是否只读
-    t = await db.execute(select(Tournament).where(Tournament.id == tournament_id))
-    tournament = t.scalar_one_or_none()
-    return await _build_match_out(m, db, user, tournament.status.value if tournament else None)
+    # 带上赛事状态，前端据此决定是否只读。
+    # 只取 status 一列：整行 Tournament 会连带把它的 5 个 selectin 集合
+    # （报名/场地/轮次/比赛/战绩）拉一遍 —— 记分页每 30s 刷新一次，白付 9 条查询
+    t = await db.execute(select(Tournament.status).where(Tournament.id == tournament_id))
+    t_status = t.scalar_one_or_none()
+    return await _build_match_out(m, db, user, t_status.value if t_status else None)
 
 
 @router.put("/matches/{match_id}/score")

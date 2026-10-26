@@ -522,12 +522,14 @@ docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'   # 扫
 - **API ETag**：GET 响应带弱 ETag + `Cache-Control: private, no-cache`，内容未变时返回 304，重复访问只传协商头
 - **压缩**：nginx gzip 已开启；走 Cloudflare 代理时边缘自动提供 Brotli
 - **生产单进程**：镜像默认不带 `--reload`（开发环境由 dev compose 覆盖为 `--reload` 热重载）；WebSocket 广播为进程内单例，故不使用 `--workers` 多进程，避免丢广播
-- **读接口不做 ORM 级联**：`User` 的 4 个集合关系、以及 `Tournament`/`Round`/`RoundPairing`/`Court`
+- **读接口不做 ORM 级联**：`User` 的 4 个集合关系、以及 `Tournament` / `Round` / `RoundPairing` / `Court`
   的集合关系都是 `lazy="selectin"`，读接口不显式 `noload` 就会"顺藤摸瓜"把整棵对象图拉一遍。
-  鉴权（`require_user`）、`/rounds`、`/admin/users`、预选校验等处都已加上 `noload`：
-  实测一次 `/tournaments/{id}/rounds`（7 轮 14 场）从 **136 条 SQL / 95ms** 降到 **12 条 / 14ms**，
-  `/admin/users`（9 个用户）从 ~126 条降到 2 条。`scripts/check_engine_invariants.py` 里加了
-  "SQL 条数 < 30" 的守卫，防止以后又退回去
+  鉴权（`require_user`）、`/rounds`、`/matches/{id}`、`/rankings`、`/admin/users`、预选校验，
+  以及引擎的写路径（开赛/加赛/重排/退赛/结束）都已加上 `noload` / `lazyload("*")` 或只取用到的列。
+  实测：`/rounds`（7 轮 14 场）**136→12** 条 SQL（95ms→14ms）、`/matches/{id}` **16→7**、
+  `/rankings` **11→2**、`/admin/users`（9 人）**~126→2**、`/auth/me` **15→1**。
+  `scripts/check_engine_invariants.py` 第 13 组卡住了上限（赛程 <30、单场 <20、积分榜 <10），
+  防止以后又退回去
 
 ### 存量头像压缩
 
