@@ -58,10 +58,12 @@ services:
 
   client:
     image: hsiangleev/badmatch:client-latest
-    # 全站只对外暴露这一个端口（${PORT}）；server 与 db 都不发布到宿主机。
-    # 安全组也只应放行这一个（以及你要用的 443，如果前面加 TLS 代理）。
+    # 只绑回环：本机（frpc / 宿主 nginx）回源访问，公网由腾讯云那侧的 frps 暴露。
+    # 不绑回环的话，同内网/公网能直连到这个端口 —— 而 nginx 现在只认 PROXY protocol，
+    # 直连会被拒（400），同时也失去了"来源只能来自 frpc"这层保护。
+    # 全站只有这一个端口对外（server 8000、db 5432 都不发布）。
     ports:
-      - "${PORT:-80}:80"
+      - "127.0.0.1:${PORT:-80}:80"
     environment:
       TZ: Asia/Shanghai
     depends_on:
