@@ -22,6 +22,7 @@
  *  13 赛事详情：一次性分配裁判（在场选手能点、已退赛/路人不能点、管理者仍然可以）
  *  14 记分页：弱网下「慢 GET 带回旧比分」不会把刚点的分覆盖回去（点了 3 不跳回 2）
  *  15 记分页：两台设备同时记分不丢分（服务端 409 乐观锁 + 客户端增量重试）
+ *  16 访问控制：未登录访问积分榜 → 登录页（并记住原目标）；登录后正常打开
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1884,8 +1885,39 @@ async function scenarioScoreOptimisticLock(page) {
   assert('最终 5 分', (await leftScore()) === '5', await leftScore())
 }
 
+/** 场景 16：访问控制 —— 未登录访问需要登录的页面（以积分榜为例）会被带去登录页并记住原目标 */
+async function scenarioAuthGuard(page) {
+  console.log('16) 访问控制：未登录访问积分榜 → 登录页；登录后正常打开')
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) {
+      return { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+    }
+    if (/\/rankings$/.test(path)) return { tournament_id: 2, tournament_title: 'T', rankings: [] }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  // 先随便落地一次才能操作 localStorage；清完就是"未登录"状态
+  await page.goto('/', 1600)
+  await page.ev(`localStorage.clear(); sessionStorage.clear(); true`)
+  await page.goto('/tournament/2/rankings', 1800)
+  assert('未登录访问积分榜 → 跳登录页',
+    (await page.ev('location.pathname')) === '/profile', await page.ev('location.pathname'))
+  assert('记下了原目标（登录后能回跳）',
+    (await page.ev(`sessionStorage.getItem('loginRedirect')`)) === '/tournament/2/rankings',
+    String(await page.ev(`sessionStorage.getItem('loginRedirect')`)))
+
+  // 带上 token 再访问：正常渲染（积分榜不再匿名，但登录用户一切照旧）
+  await page.ev(`localStorage.setItem('token','mock'); true`)
+  await page.goto('/tournament/2/rankings', 2200)
+  assert('登录后能正常打开积分榜',
+    (await page.ev('location.pathname')) === '/tournament/2/rankings', await page.ev('location.pathname'))
+  const title = await page.ev(`(document.querySelector('.van-nav-bar__title')?.textContent || '').trim()`)
+  assert('页面标题是「积分榜」', title === '积分榜', title)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)
