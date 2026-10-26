@@ -34,17 +34,17 @@ docker compose -f docker-compose.prod.yml up -d
 访问 `http://localhost`（端口由 `.env` 中 `PORT` 控制，默认 80）
 
 > **对外只暴露一个端口，且 client 端口只绑回环**：`docker-compose.prod.yml` 里
-> `client` 是 `127.0.0.1:${PORT}:80`（公网入口交给 frp 那侧的 frps），`server`（8000）
+> `client` 是 `127.0.0.1:${PORT}:80`（公网入口是云服务器上的 Caddy + frp 隧道），`server`（8000）
 > 与 `db`（5432）都不发布到宿主机，只在 compose 网络内互通。云主机上安全组只放行
-> frps 对外那个端口（和你要用的 443）。
+> Caddy 用的 80/443。
 > 早先的 compose 把 5432 发布了出来，配合默认口令 `badminton` 等于把库挂在公网上，现已移除；
 > 要本机连库调试用
 > `docker compose -f docker-compose.prod.yml exec db psql -U badminton -d badminton`。
 >
-> **真实客户端 IP 靠 frp 的 PROXY protocol 传递**（`nginx.conf` 的 `listen 80 proxy_protocol`），
-> 内网机器上的 frpc 必须开 `proxy_protocol_version`——否则日志里全是 `172.27.0.1`，
-> 按 IP 的限流会把所有人当成同一个人。**不需要改 Docker 的 daemon.json**。
-> 详见下文「真实客户端 IP（frp 反代）」。
+> **真实客户端 IP 靠 Caddy 写的 `X-Forwarded-For`**（`nginx.conf` 用
+> `real_ip_header X-Forwarded-For`）—— frp 只是 TCP 隧道，走 PROXY protocol 时头里只会是
+> Caddy 自己的 `127.0.0.1`。**不需要改 Docker 的 daemon.json**，frpc 也不要配 `proxyProtocolVersion`。
+> 详见下文「真实客户端 IP（Caddy 域名出口 + frp 隧道）」。
 >
 > ⚠️ **`docker-compose.prod.yml` 与 `client/nginx.conf` 不在 Docker 镜像里**：升级时除了
 > `pull` 新镜像，还要把仓库里这两个文件同步到服务器（nginx.conf 在 client 镜像内，
@@ -112,57 +112,62 @@ docker compose -f docker-compose.prod.yml up -d
   - 走 Cloudflare 时需**同时**设置 `TRUST_CF_CONNECTING_IP=true`，否则限流会按 Cloudflare/nginx 的 IP 计数
 - **token 版本号机制**：登出、修改密码、管理员重置密码都会使该用户所有 token 立即失效，并主动断开其全部 WebSocket 连接；升级/重启后旧 token 按版本 0 兼容处理，**已登录用户无需重新登录**
 
-### 真实客户端 IP（frp 反代）
+### 真实客户端 IP（Caddy 域名出口 + frp 隧道）
 
-**当前拓扑**：服务跑在内网机器上，公网入口是腾讯云的 frps：
+**当前拓扑**：服务跑在内网机器上，公网入口是腾讯云机器上的 Caddy（域名 + 自动 HTTPS）：
 
 ```
-浏览器 → frps(腾讯云公网:remote_port) → frp 隧道 → frpc(内网机器)
-      → 127.0.0.1:${PORT}（client 容器发布在回环）→ nginx → server
+浏览器 → Caddy(云服务器 :443，终止 TLS) → 127.0.0.1:19352（frps 的 remotePort）
+      → frp 隧道 → frpc(内网机器) → 127.0.0.1:${PORT} → client(nginx) → server
 ```
 
-frpc 是**从宿主机回源**的，所以容器看到的 `$remote_addr` 只会是 Docker 网桥网关
-（`172.27.0.1`）。真实 IP 必须由 frp **带过来** —— 这就是 `nginx.conf` 用
-`listen 80 proxy_protocol` 的原因：frpc 开 `proxy_protocol_version` 后，连接一开始就发一个
-PROXY protocol 头（里面是真实客户端 IP/端口），nginx 读它作为 `$remote_addr`，再以覆盖式
-`X-Real-IP` 转给后端（后端 `TRUST_PROXY_HEADERS=true` 时采信）。
+真实 IP **只能从头里取**，不能用 PROXY protocol：
 
-**frpc 配置（内网机器）**：
+- **Caddy 是 HTTP 反代**，`reverse_proxy` 默认就会写 `X-Forwarded-For`（以真实客户端为准）；
+- **frp 是 TCP 隧道**，frps 收到的访客其实是本机的 Caddy（`127.0.0.1`）—— 所以即便 frpc 发
+  PROXY 头，头里也只有 `127.0.0.1`（这就是曾经"日志里全是 127.0.0.1"的原因）。
 
-```ini
-[badmatch-web]
-type = tcp
-local_ip = 127.0.0.1
-local_port = 80            ; 与 compose 里绑定回环的 ${PORT} 一致
-remote_port = 8080         ; 腾讯云上对外暴露的端口（安全组只放行它）
-proxy_protocol_version = v2   ; 老版本 frp 写 v1 也行，nginx 两种都认
+因此 `nginx.conf` 用 `real_ip_header X-Forwarded-For`（默认取**最后一个**地址，即 Caddy 写入的
+真实 IP），再以覆盖式 `X-Real-IP` 转给后端；后端 `TRUST_PROXY_HEADERS=true` 时采信它。
+
+**Caddyfile 不用改**（默认行为就够）：
+
+```caddyfile
+aiwanyushe.hsianglee.cn {
+	reverse_proxy localhost:19352
+}
 ```
 
-**必须同时满足**（否则拿不到真实 IP，或被拒）：
+**必须同时满足**：
 
 | 要求 | 为什么 |
 |---|---|
-| frpc 开 `proxy_protocol_version` | 不开就不发 PROXY 头，nginx 会直接关连接（`listen` 已要求它） |
-| `client` 端口绑 `127.0.0.1`（compose 已默认） | 只允许本机的 frpc 回源；否则别人直连端口既会 400，也失去"来源只能来自 frpc"这层保护 |
-| 信任段只留内网/回环（`nginx.conf` 已配） | 只有从网桥/内网来的连接才被采信 PROXY 头，防伪造 |
+| `client` 端口绑 `127.0.0.1`（compose 已默认） | 只有本机的 frpc 能回源；外网直连不到，伪造 `X-Forwarded-For` 也就进不来 |
+| frpc **不要**配 `transport.proxyProtocolVersion` | 配了会发 PROXY 头，而本 nginx 是普通 `listen 80`，会直接拒收（400/断连） |
+| 云服务器上 `frps.toml` 加 `proxyBindAddr = "127.0.0.1"` | 让 `remotePort`(19352) 只监听回环，只有 Caddy 能连；否则公网可绕过 Caddy 直连隧道并自带伪造的 XFF。安全组也不要放行 19352 |
+| 信任段只留内网/回环（`nginx.conf` 已配） | 只有从网桥/回环来的连接才采信 XFF |
 
-> **不需要改 Docker 的 `daemon.json`**（userland-proxy 那条只对"公网 IP 直连容器"有用；
-> 走 frp + PROXY protocol 时，真实 IP 靠头传递，源地址被改写也不影响）。
+> **不需要改 Docker 的 `daemon.json`**（那条只对"公网 IP 直连容器"有用）。
 >
-> ⚠️ 踩过的坑：换 IP 之前，**所有人共用一个 `172.27.0.1`** —— 不只是日志难看：
-> 按 IP 的限流会「连坐」（`login_ip_limiter` 是 30 次失败/10 分钟，任何人刷 30 次失败登录
-> 就能让整群人登不上），审计也查不到来源。
+> ⚠️ 踩过的坑：修好之前**所有人共用一个 IP**（先是 `172.27.0.1`，端口绑回环后变成
+> `127.0.0.1`）—— 不只是日志难看：按 IP 的限流会「连坐」（`login_ip_limiter` 是
+> 30 次失败/10 分钟，任何人刷 30 次失败登录就能让整群人登不上），审计也查不到来源。
 
 **验证**（发一次请求后看管理面板「访问日志」的 `ip`，或）：
 
 ```bash
-docker compose -f docker-compose.prod.yml logs client | tail -5    # 每行开头的 IP 应是公网访客 IP
+docker compose -f docker-compose.prod.yml logs client | tail -5            # 行首 IP 应是访客公网 IP
 docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'   # 扫描命中，也带真实 IP
 ```
 
-**换其它拓扑时**改 `nginx.conf` 顶部那三行即可（`listen` + `set_real_ip_from` + `real_ip_header`）：
-公网 IP 直连容器 → `listen 80;` 并删掉 realip；前置代理写 `X-Real-IP` / `X-Forwarded-For`
-→ `listen 80;` + 对应的 `real_ip_header`。
+**换其它拓扑时**只改 `nginx.conf` 顶部那三行（`listen` + `set_real_ip_from` + `real_ip_header`）：
+
+| 拓扑 | 改法 |
+|---|---|
+| 公网 IP 直连容器（无代理） | `listen 80;` + 删掉 realip 三行；宿主 `daemon.json` 加 `"userland-proxy": false` |
+| 前置 nginx / CLB 写 `X-Real-IP` | `listen 80;` + `real_ip_header X-Real-IP;` |
+| Cloudflare 代理/Tunnel | `listen 80;` + `real_ip_header CF-Connecting-IP;` + 只信任 CF 网段 |
+| frp 直连访客（没有 Caddy，浏览器直接访问 frps 的 remotePort） | `listen 80 proxy_protocol;` + `real_ip_header proxy_protocol;` + frpc 配 `transport.proxyProtocolVersion = "v2"` |
 
 ### Cloudflare 部署（可选）
 
@@ -170,7 +175,7 @@ docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'   # 扫
 
 - 服务器**无需公网 IP、无需开放任何入站端口**：`cloudflared` 主动出站连接 Cloudflare，回源 HTTP
 - 浏览器侧 HTTPS 和 HTTP/2 由 Cloudflare 提供，服务器**无需配置证书/443**
-- **需要把 `nginx.conf` 顶部的 `listen` 改回 `listen 80;`，并配上 realip**：Tunnel 是从宿主机回源的，
+- **需要把 `nginx.conf` 顶部改成 Cloudflare 那套 realip**：Tunnel 是从宿主机回源的，
   容器看到的 `$remote_addr` 是 Docker 网桥网关，必须信任该网关地址并用
   `real_ip_header CF-Connecting-IP` 还原；随后 nginx 以覆盖式 `X-Real-IP` 转发，
   后端只需 `TRUST_PROXY_HEADERS=true`（prod compose 默认即是），**不必**开
@@ -182,13 +187,14 @@ docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'   # 扫
 
 - Cloudflare 面板 **SSL/TLS 模式保持 Flexible**（回源 HTTP）；若设为 Full/Full(strict) 会回源 TLS 失败（521/525）
 - ⚠️ 防火墙/安全组**只放行 Cloudflare IP 段**（https://www.cloudflare.com/ips/ ），否则直连可伪造 `CF-Connecting-IP`
-- 真实客户端 IP：`nginx.conf` 改成 `listen 80;` + `real_ip_header CF-Connecting-IP` + 只信任 CF 网段
-  （不要信任私有网段），后端仍是 `TRUST_PROXY_HEADERS=true`
+- 真实客户端 IP：把 `nginx.conf` 的 `real_ip_header` 改成 `CF-Connecting-IP`（`listen 80;` 保持不变），
+  信任段只留 CF 网段（不要信任私有网段），后端仍是 `TRUST_PROXY_HEADERS=true`
 
-**场景 C：公网 IP 直连容器（没有 frp / 没有其它代理）**
+**场景 C：公网 IP 直连容器（没有 Caddy / frp / 其它代理）**
 
-- 需要把 `nginx.conf` 改回 `listen 80;` 并删掉那三行 realip（因为默认配置是按 frp +
-  PROXY protocol 写的）；`client` 端口也要从 `127.0.0.1:...` 改成对外发布
+- 默认配置就是 `listen 80;`，只需**删掉那三行 realip**（`set_real_ip_from ...` +
+  `real_ip_header`）：没有代理时 `$remote_addr` 本来就是访客公网 IP；
+  `client` 端口也要从 `127.0.0.1:...` 改成对外发布
 - nginx 会用 `$remote_addr` 覆盖式写入 `X-Real-IP`，因此 `TRUST_PROXY_HEADERS=true` 即可拿到真实客户端 IP
 - ⚠️ 还要在宿主机 `/etc/docker/daemon.json` 里加 `{ "userland-proxy": false }` 并重启 Docker，
   否则 Docker 的用户态转发会把源地址改写成网桥网关（`172.27.0.1`）
