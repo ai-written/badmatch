@@ -767,6 +767,7 @@ async def list_access_logs(
     method: str | None = None,
     path: str | None = None,
     status: int | None = None,
+    exclude_self: bool = False,
     page: int = 1,
     page_size: int = 20,
     admin: User = Depends(require_user),
@@ -775,6 +776,9 @@ async def list_access_logs(
     """访问日志查询（仅超级管理员）：读取 access.log 文件，按时间倒序分页。
 
     不落库；文件过大时建议挂载卷查看或配置轮转。
+
+    exclude_self=true 时剔除「查询者本人」的访问记录：管理面板自己每翻一页、
+    每开一次详情都会写一条日志，不排除的话翻两页就全被自己刷满了。
     """
     if admin.role != "superadmin":
         raise HTTPException(status_code=403)
@@ -810,6 +814,8 @@ async def list_access_logs(
             continue
         if status is not None and rec.get("status") != status:
             continue
+        if exclude_self and _is_self_access(rec, admin):
+            continue
         items.append(rec)
 
     # 文件是追加写入，按行顺序即时间序；倒序返回（最新在前）
@@ -838,6 +844,25 @@ async def list_access_logs(
         "page": page,
         "page_size": page_size,
     }
+
+
+def _is_self_access(rec: dict, admin: User) -> bool:
+    """这条访问记录是不是「查询者本人」发出来的（访问日志的「排除自己」筛选用）。
+
+    判定以 user_id 为准：它由中间件从 token 里解出，和账号绑定，改名也不影响。
+    只有记录里完全没有 user_id 时（很早以前落盘的行、或中间件修好之前的格式）
+    才退回比 username —— 一旦有 user_id 就不再比名字，否则改过名的历史记录会漏网。
+
+    两样都没有（匿名请求，例如登录前的 401、浏览器的预检）一律算「不是本人」：
+    宁可在结果里多留一条别人的匿名访问，也不要把别人的记录当成本人隐藏掉。
+    """
+    uid = rec.get("user_id")
+    if uid is not None:
+        return str(uid) == str(admin.id)
+    name = rec.get("username")
+    if name:
+        return name == admin.username
+    return False
 
 
 def _read_access_log_lines(path: str, max_bytes: int = 1024 * 1024) -> list[str]:
