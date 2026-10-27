@@ -24,6 +24,7 @@
  *  15 记分页：两台设备同时记分不丢分（服务端 409 乐观锁 + 客户端增量重试）
  *  16 访问控制：未登录访问积分榜 → 登录页（并记住原目标）；登录后正常打开
  *  17 定时报名：创建页带开放时间、未开放时详情页锁定报名、过期后保存自动按立即开放
+ *  18 管理面板：访问日志「排除自己」开关（带 exclude_self=true 重新查询、重置即复位）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -1999,8 +2000,125 @@ async function scenarioScheduledRegistration(page) {
     putBody?.registration_open_at === null, JSON.stringify(putBody?.registration_open_at))
 }
 
+/** 场景 18：管理面板「访问日志」的「排除自己」开关
+ *
+ * 管理面板自己的翻页/看详情请求也会落进 access.log，这条筛选的意义就是「只看别人」。
+ * 守住几个容易出错的地方：
+ *   1. 开关不能只是 UI 状态 —— 必须真的重新查询（否则屏幕上是上一次的结果）
+ *   2. 先改值再查询（顺序错了，第一次查的仍是旧条件）
+ *   3. 参数序列化成 exclude_self=true（而不是 exclude_self=false 之类）
+ *   4. 「重置筛选」要把开关一起关掉
+ */
+async function scenarioAccessLogExcludeSelf(page) {
+  console.log('18) 管理面板：访问日志「排除自己」开关')
+  const me = { id: 1, username: 'root', avatar: '', gender: 'M', role: 'superadmin', invite_code: '' }
+  const rec = (over) => ({
+    time: '2026-10-27T10:00:00+08:00', ip: '1.1.1.1', user_id: null, username: null,
+    method: 'GET', path: '/api/x', query: '', status: 200, duration_ms: 5, ...over,
+  })
+  const selfRec = rec({ user_id: 1, username: 'root', path: '/api/auth/admin/access-logs' })
+  const otherRec = rec({ user_id: 2, username: '张三', path: '/api/tournaments', ip: '2.2.2.2' })
+
+  await page.enableMock((path, entry) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/admin\/(users|selectable-users)$/.test(path)) return []
+    if (/access-logs$/.test(path)) {
+      // 服务端的行为：带 exclude_self=true 才剔除「自己」，这里照此模拟
+      const excludeSelf = /(^|[?&])exclude_self=true(&|$)/.test(entry.search || '')
+      const items = excludeSelf ? [otherRec] : [selfRec, otherRec]
+      return { items, total: items.length, page: 1, page_size: 20 }
+    }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/admin', 2400)
+
+  const openAccessTab = () => page.ev(`(() => {
+    const t = [...document.querySelectorAll('.van-tab')].find(e => (e.textContent || '').trim() === '访问日志')
+    if (!t) return 'NOTAB'
+    t.click(); return 'OK' })()`)
+  const accessReqs = () => page.requests.filter((r) => /access-logs$/.test(r.path))
+  const lastAccessSearch = () => (accessReqs().at(-1)?.search || '')
+  /** 列表里出现了哪些路径（只看记录行，不含筛选控件） */
+  const listedPaths = () => page.ev(`[...document.querySelectorAll('.van-cell__title')]
+    .map(e => (e.textContent || '').trim()).filter(t => t.startsWith('GET ') || t.startsWith('POST '))`)
+  const countText = () => page.ev(`(document.querySelector('.audit-count')?.textContent || '').trim()`)
+  const swState = () => page.ev(`(() => {
+    const c = [...document.querySelectorAll('.van-cell')].find(e => (e.textContent || '').includes('排除自己'))
+    if (!c) return 'NOCELL'
+    const sw = c.querySelector('.van-switch')
+    if (!sw) return 'NOSWITCH'
+    return sw.classList.contains('van-switch--on') ? 'on' : 'off' })()`)
+  const clickSwitch = async () => {
+    const r = await page.ev(`(() => {
+      const c = [...document.querySelectorAll('.van-cell')].find(e => (e.textContent || '').includes('排除自己'))
+      if (!c) return 'NOCELL'
+      const sw = c.querySelector('.van-switch')
+      if (!sw) return 'NOSWITCH'
+      sw.click(); return 'OK' })()`)
+    await sleep(900)
+    return r
+  }
+
+  assert('打开「访问日志」页签', (await openAccessTab()) === 'OK')
+  await sleep(1000)
+  assert('默认不带 exclude_self', !lastAccessSearch().includes('exclude_self'), lastAccessSearch())
+  assert('开关默认关闭', (await swState()) === 'off', String(await swState()))
+  const before = await listedPaths()
+  assert('默认既能看到自己也能看到别人',
+    before.some((t) => t.includes('/api/auth/admin/access-logs')) && before.some((t) => t.includes('/api/tournaments')),
+    JSON.stringify(before))
+
+  // ---- 打开开关：必须带参数重新查询，自己的记录消失 ----
+  page.requests = []
+  assert('点「排除自己」开关', (await clickSwitch()) === 'OK')
+  assert('开关切到开启', (await swState()) === 'on', String(await swState()))
+  assert('带上 exclude_self=true 重新查询', accessReqs().length > 0 && lastAccessSearch().includes('exclude_self=true'),
+    JSON.stringify(accessReqs().map((r) => r.search)))
+  const after = await listedPaths()
+  assert('自己的记录被排除', !after.some((t) => t.includes('/api/auth/admin/access-logs')), JSON.stringify(after))
+  assert('别人的记录照旧在', after.some((t) => t.includes('/api/tournaments')), JSON.stringify(after))
+  assert('计数行提示已排除自己', (await countText()).includes('已排除自己'), await countText())
+
+  // ---- 点整行也能切换（手机上 20px 的开关太小）；顺带守住「开关那一下不能双重切换」 ----
+  const clickRow = async () => {
+    const r = await page.ev(`(() => {
+      const c = [...document.querySelectorAll('.van-cell')].find(e => (e.textContent || '').includes('排除自己'))
+      if (!c) return 'NOCELL'
+      c.click(); return 'OK' })()`)
+    await sleep(900)
+    return r
+  }
+  page.requests = []
+  assert('点整行也能切换', (await clickRow()) === 'OK')
+  assert('整行点一下：从开变关（只切换一次）', (await swState()) === 'off', String(await swState()))
+  assert('关掉后重新查询且不带 exclude_self',
+    accessReqs().length > 0 && !lastAccessSearch().includes('exclude_self'),
+    JSON.stringify(accessReqs().map((r) => r.search)))
+
+  // ---- 再打开，然后「重置筛选」：开关一起复位 ----
+  await clickSwitch()
+  const clickResetCell = async () => {
+    const r = await page.ev(`(() => {
+      const c = [...document.querySelectorAll('.van-cell')].find(e => (e.textContent || '').trim() === '重置筛选')
+      if (!c) return 'NOCELL'
+      c.click(); return 'OK' })()`)
+    await sleep(800)
+    return r
+  }
+  assert('重新打开开关', (await swState()) === 'on', String(await swState()))
+  page.requests = []
+  assert('点「重置筛选」', (await clickResetCell()) === 'OK')
+  assert('重置后开关回到关闭', (await swState()) === 'off', String(await swState()))
+  assert('重置后重新查询且不带 exclude_self',
+    accessReqs().length > 0 && !lastAccessSearch().includes('exclude_self'),
+    JSON.stringify(accessReqs().map((r) => r.search)))
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

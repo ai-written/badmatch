@@ -68,10 +68,20 @@
               </template>
             </van-field>
             <van-cell title="请求方法" is-link :value="accessFilter.method || '全部'" @click="showMethodSheet = true" />
-            <van-cell v-if="accessFilter.keyword || accessFilter.method" title="重置筛选" is-link @click="resetAccessFilter" />
+            <van-cell title="排除自己" center clickable label="隐藏自己翻页/看详情产生的记录"
+                      @click="onToggleExcludeSelf(!accessFilter.excludeSelf)">
+              <template #right-icon>
+                <!-- 点整行也能切换（20px 的开关在手机上是个很小的目标）。开关自己那一下要
+                     .stop 掉，否则一次点击会「开关翻一次 + 整行再翻一次」互相抵消。
+                     不用 v-model：切换后必须按固定顺序「先改值再重新查询」，靠 v-model 与
+                     事件监听器的合并顺序太脆 -->
+                <van-switch :model-value="accessFilter.excludeSelf" size="20" @click.stop @update:model-value="onToggleExcludeSelf" />
+              </template>
+            </van-cell>
+            <van-cell v-if="accessFilter.keyword || accessFilter.method || accessFilter.excludeSelf" title="重置筛选" is-link @click="resetAccessFilter" />
           </div>
 
-          <div class="audit-count" v-if="accessTotal > 0">共 {{ accessTotal }} 条（实时浏览日志）</div>
+          <div class="audit-count" v-if="accessTotal > 0">共 {{ accessTotal }} 条（实时浏览日志{{ accessFilter.excludeSelf ? '，已排除自己' : '' }}）</div>
 
           <van-list v-model:loading="accessLoading" :finished="accessFinished" :error="accessError"
                     error-text="加载失败，点击重试" finished-text="没有更多了"
@@ -428,7 +438,7 @@ const accessPage = ref(1)
 const accessLoading = ref(false)
 const accessFinished = ref(false)
 const accessTotal = ref(0)
-const accessFilter = reactive({ keyword: '', method: '' })
+const accessFilter = reactive({ keyword: '', method: '', excludeSelf: false })
 const showMethodSheet = ref(false)
 const showAccessDetail = ref(false)
 const accessDetail = ref<any>(null)
@@ -447,6 +457,8 @@ async function loadAccessLogs() {
   try {
     const params: any = { page: reqPage, page_size: 20 }
     if (accessFilter.method) params.method = accessFilter.method
+    // 排除自己：管理面板自己的翻页/看详情请求也会落进访问日志，不排除就全被自己刷满
+    if (accessFilter.excludeSelf) params.exclude_self = true
     const kw = accessFilter.keyword.trim()
     if (kw) params.keyword = kw
     const res = await api.get('/auth/admin/access-logs', { params, skipLoading: true } as any)
@@ -486,12 +498,18 @@ function resetAccessList() {
 function resetAccessFilter() {
   accessFilter.keyword = ''
   accessFilter.method = ''
+  accessFilter.excludeSelf = false
   resetAccessList()
 }
 
 function onMethodSelect(item: any) {
   showMethodSheet.value = false
   accessFilter.method = item.value || ''
+  resetAccessList()
+}
+
+function onToggleExcludeSelf(val: unknown) {
+  accessFilter.excludeSelf = val === true
   resetAccessList()
 }
 
