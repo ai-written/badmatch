@@ -671,7 +671,7 @@ async function doWithdraw() {
       } catch { return }
     }
     const res = await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
-    showToast(res.data?.message || '已退出比赛')
+    showToast({ message: res.data?.message || '已退出比赛', duration: 3000 })
     await refreshBoth()
   })
 }
@@ -687,7 +687,7 @@ async function doTransferAndWithdraw() {
       })
     } catch { return }
     const res = await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
-    showToast(res.data?.message || '已退出比赛')
+    showToast({ message: res.data?.message || '已退出比赛', duration: 3000 })
     showTransferPicker.value = false
     await refreshBoth()
   })

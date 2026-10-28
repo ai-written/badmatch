@@ -1011,7 +1011,7 @@ async def withdraw_player(
 
     # ---- 这次该补排多少场：计划总场次 − 冻结区已占用的场次 ----
     # 两个都不能省：
-    #   · 基准用 plan_total_matches（创建/编辑/开赛/追加时写入，重排永不改写），
+    #   · 基准用 plan_total_matches（创建/编辑/开赛/追加时写入，退赛重排只会把它往下调），
     #     不能用 total_matches —— 它会被重排写回「真实场次数」，于是每退一次都在上一次
     #     的基础上再叠一份（实测 8 人 14 场连退两人：14 → 20 → 27 场）；
     #   · 必须减掉冻结场次 —— 不然等于把一整份新赛程叠在已经打完的部分上
@@ -1110,10 +1110,13 @@ async def withdraw_player(
 
     # 把真实总场次写回 tournaments.total_matches（详情页「共 N 场」用它）：
     # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，也不等于计划值。
-    # 计划值 plan_total_matches **不动** —— 它是下次退赛的基准。
     tournament.total_matches = (await db.execute(
         select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
     )).scalar() or new_M
+    # 计划上限跟着**当前真实场次**走（只会往下、不会往上，见上面 budget 的算法）。
+    # 不这么做的话档位会随人数整除约束来回跳：8 人 14 场打完 2 场退一人 → 9 场，
+    # 再退一人时 6 人又能排满 12 场 → 又跳回 14 场（实测过），看起来像"人越退场次越多"。
+    tournament.plan_total_matches = tournament.total_matches
 
     # 收尾：这次操作之后一场没打完的都不剩了（典型：剩余额度用尽、不再补排），
     # 赛事必须结束，否则会永远停在「进行中」。口径与记分路径的自动收尾一致。

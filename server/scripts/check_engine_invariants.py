@@ -496,6 +496,20 @@ async def check_withdraw_sizing():
           any("已退赛" in n.message and "换人" in n.message for n in notes),
           [n.message for n in notes])
 
+    # ---- f) 连退 4 人：总场次单调不增（别随人数整除约束来回跳）----
+    admin, ids = await mk_users("size-f", 8)
+    tid = await seed_ongoing(admin, ids, 14, played_rounds=1)
+    totals = []
+    for victim in ids[:4]:
+        await withdraw_as_creator(tid, admin, victim)
+        totals.append(await count_matches(tid))
+    check("f) 连退 4 人：总场次单调不增（不反弹）",
+          all(b <= a for a, b in zip(totals, totals[1:])), totals)
+    async with Session() as s:
+        t = await s.get(Tournament, tid)
+    check("f) 计划上限始终不超过最初的计划（14 场）",
+          (t.plan_total_matches or 0) <= 14, t.plan_total_matches)
+
 
 async def check_owner_and_invite():
     print("\n6) 禁用房主：房主转移 + 给新房主发提醒")
