@@ -274,6 +274,8 @@ async def _create_tournament(
         end_date=data.end_date,
         max_participants=data.max_participants,
         total_matches=_align_total_matches(data.max_participants, data.total_matches),
+        # 计划值（退赛重排的基准）与 total_matches 同源同值；之后重排只改 total_matches
+        plan_total_matches=_align_total_matches(data.max_participants, data.total_matches),
         points_to_win=data.points_to_win,
         registration_open_at=registration_open_at,
     )
@@ -561,6 +563,8 @@ async def update_tournament(
     t.end_date = data.end_date
     t.max_participants = data.max_participants
     t.total_matches = _align_total_matches(data.max_participants, data.total_matches)
+    # 报名阶段的编辑就是改计划：计划总场次跟着走（进行中的赛事不允许改，见上面的守卫）
+    t.plan_total_matches = _align_total_matches(data.max_participants, data.total_matches)
     t.points_to_win = data.points_to_win
     t.registration_open_at = registration_open_at
     await _replace_courts(t.id, data.courts, db)

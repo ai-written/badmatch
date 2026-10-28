@@ -13,6 +13,7 @@ from app.engine.scheduler import (
     fairness_step,
     generate_schedule,
     nearest_valid_total,
+    floor_valid_total,
     shuffle_sides,
 )
 
@@ -69,6 +70,61 @@ def test_nearest_valid_total_without_a_usable_preference():
     """没有原值（None/0）时退回「最小可行场次」，与「从没设过总场次」的语义一致。"""
     assert nearest_valid_total(8, None) == compute_match_count(8)
     assert nearest_valid_total(8, 0) == compute_match_count(8)
+
+
+# ---- 退赛重排：还剩多少额度（0 是合法结果，且绝不超额度）----
+
+def test_floor_valid_total_allows_zero_when_budget_is_below_one_step():
+    """剩余额度不到一个步长时返回 0（= 不再补排），而不是凑到最小档再加一整套。
+
+    真实事故：8 人 14 场、打完 12 场后退一人，剩 7 人、剩余额度只有 2 场 ——
+    按「至少排一个步长」算会得到 7 场，于是「还剩 2 场」变成「再给每人排 4 场」，
+    赛事总场次从 14 涨到 26（详见 scripts/check_engine_invariants.py 的退赛检查组）。
+    """
+    assert floor_valid_total(7, 2) == 0
+    assert floor_valid_total(7, 6) == 0            # 额度还不够一个步长（7）→ 不排
+    assert floor_valid_total(8, 0) == 0
+    assert floor_valid_total(8, -5) == 0
+
+
+def test_floor_valid_total_keeps_a_fitting_budget():
+    """额度本身就是合法档时，一个数都不许动。"""
+    for n in range(4, 21):
+        step = fairness_step(n)
+        for m in range(step, 31, step):
+            assert floor_valid_total(n, m) == m, (n, m)
+
+
+def test_floor_valid_total_never_exceeds_the_budget():
+    """取「不超过额度」的档：计划总场次是上限，退人不该让赛事多出几场。
+
+    对比 nearest_valid_total：那个并列取大（宁可多排），这里必须往下取
+    —— 6 人 8 场额度时排 9 场会让总场次超过计划。
+    """
+    assert floor_valid_total(8, 5) == 4        # 8 人步长 2
+    assert floor_valid_total(16, 6) == 4       # 16 人步长 4
+    assert floor_valid_total(6, 8) == 6        # 6 人步长 3：8 → 6（就近会取 9，超计划）
+    for n in range(4, 41):
+        for budget in range(0, 41):
+            m = floor_valid_total(n, budget)
+            assert m <= budget, (n, budget, m)
+
+
+def test_floor_valid_total_is_always_playable():
+    """返回值要么是 0，要么满足「每人场次相等」（4M 能被人数整除），且不超硬上限。"""
+    for n in range(4, 41):
+        for budget in range(0, 41):
+            m = floor_valid_total(n, budget)
+            assert m == 0 or (4 * m) % n == 0, (n, budget, m)
+            assert 0 <= m <= 100, (n, budget, m)
+
+
+def test_floor_valid_total_matches_the_measured_withdraw_scenarios():
+    """把实测过的场景钉死（8 人 14 场，冻结 F 场后剩 7 人的额度与结果）。"""
+    assert floor_valid_total(7, 14 - 0) == 14    # 一场没打就退 → 重排 14 场（每人 8 场）
+    assert floor_valid_total(7, 14 - 4) == 7     # 打完 4 场 → 再排 7 场（合计 11 场）
+    assert floor_valid_total(7, 14 - 12) == 0    # 打完 12 场 → 不再补排，赛事收尾
+    assert floor_valid_total(4, 10 - 2) == 8     # 5 人 10 场退一人：冻结 2 → 再排 8 场（每人 8 场）
 
 
 def test_schedule_validity_and_equal_play():

@@ -24,6 +24,11 @@
     同时"不吹自己那场 / 同一批不重复 / 只填空缺 / 已认领的算进计数"都要成立
 12. **场内公平（对手均衡）**：8 人 14 场必须每对搭档恰好 1 次、每对对手恰好相遇 2 次
     —— 带跨赛事历史时也不许破（历史只用来在候选里挑，不参与贪心；以前会让极差到 4~5）
+13. **退赛重排的场次口径**：补排量必须是「计划总场次 − 冻结场次」，且取不超过额度的档 ——
+    不许把一整份新赛程叠在已打完的上面、也不许拿"被重排写回的真实场次"当基准滚雪球
+    （实测 8 人 14 场打完 12 场退一人 → 26 场；连退两人 14 → 20 → 27 场）；
+    没有可删的轮次时不硬排；剩余不足 4 人时 `total_matches` 要写回真实场次数；
+    冻结轮次里含退赛者的待打场次必须提醒房主
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -381,6 +386,115 @@ async def check_withdraw_and_totals():
     check("total_matches 写回真实场次数", t.total_matches == actual, (t.total_matches, actual))
     check("追加比赛的「现有场次」= 真实场次数", opts["current_total"] == actual,
           (opts["current_total"], actual))
+
+
+async def count_pending(tid):
+    async with Session() as s:
+        return (await s.execute(select(func.count(Match.id)).where(
+            Match.tournament_id == tid,
+            Match.status != MatchStatus.FINISHED))).scalar() or 0
+
+
+async def pending_per_player(tid):
+    """未打完的比赛里每人各几场 —— 用来验证「剩余选手待打场次相等」。"""
+    async with Session() as s:
+        ms = (await s.execute(select(Match).where(
+            Match.tournament_id == tid,
+            Match.status != MatchStatus.FINISHED))).scalars().all()
+        cnt = Counter()
+        for m in ms:
+            pa = await s.get(RoundPairing, m.pairing_a_id)
+            pb = await s.get(RoundPairing, m.pairing_b_id)
+            for uid in (pa.player_a_id, pa.player_b_id, pb.player_a_id, pb.player_b_id):
+                cnt[uid] += 1
+        return dict(cnt)
+
+
+async def withdraw_as_creator(tid, creator_id, player_id):
+    """以房主身份代别人退赛（接口只允许本人或房主，管理员也不行）。"""
+    async with Session() as s:
+        return await withdraw_player(tournament_id=tid, player_id=player_id,
+                                     request=fake_request(), body=WithdrawBody(),
+                                     user=await s.get(User, creator_id), db=s)
+
+
+async def check_withdraw_sizing():
+    """退赛重排的「场次数」口径 —— 2026-10 实测出的四个问题，都真出过：
+
+    a. 冻结场次没从计划里扣掉：一整套新赛程叠在已打完的上面
+       （8 人 14 场打完 12 场后退一人 → 26 场、每人 14 场）；
+    b. 连续退赛拿「被重排写回的真实场次」当基准 → 14 → 20 → 27 场，越退越大；
+    c. 剩余不足 4 人时先删轮次、再判结束，total_matches 却没写回
+       （详情页「共 12 场」而对阵表只剩 2 场）；
+    d. 每一轮都已开打（没有可删的轮次）时，仍然凭空新排一整套赛程；
+    e. 冻结轮次里「含退赛者、没打完」的场次没人管（必须提醒房主）。
+    """
+    print("\n5b) 退赛重排的场次口径：不膨胀 / 收尾一致 / 无可删轮次时不硬排")
+
+    # ---- a) 8 人 14 场、打完 2 轮（4 场）后退一人 ----
+    admin, ids = await mk_users("size-a", 8)
+    tid = await seed_ongoing(admin, ids, 14, played_rounds=2)
+    res = await withdraw_as_creator(tid, admin, ids[0])
+    actual = await count_matches(tid)
+    per = await pending_per_player(tid)
+    check("a) 打完 4 场退一人：总场次不再叠加一整份（≤ 计划 14）", actual <= 14, f"实际 {actual}")
+    check("a) 已打完的 4 场原样保留 + 补排了新场次", actual > 4, actual)
+    check("a) 剩余 7 人的待打场次相等", len(set(per.values())) == 1, per)
+    check("a) 退赛者不出现在未打完的场次里", ids[0] not in per, sorted(per))
+    check("a) 返回的补排数 = 真实场次 − 冻结场次",
+          res.get("new_matches") == actual - 4, (res.get("new_matches"), actual))
+
+    # ---- b) 8 人 14 场、打完 6 轮（12 场）后退一人：额度只剩 2 场 ----
+    admin, ids = await mk_users("size-b", 8)
+    tid = await seed_ongoing(admin, ids, 14, played_rounds=6)
+    res = await withdraw_as_creator(tid, admin, ids[0])
+    actual = await count_matches(tid)
+    pending = await count_pending(tid)
+    async with Session() as s:
+        t = await s.get(Tournament, tid)
+    check("b) 额度不够一档时不补排（0 场，而不是又排一整套）",
+          res.get("new_matches") == 0, res.get("new_matches"))
+    check("b) 总场次落在计划以内（12 场，不是 26 场）", actual == 12, actual)
+    check("b) 已没有未打完的场次 → 赛事自动结束",
+          t.status == TournamentStatus.FINISHED and pending == 0, (t.status, pending))
+
+    # ---- c) 5 人 10 场连退两人：第二次剩余不足 4 人 ----
+    admin, ids = await mk_users("size-c", 5)
+    tid = await seed_ongoing(admin, ids, 10, played_rounds=1)
+    await withdraw_as_creator(tid, admin, ids[0])          # 剩 4 人
+    res2 = await withdraw_as_creator(tid, admin, ids[1])   # 剩 3 人 → 自动结束
+    actual = await count_matches(tid)
+    async with Session() as s:
+        t = await s.get(Tournament, tid)
+    check("c) 剩 3 人：赛事自动结束", t.status == TournamentStatus.FINISHED, t.status)
+    check("c) 结束时 total_matches 与真实场次数一致（原先 12 vs 2）",
+          t.total_matches == actual, (t.total_matches, actual))
+
+    # ---- d/e) 每一轮都已开打：没有可删的轮次，且会有悬空场次 ----
+    admin, ids = await mk_users("size-d", 8)
+    tid = await seed_ongoing(admin, ids, 14, played_rounds=0)
+    async with Session() as s:
+        rounds = (await s.execute(select(Round).where(Round.tournament_id == tid)
+                                  .order_by(Round.round_number))).scalars().all()
+        for r in rounds:
+            first = (await s.execute(select(Match).where(Match.round_id == r.id)
+                                     .order_by(Match.id).limit(1))).scalar_one()
+            first.status = MatchStatus.ONGOING
+            first.started_at = datetime.now()
+        await s.commit()
+    before = await count_matches(tid)
+    res = await withdraw_as_creator(tid, admin, ids[2])
+    after = await count_matches(tid)
+    check("d) 没有可删的轮次：不凭空新排一整套", after == before, f"{before} → {after}")
+    check("d) 悬空的待打场次数如实回报（> 0）",
+          (res.get("stranded_matches") or 0) > 0, res.get("stranded_matches"))
+    async with Session() as s:
+        notes = (await s.execute(select(Notification).where(
+            Notification.tournament_id == tid,
+            Notification.user_id == admin))).scalars().all()
+    check("e) 房主收到「含退赛者的场次无法重排，请现场处理」提醒",
+          any("已退赛" in n.message and "换人" in n.message for n in notes),
+          [n.message for n in notes])
 
 
 async def check_owner_and_invite():
@@ -1016,6 +1130,7 @@ async def main() -> int:
     await check_start()
     await check_start_keeps_requested_matches_with_history()
     await check_withdraw_and_totals()
+    await check_withdraw_sizing()
     await check_owner_and_invite()
     await check_reschedule()
     await check_reschedule_with_started_round()

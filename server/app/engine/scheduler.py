@@ -394,6 +394,29 @@ def nearest_valid_total(num_players, preferred, max_total=100):
     return min(values, key=lambda v: (abs(v - preferred), -v))
 
 
+def floor_valid_total(num_players, budget, max_total=100):
+    """不超过 budget 的最大合法总场次（**0 合法**）。
+
+    专给「退赛重排」用：冻结区已经用掉了一部分计划额度，这次最多还能排这么多场。
+
+    两个设计点：
+    - 取**不超过额度**的那一档，而不是就近 —— 计划总场次是上限，退一个人不该让赛事
+      "多出几场"（就近取大在 6 人 8 场额度时会排出 9 场，总场次反而超过计划）；
+    - 额度不到一个步长时返回 0 = 不再补排（赛事自然收尾），而不是凑到最小档再塞
+      一整套：8 人 14 场打完 12 场后退一人，剩 7 人步长就是 7，凑最小档等于"还剩 2 场"
+      变成"再给每人排 4 场"，赛事总场次从 14 涨到 26（实测踩过）。
+
+    对比 `nearest_valid_total`（开赛/重排用）：那个必须至少排一档、并列取大，
+    因为它解决的是"人数变了别把场次缩没"，这里的约束正好相反。
+    """
+    if not num_players or num_players < 1 or budget <= 0:
+        return 0
+    step = fairness_step(num_players)
+    if step <= 0:
+        return 0
+    return (min(budget, max_total) // step) * step
+
+
 def compute_rounds(matches, matches_per_round=2):
     """Group matches into rounds."""
     rounds = []

@@ -1,6 +1,7 @@
 """
 引擎触发 API: 开始赛事、退赛重排、追加比赛、重排赛程
 """
+import logging
 import random
 from collections import Counter
 
@@ -20,8 +21,10 @@ from app.models.round import MatchSupport
 from pydantic import BaseModel
 from app.engine.scheduler import (
     generate_schedule, compute_match_count, compute_rounds, shuffle_sides,
-    fairness_step, nearest_valid_total, _pair_key, _match_key,
+    fairness_step, nearest_valid_total, floor_valid_total, _pair_key, _match_key,
 )
+
+logger = logging.getLogger(__name__)
 
 # 总场次上限：与开赛时的校验同一个数（原先是硬编码两处，追加比赛也要用同一个上限）
 MAX_TOTAL_MATCHES = 100
@@ -184,7 +187,9 @@ async def start_tournament(
         M = adjusted_M
     # 一律写回**实际使用**的场次：存量值对当前人数不整除时，上面已经把它就近换档了，
     # 不写回的话详情页会一直显示旧数字（「共 14 场」而实际排了 15 场）
+    # 计划值同时钉下来：退赛重排只按它算"还能排多少场"，重排结果不再改写它
     tournament.total_matches = M
+    tournament.plan_total_matches = M
 
     matches_per_round = 2
     # 左右随机：排程本身是确定性的（见 scheduler），并列时总是让名单靠前的人进 A 队，
@@ -515,6 +520,8 @@ async def add_matches(
 
     total = current + added
     tournament.total_matches = total
+    # 追加比赛就是"把计划改大"：计划值跟着走，退赛重排的额度才能算对
+    tournament.plan_total_matches = total
     # 先提交再广播再审计（全仓统一）：订阅者收到 schedule_updated 后回查赛程，
     # 未提交的话读到的是追加前的旧赛程，这一次实时更新就被吞掉
     await db.commit()
@@ -898,26 +905,52 @@ async def withdraw_player(
         )).all()
     }
 
+    # 该赛事的比赛与配对各读一次：既要统计「冻结区有多少场」（决定这次还能补排多少场），
+    # 也要找出「冻结轮次里含退赛者、还没打完」的悬空场次（要提醒房主），
+    # 按轮次一条条查会多跑三四条 SQL。
+    all_matches = (await db.execute(
+        select(Match).where(Match.tournament_id == tournament_id).order_by(Match.id)
+    )).scalars().all()
+    matches_by_round: dict[int, list[Match]] = {}
+    for m in all_matches:
+        matches_by_round.setdefault(m.round_id, []).append(m)
+    pairing_players = {
+        p.id: (p.player_a_id, p.player_b_id)
+        for p in (await db.execute(
+            select(RoundPairing).join(Round, Round.id == RoundPairing.round_id)
+            .where(Round.tournament_id == tournament_id)
+        )).scalars().all()
+    }
+
     all_rounds = await db.execute(
         select(Round).where(Round.tournament_id == tournament_id)
     )
     affected_referees = set()
+    frozen_match_count = 0
     for r in all_rounds.scalars().all():
         if r.id in started_round_ids:
             r.is_frozen = True              # 开打过的轮次：编号与比赛原样保留
+            frozen_match_count += len(matches_by_round.get(r.id, []))
             continue
         # 一场没打的轮次：整批删掉，稍后重排（先收被取消场次的在任裁判，好发通知）
-        ms = await db.execute(select(Match).where(Match.round_id == r.id, Match.referee_id.is_not(None)))
-        for m in ms.scalars().all():
+        for m in matches_by_round.get(r.id, []):
             # 只通知在任裁判：已卸任者（referee_id 保留作历史）不需要重新认领
             if m.has_active_referee:
                 affected_referees.add(m.referee_id)
-        match_ids = await db.execute(select(Match.id).where(Match.round_id == r.id))
-        for (mid,) in match_ids.all():
-            await db.execute(delete(MatchSupport).where(MatchSupport.match_id == mid))
+            await db.execute(delete(MatchSupport).where(MatchSupport.match_id == m.id))
         await db.execute(delete(Match).where(Match.round_id == r.id))
         await db.execute(delete(RoundPairing).where(RoundPairing.round_id == r.id))
         await db.execute(delete(Round).where(Round.id == r.id))
+
+    # 冻结轮次里「含退赛者、还没打完」的场次：整轮已经开打，不能为了一个人把这一轮删掉
+    # （那会连带丢掉同轮已经产生的比分）。这些场次只能由房主现场处理（换人上 / 提前结束），
+    # 所以下面给他发一条提醒，并把场次数写进审计和接口返回。
+    stranded_matches = [
+        m for rid in started_round_ids for m in matches_by_round.get(rid, [])
+        if m.status != MatchStatus.FINISHED
+        and player_id in (*pairing_players.get(m.pairing_a_id, ()),
+                          *pairing_players.get(m.pairing_b_id, ()))
+    ]
 
     # 本赛事已打完（冻结）轮次的搭档统计：重排出来的未开打轮次当然不能跟它们撞
     frozen_partner: dict = {}
@@ -951,108 +984,193 @@ async def withdraw_player(
 
     remaining_count = len(remaining)
     if remaining_count < 4:
-        # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事
+        # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事。
+        # 未开打的轮次在上面已经删掉了（人不够，谁也打不了），所以这里**必须**把
+        # total_matches 写回真实场次数 —— 否则详情页「共 N 场」会和对阵表对不上：
+        # 实测 5 人 10 场连退两人，库里只剩 2 场，详情页却还写着「共 12 场」。
         tournament.status = TournamentStatus.FINISHED
+        tournament.total_matches = (await db.execute(
+            select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+        )).scalar() or 0
         # 先提交再广播：订阅者收到 tournament_finished 后会回查赛事状态，
         # 未提交的话读到的还是「进行中」
         await db.commit()
         await manager.broadcast(tournament_id, {"type": "tournament_finished"})
         # 审计放在提交**和广播之后**：写在提交前，业务事务一旦回滚就会留下
         # 「赛事已结束」的假日志；写在广播前，手机端提交后立刻切页导致的请求取消
-        # 会让广播被直接跳过（audit 对取消是向上抛的，见 core/audit.py）。
-        # 两条都记：一条「结束赛事」，一条「谁退的赛」。
+        # 会让广播被直接跳过（audit 对取消是向上抛，见 core/audit.py）。
+        # 两条都记：一条「谁退的赛」，一条「结束赛事」。
+        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
+                    detail={"player_id": player_id, "remaining": remaining_count,
+                            "auto_finished": True, "reason": "players_below_4"},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
                     detail={"auto": True, "reason": "players_below_4"},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-        await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
-                    detail={"player_id": player_id, "remaining": remaining_count, "auto_finished": True},
-                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "剩余选手不足 4 人，赛事已自动结束"}
 
-    if tournament.total_matches:
-        # 与开赛/重排同一口径：不整除时取**离原值最近**的合法档（退赛后人数变了，
-        # 用最小档会把 14 场砍成 3 场）
-        new_M = nearest_valid_total(remaining_count, tournament.total_matches)
+    # ---- 这次该补排多少场：计划总场次 − 冻结区已占用的场次 ----
+    # 两个都不能省：
+    #   · 基准用 plan_total_matches（创建/编辑/开赛/追加时写入，重排永不改写），
+    #     不能用 total_matches —— 它会被重排写回「真实场次数」，于是每退一次都在上一次
+    #     的基础上再叠一份（实测 8 人 14 场连退两人：14 → 20 → 27 场）；
+    #   · 必须减掉冻结场次 —— 不然等于把一整份新赛程叠在已经打完的部分上
+    #     （8 人 14 场打完 12 场后退一人 → 26 场、每人 14 场）。
+    # 剩余额度不到一个「每人一档」的步长时就不补排（floor_valid_total 允许返回 0），
+    # 赛事自然收尾；取「不超过额度」的档而不是就近，保证总场次**不会超过计划**。
+    plan_total = tournament.plan_total_matches or tournament.total_matches
+    if plan_total:
+        budget = max(0, plan_total - frozen_match_count)
+        new_M = floor_valid_total(remaining_count, budget)
     else:
+        # 从未设过计划场次（直接调接口建的赛事）：按剩余人数取最小可行档
         new_M = compute_match_count(remaining_count)
+
     # 跨赛事避重：重排出来的、一场没打的轮次也不该跟最近几场赛事撞车（见 RECENT_EVENT_HISTORY）。
-    # 历史只影响打分、不改变每人目标场次；万一带着它排不出来，就退回"只带本赛事已冻结轮次"
-    # 的那一级 —— 「退赛」这条路不能因为避重而失败，也不能因此给用户一个 500。
-    recent_partner, recent_opponent, recent_match = await _load_history(
-        db, await _recent_tournament_ids(db, tournament_id))
-    partner_history: Counter = Counter(frozen_partner)
-    partner_history.update(recent_partner)
-    new_schedule, reschedule_history_level = _try_schedule(
-        remaining, new_M,
-        ((partner_history, recent_opponent, recent_match), (frozen_partner, {}, {})),
-    )
-    if new_schedule is None:
-        raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
-    # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
-    # 的确定性偏置（remaining 是按 PlayerStats.id 排的名单），不翻边就会把偏置带进新赛程
-    new_schedule = shuffle_sides(new_schedule)
-    new_rounds_data = compute_rounds(new_schedule, 2)
-
-    last_num_result = await db.execute(
-        select(Round.round_number)
-        .where(Round.tournament_id == tournament_id)
-        .order_by(Round.round_number.desc())
-        .limit(1)
-    )
-    last_num = last_num_result.scalar() or 0
-
-    for round_idx, round_matches in enumerate(new_rounds_data, start=1):
-        r = Round(
-            tournament_id=tournament_id,
-            round_number=last_num + round_idx,
-            is_regenerated=True,
+    # 历史只影响打分、不改变每人目标场次；万一带着它排不出来，就退回「只带本赛事已冻结轮次」
+    # 的那一级。**再排不出来也不能让退赛失败**（人已经退出去了，回滚成 400 只会让人退不掉）：
+    # 退化成「这次不补排」，写进审计并提醒房主手动处理。
+    new_rounds_data: list = []
+    reschedule_history_level = None
+    if new_M > 0:
+        recent_partner, recent_opponent, recent_match = await _load_history(
+            db, await _recent_tournament_ids(db, tournament_id))
+        partner_history: Counter = Counter(frozen_partner)
+        partner_history.update(recent_partner)
+        new_schedule, reschedule_history_level = _try_schedule(
+            remaining, new_M,
+            ((partner_history, recent_opponent, recent_match), (frozen_partner, {}, {})),
         )
-        db.add(r)
-        await db.flush()
+        if new_schedule is None:
+            logger.warning(
+                "withdraw: 赛事 %s 剩 %d 人排不出 %d 场，本次不补排（退赛照常生效）",
+                tournament_id, remaining_count, new_M,
+            )
+            new_M = 0
+        else:
+            # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
+            # 的确定性偏置（remaining 是按 PlayerStats.id 排的名单），不翻边会把偏置带进新赛程
+            new_rounds_data = compute_rounds(shuffle_sides(new_schedule), 2)
 
-        for match_data in round_matches:
-            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
-            pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
-            pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
-            db.add(pairing_a)
-            db.add(pairing_b)
-            await db.flush()
-            db.add(Match(
+    if new_rounds_data:
+        last_num = (await db.execute(
+            select(func.max(Round.round_number)).where(Round.tournament_id == tournament_id)
+        )).scalar() or 0
+
+        for round_idx, round_matches in enumerate(new_rounds_data, start=1):
+            r = Round(
                 tournament_id=tournament_id,
-                round_id=r.id,
-                pairing_a_id=pairing_a.id,
-                pairing_b_id=pairing_b.id,
-                court_id=court_id,
-                time_slot_id=slot_id,
+                round_number=last_num + round_idx,
+                is_regenerated=True,
+            )
+            db.add(r)
+            await db.flush()
+
+            for match_data in round_matches:
+                (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+                pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
+                pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
+                db.add(pairing_a)
+                db.add(pairing_b)
+                await db.flush()
+                db.add(Match(
+                    tournament_id=tournament_id,
+                    round_id=r.id,
+                    pairing_a_id=pairing_a.id,
+                    pairing_b_id=pairing_b.id,
+                    court_id=court_id,
+                    time_slot_id=slot_id,
+                ))
+
+    if affected_referees:
+        # 没补排新场次时别说「请重新认领」—— 已经没有可认领的场次了
+        ref_msg = ("赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。"
+                   if new_rounds_data
+                   else "赛事赛程已调整，您之前认领的裁判场次已取消。")
+        for ref_id in affected_referees:
+            db.add(Notification(
+                user_id=ref_id,
+                tournament_id=tournament_id,
+                type="schedule_changed",
+                message=ref_msg,
             ))
 
-    for ref_id in affected_referees:
+    # 冻结轮次里还有「含退赛者、没打完」的场次：自动重排管不到（那一轮已经开打），
+    # 只能房主现场处理。不提醒的话，房主只会看到名单少了一个人、对阵表上却还有他的比赛。
+    if stranded_matches and tournament.creator_id != player_id:
+        name_row = await db.execute(select(User.username).where(User.id == player_id))
+        withdrawn_name = name_row.scalar_one_or_none() or "有选手"
         db.add(Notification(
-            user_id=ref_id,
+            user_id=tournament.creator_id,
             tournament_id=tournament_id,
             type="schedule_changed",
-            message="赛事赛程已调整，您之前认领的裁判场次已取消，请重新认领。",
+            message=(f"{withdrawn_name} 已退赛，还有 {len(stranded_matches)} 场没打完的比赛"
+                     "包含他（所在轮次已经开打，不能自动重排）。请现场处理：换人上场或提前结束赛事。"),
         ))
 
-    # 把重排后的真实总场次写回 tournaments.total_matches：
-    # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，
-    # 也不再等于原来的值。不写回的话，赛事详情页的「共 N 场」会一直停在旧数字，
-    # 而追加比赛/上限判断（另一处已改成直接数 matches）也会被带偏。
+    # 把真实总场次写回 tournaments.total_matches（详情页「共 N 场」用它）：
+    # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，也不等于计划值。
+    # 计划值 plan_total_matches **不动** —— 它是下次退赛的基准。
     tournament.total_matches = (await db.execute(
         select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
     )).scalar() or new_M
+
+    # 收尾：这次操作之后一场没打完的都不剩了（典型：剩余额度用尽、不再补排），
+    # 赛事必须结束，否则会永远停在「进行中」。口径与记分路径的自动收尾一致。
+    pending_left = (await db.execute(
+        select(func.count(Match.id)).where(
+            Match.tournament_id == tournament_id,
+            Match.status != MatchStatus.FINISHED,
+        )
+    )).scalar() or 0
+    auto_finished = False
+    if pending_left == 0 and tournament.status != TournamentStatus.FINISHED:
+        tournament.status = TournamentStatus.FINISHED
+        auto_finished = True
 
     # 先提交再广播再审计：这里重排了赛程、通知了原裁判，订阅者收到后若立刻拉赛程，
     # 未提交的话会读到重排前的旧轮次；审计随后（见 auth.update_profile 的说明）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    if auto_finished:
+        await manager.broadcast(tournament_id, {"type": "tournament_finished"})
+
+    new_matches_count = sum(len(r) for r in new_rounds_data)
     await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                 detail={"player_id": player_id, "remaining": remaining_count,
                         "new_creator_id": tournament.creator_id,
+                        "plan_total_matches": plan_total,
+                        "frozen_matches": frozen_match_count,
+                        "new_matches": new_matches_count,
+                        "stranded_matches": len(stranded_matches),
+                        "auto_finished": auto_finished,
                         # 用上了哪一级避重历史（0 = 冻结轮次+最近几场，1 = 只冻结轮次）
                         "history_level": reschedule_history_level},
                 ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return {"ok": True}
+    if auto_finished:
+        await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
+                    detail={"auto": True, "reason": "all_matches_finished"},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    if stranded_matches:
+        message = (f"选手已退出；还有 {len(stranded_matches)} 场未打完的比赛包含他"
+                   "（所在轮次已开打，无法自动重排），已提醒房主处理")
+    elif auto_finished:
+        message = "选手已退出，比赛已全部打完，赛事自动结束"
+    elif not new_matches_count:
+        message = "选手已退出（剩余额度已排满，不再补排新场次）"
+    else:
+        message = "选手已退出"
+    return {
+        "ok": True,
+        "message": message,
+        "remaining": remaining_count,
+        "new_matches": new_matches_count,
+        "frozen_matches": frozen_match_count,
+        "stranded_matches": len(stranded_matches),
+        "auto_finished": auto_finished,
+    }
+
 
 
 @router.post("/end-tournament")

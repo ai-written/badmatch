@@ -661,10 +661,17 @@ async function doWithdraw() {
         })
       } catch { return }
     } else {
-      try { await showConfirmDialog({ title: '确认退出', message: '退出比赛后赛程将重新排列，确定退出？' }) } catch { return }
+      // 已开打的轮次不会被重排（会连带丢掉正在进行的比分），只重排一场没打的；
+      // 剩下的场次够不够再排一档、有没有悬空场次要房主处理，都由服务端在返回里说清楚
+      try {
+        await showConfirmDialog({
+          title: '确认退出',
+          message: '退出后：还没开打的场次会按剩余人数重新排，已经开打的轮次保持不变。确定退出？',
+        })
+      } catch { return }
     }
-    await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
-    showToast('已退出比赛')
+    const res = await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`)
+    showToast(res.data?.message || '已退出比赛')
     await refreshBoth()
   })
 }
@@ -679,8 +686,8 @@ async function doTransferAndWithdraw() {
         message: `退出后房主将转让给 ${target?.username || '所选用户'}，确定退出？`,
       })
     } catch { return }
-    await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
-    showToast('已退出比赛')
+    const res = await api.post(`/tournaments/${route.params.id}/withdraw/${auth.user!.id}`, { new_creator_id: selectedNewCreator.value })
+    showToast(res.data?.message || '已退出比赛')
     showTransferPicker.value = false
     await refreshBoth()
   })

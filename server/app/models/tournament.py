@@ -25,6 +25,13 @@ class Tournament(Base):
     location: Mapped[str | None] = mapped_column(String(256), nullable=True)
     start_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     total_matches: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 总场次，null=自动计算
+    # **计划**总场次：用户当初选的量（创建/编辑/开赛/追加比赛时写入），退赛重排与重排赛程
+    # 都不改它。与 total_matches 分开存的原因是两者语义不同：
+    #   total_matches       = **库里当前真实的场次数**（重排后会写回真实值，详情页"共 N 场"用它）
+    #   plan_total_matches  = 这场赛事一共打算打多少场（算"这次还能排多少场"的基准）
+    # 曾经拿 total_matches 当基准：退赛后重排会把一整套新赛程叠在已打完的上面，
+    # 而写回的膨胀值又成为下次退赛的基准 —— 8 人 14 场连退两人实测变成 20 → 27 场。
+    plan_total_matches: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     points_to_win: Mapped[int] = mapped_column(Integer, default=11)
     end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     max_participants: Mapped[int] = mapped_column(Integer, nullable=False)

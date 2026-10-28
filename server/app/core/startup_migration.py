@@ -293,6 +293,16 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             text("ALTER TABLE tournaments ADD COLUMN registration_open_at TIMESTAMP")
         )
 
+    # 「计划总场次」：退赛重排的基准（语义见 models/tournament.py 的注释）。
+    # 老库用当前 total_matches 回填 —— 那是当时能拿到的最好近似（重排把"真实场次数"
+    # 写回 total_matches 的逻辑是后来才有的，老数据最多被污染过一次）。
+    if not await _column_exists(conn, "tournaments", "plan_total_matches"):
+        logger.info("migration: adding tournaments.plan_total_matches column")
+        await conn.execute(
+            text("ALTER TABLE tournaments ADD COLUMN plan_total_matches INTEGER")
+        )
+        await conn.execute(text("UPDATE tournaments SET plan_total_matches = total_matches"))
+
     # 自增序列对齐（幂等）：修一次就够，但每次启动都检查一遍，
     # 这样「用 dump 恢复过数据库」之后也不用记得手工执行 setval。
     await _ensure_fk_indexes(conn)
