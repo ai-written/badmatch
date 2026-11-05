@@ -151,12 +151,21 @@
         <div class="vh-sheet-body cancel-body">
           <div v-for="c in cancellations" :key="c.user_id" class="cancel-row">
             <van-image lazy-load round width="32" height="32" :src="c.avatar || defaultAvatar" />
-            <span class="cancel-name">{{ c.username }}</span>
-            <!-- 区分两种离场方式：报名阶段取消 vs 开赛后退出（后者一般已经打过比赛） -->
-            <span class="cancel-kind" :class="{ withdraw: c.kind === 'withdraw' }">
-              {{ c.kind === 'withdraw' ? '退赛' : '取消' }}
-            </span>
-            <span class="cancel-time">{{ c.cancelled_at ? formatTime(c.cancelled_at) : '时间未知' }}</span>
+            <div class="cancel-main">
+              <div class="cancel-line">
+                <span class="cancel-name">{{ c.username }}</span>
+                <!-- 区分两种离场方式：报名阶段取消 vs 开赛后退出（后者一般已经打过比赛） -->
+                <span class="cancel-kind" :class="{ withdraw: c.kind === 'withdraw' }">
+                  {{ c.kind === 'withdraw' ? '退赛' : '取消' }}
+                </span>
+              </div>
+              <div class="cancel-sub">
+                <span class="cancel-time">{{ c.cancelled_at ? formatTime(c.cancelled_at) : '时间未知' }}</span>
+                <!-- 谁操作的：本人自取消不写；房主/管理员代操作要写清楚，
+                     否则当事人打开一看会以为自己退的 -->
+                <span v-if="cancelByText(c)" class="cancel-by">{{ cancelByText(c) }}</span>
+              </div>
+            </div>
           </div>
           <van-empty v-if="cancellationsFailed" description="加载失败，请重试" />
           <van-empty v-else-if="cancellations.length === 0" description="暂无取消 / 退赛记录" />
@@ -400,6 +409,16 @@ function fmtDateTime(start: string, end: string) {
   return `${y}年${m}月${day}日(${w}) ${start.slice(11, 16)}~${end.slice(11, 16)}`
 }
 function formatTime(d: string) { if (!d) return ''; return d.replace('T', ' ').slice(5, 16) }
+
+/** 「取消/退赛记录」里"谁操作的"：本人自取消不显示；房主/管理员代操作要写明。
+ *  字段来自后端 registrations.cancelled_by_id（与审计 detail.by 同一份语义）。 */
+function cancelByText(c: any) {
+  if (!c || !c.cancelled_by || c.cancelled_by === 'self') return ''
+  const who = c.cancelled_by_username || '他人'
+  if (c.cancelled_by === 'host') return `由房主 ${who} 代`
+  if (c.cancelled_by === 'admin') return `由管理员 ${who} 代`
+  return `由 ${who} 代`
+}
 
 async function viewPlayer(r: any) {
   playerDetail.value = r
@@ -1043,6 +1062,11 @@ onUnmounted(() => {
 .cancel-body { padding: 4px 16px 16px; }
 .cancel-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f5f5f5; }
 .cancel-row:last-child { border-bottom: none; }
+.cancel-main { flex: 1; min-width: 0; }
+.cancel-line { display: flex; align-items: center; gap: 8px; }
+.cancel-sub { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+/* 代操作（房主/管理员把人移出）用告警色标出来：当事人得知道不是自己退的 */
+.cancel-by { font-size: 11px; color: #ed6a0c; }
 .cancel-name { flex: 1; font-size: 14px; color: #333; }
 .cancel-kind {
   font-size: 11px; padding: 1px 6px; border-radius: 8px;

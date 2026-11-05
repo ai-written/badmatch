@@ -83,7 +83,7 @@ from app.api.engine_api import (                              # noqa: E402
 )
 from app.api.auth import set_user_active, register            # noqa: E402
 from app.api.tournaments import (                              # noqa: E402
-    cancel_register, cancel_registration_for_other,
+    cancel_register, cancel_registration_for_other, list_cancellations,
 )
 
 FAILED: list[str] = []
@@ -595,6 +595,21 @@ async def check_registration_removal():
     check("本人仍可自己取消报名", (await reg_of(ids[5])).is_active is False,
           (await reg_of(ids[5])).is_active)
 
+    # 记录里带出「谁操作的」（弹层显示"由房主 X 代"就靠这几个字段）
+    async with Session() as s:
+        rows = await list_cancellations(tournament_id=tid, db=s, user=await s.get(User, host))
+    by_uid = {r.user_id: r for r in rows}
+    check("记录里带出「由房主代取消」",
+          by_uid[ids[3]].cancelled_by == "host"
+          and by_uid[ids[3]].cancelled_by_username == "rm-p1",
+          (by_uid[ids[3]].cancelled_by, by_uid[ids[3]].cancelled_by_username))
+    check("记录里带出「由管理员代取消」",
+          by_uid[ids[4]].cancelled_by == "admin"
+          and by_uid[ids[4]].cancelled_by_username == "admin-rm",
+          (by_uid[ids[4]].cancelled_by, by_uid[ids[4]].cancelled_by_username))
+    check("本人自取消标成 self（前端不显示代言）",
+          by_uid[ids[5]].cancelled_by == "self", by_uid[ids[5]].cancelled_by)
+
     # 开赛之后：这个接口一律拒绝（要走退赛）
     async with Session() as s:
         row = await s.get(Tournament, tid)
@@ -610,6 +625,12 @@ async def check_registration_removal():
     # 赛中：管理员可以代退赛（原先只有房主能）
     admin2, ids2 = await mk_users("rm2", 6)
     tid2 = await seed_ongoing(ids2[0], ids2, 6)
+    # seed_ongoing 只建 PlayerStats（那是"开赛后"的形态）；这里补上报名行，
+    # 才能验「取消/退赛记录」里带出来的 by（记录是按 registrations 表列的）
+    async with Session() as s:
+        for uid in ids2:
+            s.add(Registration(tournament_id=tid2, user_id=uid, is_active=True))
+        await s.commit()
     async with Session() as s:
         res = await withdraw_player(tournament_id=tid2, player_id=ids2[3],
                                     request=fake_request(), body=WithdrawBody(),
@@ -618,6 +639,13 @@ async def check_registration_removal():
     check("代退赛审计记了 by=admin",
           any(a.get("action") == "tournament_withdraw"
               and (a.get("detail") or {}).get("by") == "admin" for a in AUDITS), "无")
+    async with Session() as s:
+        rows2 = await list_cancellations(tournament_id=tid2, db=s,
+                                         user=await s.get(User, ids2[0]))
+    row2 = next((r for r in rows2 if r.user_id == ids2[3]), None)
+    check("赛中代退赛的记录：kind=withdraw + by=admin",
+          row2 is not None and row2.kind == "withdraw" and row2.cancelled_by == "admin",
+          None if row2 is None else (row2.kind, row2.cancelled_by))
 
     # 路人代退赛仍然不行
     admin3, ids3 = await mk_users("rm3", 6)
@@ -708,7 +736,13 @@ async def first_match_teams(tid):
 
 
 async def match_referee_info(tid):
-    """{match_id: (轮次号, 本场 4 名选手, 裁判 id, 是否在任)} —— 验裁判分配用。"""
+    """{match_id: (轮次号, 本场 4 名选手, 裁判 id, 是否在任)} —— 验裁判分配用。
+
+    **必须显式 ORDER BY (轮次, id)**：不排序时 PostgreSQL 按堆内物理顺序返回，而
+    UPDATE（认领/卸任/记分）会把行挪到堆尾 —— 别的检查组改过 matches 表之后，
+    这里的第一个 key 就可能变成别的轮次的场次。曾经因此让「卸任后自动补位」那条
+    稳定 FAIL：它把最后一轮的某场当成了"当前批次"。按 (轮次, id) 排 = 对阵表顺序。
+    """
     async with Session() as s:
         matches = (await s.execute(
             select(Match).where(Match.tournament_id == tid))).scalars().all()
@@ -718,7 +752,7 @@ async def match_referee_info(tid):
         pairings = {p.id: p for p in (await s.execute(
             select(RoundPairing).where(RoundPairing.id.in_(pids)))).scalars().all()}
     info = {}
-    for m in matches:
+    for m in sorted(matches, key=lambda x: (round_no[x.round_id], x.id)):
         pa, pb = pairings[m.pairing_a_id], pairings[m.pairing_b_id]
         info[m.id] = (
             round_no[m.round_id],

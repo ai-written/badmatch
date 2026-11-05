@@ -229,6 +229,12 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             await conn.execute(
                 text("ALTER TABLE registrations ADD COLUMN cancelled_at TIMESTAMP")
             )
+        if not await _column_exists(conn, "registrations", "cancelled_by_id"):
+            logger.info("migration: adding registrations.cancelled_by_id column")
+            # 老数据无从得知是谁代的，留 NULL（前端按「本人」处理，不显示代言）
+            await conn.execute(
+                text("ALTER TABLE registrations ADD COLUMN cancelled_by_id INTEGER")
+            )
         if not await _constraint_exists(conn, "uq_registrations_tournament_user"):
             logger.info("migration: dedupe registrations + add unique constraint")
             await conn.execute(

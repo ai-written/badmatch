@@ -2141,14 +2141,23 @@ async function scenarioRemoveRegistration(page) {
     id: 2, creator_id: 1, title: '周五养生局', description: null, location: '奥体中心',
     start_date: '2026-11-06T19:00:00', end_date: '2026-11-06T21:00:00',
     max_participants: 8, status: 'open', courts: [], registered_count: regs.length,
-    cancelled_count: 0, pending_referee_count: 0, started_match_count: 0,
+    cancelled_count: 2, pending_referee_count: 0, started_match_count: 0,
     total_matches: null, points_to_win: 11, registration_open_at: null,
     server_now: '2026-11-05T10:00:00', is_registered: true, is_on_site: false,
     created_at: '2026-11-01T09:00:00',
   })
+  // 「取消/退赛记录」弹层的数据：一条是房主代取消（要显示"由房主 房主 代"），
+  // 一条是本人自退（不显示代言）
+  const cancellationsMock = [
+    { user_id: 2, username: '张三', avatar: '', cancelled_at: '2026-11-05T10:20:00',
+      kind: 'cancel', cancelled_by_id: 1, cancelled_by_username: '房主', cancelled_by: 'host' },
+    { user_id: 3, username: '李四', avatar: '', cancelled_at: '2026-11-05T10:25:00',
+      kind: 'withdraw', cancelled_by_id: 3, cancelled_by_username: '李四', cancelled_by: 'self' },
+  ]
   const mockFor = (who) => (path) => {
     if (/auth\/me$/.test(path)) return who
     if (/\/registrations$/.test(path)) return regs
+    if (/\/cancellations$/.test(path)) return cancellationsMock
     if (/cancel-registration\/\d+$/.test(path)) {
       const uid = Number(path.split('/').pop())
       regs = regs.filter((r) => r.user_id !== uid)
@@ -2208,6 +2217,21 @@ async function scenarioRemoveRegistration(page) {
   await chipClick('房主')
   await sleep(600)
   assert('点自己不出现"移出"面板', (await sheetVisible()) === false)
+
+  // ---- 「取消/退赛记录」弹层：谁代的要写清楚 ----
+  const clickCancels = () => page.ev(`(() => {
+    const el = [...document.querySelectorAll('.ph-action')].find(e => (e.textContent || '').includes('取消/退赛'))
+    if (!el) return 'NOENTRY'
+    el.click(); return 'OK' })()`)
+  const cancelRows = () => page.ev(`[...document.querySelectorAll('.cancel-row')]
+    .map(e => (e.textContent || '').replace(/\\s+/g, ' ').trim())`)
+  assert('打开「取消/退赛记录」', (await clickCancels()) === 'OK')
+  await sleep(900)
+  const rows = await cancelRows()
+  assert('记录里写清"由房主 X 代"（不是让人以为他自己退的）',
+    rows.some((t) => t.includes('由房主 房主 代')), JSON.stringify(rows))
+  assert('本人自退不显示"代"',
+    rows.some((t) => t.includes('李四') && !t.includes('由')), JSON.stringify(rows))
 
   // ---- 普通路人点别人：不出面板 ----
   regs = baseRegs().slice(0, 2)

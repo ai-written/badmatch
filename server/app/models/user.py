@@ -25,7 +25,11 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # Relations
-    registrations: Mapped[list["Registration"]] = relationship(back_populates="user", lazy="selectin")
+    # foreign_keys 必须显式指定：registrations 现在有两条指向 users 的外键
+    # （user_id = 报名者、cancelled_by_id = 代取消的操作者），不指定就报 AmbiguousForeignKeysError
+    registrations: Mapped[list["Registration"]] = relationship(
+        back_populates="user", lazy="selectin", foreign_keys="Registration.user_id"
+    )
     player_stats: Mapped[list["PlayerStats"]] = relationship(back_populates="user", lazy="selectin")
     created_tournaments: Mapped[list["Tournament"]] = relationship(back_populates="creator", lazy="selectin")
     refereed_matches: Mapped[list["Match"]] = relationship(back_populates="referee", lazy="selectin")

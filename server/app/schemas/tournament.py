@@ -183,6 +183,12 @@ class CancellationOut(BaseModel):
     cancelled_at: str | None = None
     # cancel = 报名阶段取消；withdraw = 开赛后退出（该场已建过 PlayerStats）
     kind: str = "cancel"
+    # 谁把它取消/移出的（与审计 detail.by 同一份语义）：
+    #   self = 本人；host = 房主代取消；admin = 管理员代取消；other = 其他代操作。
+    # 老数据没有记录 → cancelled_by 为 None，前端按「本人」处理、不显示代言。
+    cancelled_by_id: int | None = None
+    cancelled_by_username: str | None = None
+    cancelled_by: str | None = None
 
     class Config:
         from_attributes = True

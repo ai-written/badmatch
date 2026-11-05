@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from collections.abc import Iterable
 from datetime import date as date_cls, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import noload
+from sqlalchemy.orm import noload, aliased
 from sqlalchemy import select, func, delete, or_
 from app.core.database import get_db
 from app.core.security import require_user, _auth_user_loads
@@ -638,6 +638,8 @@ async def register(
         reg.is_active = True
         # 又回来了就不算「取消记录」，清掉取消时间（否则记录页会留着一条已失效的取消）
         reg.cancelled_at = None
+        # 「谁取消的」一并清掉：不然下次万一被别人代取消，这里会先留下上一次的操作者痕迹
+        reg.cancelled_by_id = None
         # created_at 当作「这一次报名的时间」：重新报名要刷新，否则名单里会显示几天前
         # 的旧时间、排序也停在第一次报名的位置，与「按报名时间排」的语义相反
         reg.created_at = func.now()
@@ -652,8 +654,13 @@ async def register(
     return {"ok": True}
 
 
-async def _deactivate_registration(db: AsyncSession, t: Tournament, target_user_id: int) -> Registration:
-    """把某人的报名标记为失效（不删行、记取消时间）。没报名/已失效 → 400。"""
+async def _deactivate_registration(db: AsyncSession, t: Tournament, target_user_id: int,
+                                   by_id: int) -> Registration:
+    """把某人的报名标记为失效（不删行、记取消时间与操作者）。没报名/已失效 → 400。
+
+    `by_id` = 实际操作者：本人取消时就是他自己；房主/管理员代操作时是那个人 ——
+    「取消/退赛记录」据此显示"由房主 X 代取消"。
+    """
     result = await db.execute(
         select(Registration).where(
             Registration.tournament_id == t.id,
@@ -666,6 +673,7 @@ async def _deactivate_registration(db: AsyncSession, t: Tournament, target_user_
     reg.is_active = False
     # 时间交给数据库生成（now()），与 created_at 的 server_default=func.now() 同一时区口径
     reg.cancelled_at = func.now()
+    reg.cancelled_by_id = by_id
     return reg
 
 
@@ -687,7 +695,7 @@ async def cancel_register(
     # 该选手还在打，报名人数与报名列表却少了他。
     if t.status != TournamentStatus.OPEN:
         raise HTTPException(status_code=400, detail="报名已截止，无法取消报名")
-    await _deactivate_registration(db, t, user.id)
+    await _deactivate_registration(db, t, user.id, by_id=user.id)
     # 先提交再广播再审计（同上）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
@@ -735,7 +743,7 @@ async def cancel_registration_for_other(
     if t.creator_id == user_id and not is_self:
         raise HTTPException(status_code=400, detail="不能把房主移出报名名单，房主请自行取消报名")
 
-    await _deactivate_registration(db, t, user_id)
+    await _deactivate_registration(db, t, user_id, by_id=user.id)
 
     if not is_self:
         # 被移出的人得知道发生了什么（他可能正在路上/刚跟人说好要来）
@@ -805,12 +813,23 @@ async def list_cancellations(
     from app.models.user import User as UserModel
     from app.models.tournament import PlayerStats as PlayerStatsModel
     # 与 /rounds 一致：赛事不存在给 404，否则前端会把「赛事已删除」显示成「暂无记录」
-    exists = await db.execute(select(Tournament.id).where(Tournament.id == tournament_id))
-    if exists.scalar_one_or_none() is None:
+    exists = await db.execute(
+        select(Tournament.id, Tournament.creator_id).where(Tournament.id == tournament_id)
+    )
+    found = exists.first()
+    if found is None:
         raise HTTPException(status_code=404, detail="赛事不存在")
+    creator_id = found[1]
+    # 取消/退赛的"操作者"：本人自取消时就是他自己；房主/管理员代操作时是那个人
+    # （registrations.cancelled_by_id，与审计里的 by 同一份语义）。
+    Operator = aliased(UserModel)
     result = await db.execute(
-        select(Registration, UserModel.username, UserModel.avatar, PlayerStatsModel.is_active)
+        select(
+            Registration, UserModel.username, UserModel.avatar, PlayerStatsModel.is_active,
+            Operator.username, Operator.role,
+        )
         .join(UserModel, Registration.user_id == UserModel.id)
+        .outerjoin(Operator, Registration.cancelled_by_id == Operator.id)
         .outerjoin(
             PlayerStatsModel,
             (PlayerStatsModel.tournament_id == Registration.tournament_id)
@@ -821,6 +840,20 @@ async def list_cancellations(
         .order_by(Registration.cancelled_at.desc().nulls_last(), Registration.id.desc())
     )
     rows = result.all()
+
+    def _by_role(by_id, by_role, target_user_id) -> str | None:
+        """代操作的语义（与审计 detail.by 一致）：self / host / admin / other。
+        老数据没有这一列 → None（前端不显示代言，按本人处理）。"""
+        if by_id is None:
+            return None
+        if by_id == target_user_id:
+            return "self"
+        if by_id == creator_id:
+            return "host"
+        if by_role in ("admin", "superadmin"):
+            return "admin"
+        return "other"
+
     return [
         CancellationOut(
             user_id=row[0].user_id,
@@ -828,6 +861,9 @@ async def list_cancellations(
             avatar=row[2],
             cancelled_at=row[0].cancelled_at.isoformat() if row[0].cancelled_at else None,
             kind="withdraw" if row[3] is False else "cancel",
+            cancelled_by_id=row[0].cancelled_by_id,
+            cancelled_by_username=row[4],
+            cancelled_by=_by_role(row[0].cancelled_by_id, row[5], row[0].user_id),
         )
         for row in rows
     ]

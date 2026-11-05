@@ -88,6 +88,8 @@ async def start_tournament(
     for r in disabled_regs.scalars().all():
         r.is_active = False
         r.cancelled_at = func.now()
+        # 开赛时被自动取消的报名：操作者是点「开始比赛」的人（记录里就这么显示）
+        r.cancelled_by_id = user.id
         disabled_cancelled += 1
 
     regs = await db.execute(
@@ -788,6 +790,7 @@ async def withdraw_player(
         # 与 cancel-register 同一口径：取消/退赛都要记时间，否则「取消报名记录」里
         # 这条只能显示「时间未知」，和「老数据缺列」的兜底语义混淆
         r.cancelled_at = func.now()
+        r.cancelled_by_id = user.id
         # 先提交再广播再审计（见 auth.update_profile 的说明）
         await db.commit()
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
@@ -825,6 +828,8 @@ async def withdraw_player(
         # 同上：开赛后退出也要记时间（取消报名记录接口按「有没有失效的 PlayerStats」
         # 区分它是「报名阶段取消」还是「赛中退赛」）
         reg_record.cancelled_at = func.now()
+        # 操作者（本人 / 房主代 / 管理员代）——「取消/退赛记录」据此显示代言
+        reg_record.cancelled_by_id = user.id
 
     if not ps.is_active:
         # 已退赛（如旧版本残留状态）：若本人仍是房主，先把房主转给剩余活跃选手，
