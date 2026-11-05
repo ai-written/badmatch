@@ -2268,8 +2268,123 @@ async function scenarioRemoveRegistration(page) {
     /\/withdraw\/2$/.test(withdrawPath), withdrawPath || '(没发请求)')
 }
 
+/** 场景 20：积分榜点「胜/负」数字看明细（搭挡 / 对手 / 比分 / 第N场 / 场地时间）
+ *
+ * 看点：
+ *   1. 数字口径 = 已结束场次，**进行中的比赛不计入**（点开条数要等于数字）
+ *   2. 明细里的「第N场」必须与对阵表同一口径（withGlobalIndex：轮次顺序 + 轮内 id）
+ *   3. 任何人的数字都能点（不只是自己）
+ *   4. 0 场的数字不可点（点开只会是空列表）
+ */
+async function scenarioRankingMatchDetail(page) {
+  console.log('20) 积分榜：点胜/负看明细')
+  const me = { id: 1, username: '张三', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  const P = (id, username) => ({ id, username, avatar: '' })
+  const pair = (id, a, b) => ({ id, player_a: P(...a), player_b: P(...b) })
+  const mk = (id, rd, pa, pb, winner, sa, sb, status = 'finished') => ({
+    id, round_id: rd, round_number: rd, pairing_a: pa, pairing_b: pb,
+    court_name: '1号场', start_time: '19:20:00', end_time: '19:40:00',
+    score_a: sa, score_b: sb, score_version: 1, winner_pairing_id: winner,
+    referee: null, active_referee: null, referee_released_at: null, status,
+    can_referee: false, support_a: 0, support_b: 0, my_support: null,
+    support_a_users: [], support_b_users: [], is_swapped: false,
+    duration_seconds: null, started_at: null, ended_at: null, now: null,
+    tournament_status: 'finished',
+  })
+  // 我(1) 参与的三场：第1场赢、第2场输、第3场赢；第4场还在打（不计入）
+  const roundsMock = [
+    {
+      id: 1, round_number: 1, status: 'pending', is_regenerated: false, matches: [
+        mk(101, 1, pair(1001, [1, '张三'], [2, '李四']), pair(1002, [3, '王五'], [4, '赵六']), 1001, 11, 7),
+        mk(102, 1, pair(1003, [1, '张三'], [3, '王五']), pair(1004, [2, '李四'], [4, '赵六']), 1004, 5, 11),
+      ],
+    },
+    {
+      id: 2, round_number: 2, status: 'pending', is_regenerated: false, matches: [
+        mk(103, 2, pair(1005, [1, '张三'], [4, '赵六']), pair(1006, [2, '李四'], [3, '王五']), 1005, 11, 9),
+        mk(104, 2, pair(1007, [2, '李四'], [4, '赵六']), pair(1008, [1, '张三'], [3, '王五']), null, null, null, 'pending'),
+      ],
+    },
+  ]
+  const rankingsMock = {
+    tournament_id: 2, tournament_title: '周五养生局',
+    rankings: [
+      { rank: 1, user_id: 1, username: '张三', avatar: '', matches_played: 3, matches_won: 2, matches_lost: 1, points_for: 27, points_against: 27, point_diff: 0, is_active: true },
+      { rank: 2, user_id: 2, username: '李四', avatar: '', matches_played: 3, matches_won: 1, matches_lost: 2, points_for: 25, points_against: 29, point_diff: -4, is_active: true },
+      { rank: 0, user_id: 9, username: '新来的', avatar: '', matches_played: 0, matches_won: 0, matches_lost: 0, points_for: 0, points_against: 0, point_diff: 0, is_active: false },
+    ],
+  }
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/\/rankings$/.test(path)) return rankingsMock
+    if (/\/rounds$/.test(path)) return roundsMock
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/tournament/2/rankings', 2400)
+
+  const wlClick = (name, which) => page.ev(`(() => {
+    const row = [...document.querySelectorAll('.rank-row')].find(e => (e.textContent || '').includes(${JSON.stringify(name)}))
+    if (!row) return 'NOROW'
+    const el = row.querySelector('.col-wl .wl-' + ${JSON.stringify(which[0] === 'w' ? 'win' : 'lose')})
+    if (!el) return 'NOEL'
+    el.click(); return 'OK' })()`)
+  const sheetTitle = () => page.ev(`(document.querySelector('.picker-title')?.textContent || '').trim()`)
+  const rowsText = () => page.ev(`[...document.querySelectorAll('.match-row')].map(e => (e.textContent || '').replace(/\\s+/g, ' ').trim())`)
+  // 弹层是 v-show 控制（关闭后 DOM 还在），必须看 computed display，不能只看元素存在
+  const sheetOpen = () => page.ev(`(() => {
+    const body = document.querySelector('.match-body')
+    const popup = body && body.closest('.van-popup')
+    return !!popup && getComputedStyle(popup).display !== 'none' })()`)
+  const closeSheet = async () => {
+    await page.ev(`document.querySelector('.picker-toolbar span')?.click(); true`)
+    await sleep(500)
+  }
+
+  assert('积分榜渲染出 3 行', (await page.ev(`document.querySelectorAll('.rank-row').length`)) === 3,
+    await page.ev(`document.querySelectorAll('.rank-row').length`))
+
+  // ---- 点自己的「2」（胜）----
+  assert('点自己的胜场数字', (await wlClick('张三', 'win')) === 'OK')
+  await sleep(900)
+  assert('弹出明细弹层', (await sheetOpen()) === true)
+  assert('标题写明是几胜 / 已结束几场',
+    (await sheetTitle()) === '张三 · 2 胜（已结束 3 场）', await sheetTitle())
+  const wins = await rowsText()
+  assert('只列赢的场次（进行中的那场不计入）', wins.length === 2, JSON.stringify(wins))
+  assert('明细里有搭挡与对手', wins[0]?.includes('搭挡 李四') && wins[0]?.includes('对手 王五 / 赵六'),
+    JSON.stringify(wins[0]))
+  assert('明细带「第N场」与比分', wins[0]?.includes('第1场') && wins[0]?.includes('11 : 7'),
+    JSON.stringify(wins[0]))
+  assert('明细带场地与时间', wins[0]?.includes('1号场') && wins[0]?.includes('19:20'), JSON.stringify(wins[0]))
+  await closeSheet()
+
+  // ---- 点自己的「1」（负）----
+  assert('点自己的负场数字', (await wlClick('张三', 'lose')) === 'OK')
+  await sleep(900)
+  assert('标题切到 1 负', (await sheetTitle()) === '张三 · 1 负（已结束 3 场）', await sheetTitle())
+  const losses = await rowsText()
+  assert('只列输的场次', losses.length === 1, JSON.stringify(losses))
+  assert('负场里比分是 5 : 11、搭挡王五',
+    losses[0]?.includes('5 : 11') && losses[0]?.includes('搭挡 王五'), JSON.stringify(losses[0]))
+  await closeSheet()
+
+  // ---- 别人的数字也能点 ----
+  assert('点别人的胜场数字', (await wlClick('李四', 'win')) === 'OK')
+  await sleep(900)
+  assert('别人的明细也打得开', (await sheetTitle()).startsWith('李四 · 1 胜'), await sheetTitle())
+  await closeSheet()
+
+  // ---- 0 场的数字点了没反应 ----
+  await wlClick('新来的', 'win')
+  await sleep(600)
+  assert('0 场的数字点了不弹层', (await sheetOpen()) === false)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration, scenarioRankingMatchDetail]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

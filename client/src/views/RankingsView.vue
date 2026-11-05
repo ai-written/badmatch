@@ -33,7 +33,19 @@
             <van-image lazy-load round width="28" height="28" :src="p.avatar || defaultAvatar" />
             <span class="p-name">{{ p.username }}</span>
           </div>
-          <span class="col-wl"><em class="wl-win">{{ p.matches_won }}</em>-{{ p.matches_lost }}</span>
+          <!-- 胜/负两个数字各自可点：看「我赢/输的那几场，和谁搭挡、对手是谁」。
+               0 场的那个数字不可点（点开只会是空列表） -->
+          <span class="col-wl">
+            <em
+              class="wl-win"
+              :class="{ tappable: canOpen(p) }"
+              @click.stop="openMatches(p, 'win')"
+            >{{ p.matches_won }}</em><span class="wl-dash">-</span><em
+              class="wl-lose"
+              :class="{ tappable: canOpen(p) }"
+              @click.stop="openMatches(p, 'lose')"
+            >{{ p.matches_lost }}</em>
+          </span>
           <span class="col-diff" :class="p.point_diff >= 0 ? 'positive' : 'negative'">{{ p.point_diff > 0 ? '+' : '' }}{{ p.point_diff }}</span>
           <span class="col-rate">{{ winRate(p) }}%</span>
         </div>
@@ -42,6 +54,35 @@
       </div>
     </van-pull-refresh>
     </div>
+
+    <!-- 点胜/负数字：这一档场次的明细（搭挡、对手、比分、第N场、场地时间）。
+         数据复用 /rounds（一次懒加载后本地筛），不额外加接口 -->
+    <van-popup v-model:show="showMatches" round position="bottom" class="vh-sheet vh-65" lock-scroll>
+      <div class="picker-toolbar">
+        <span @click="showMatches = false">关闭</span>
+        <span class="picker-title">{{ matchTitle }}</span>
+      </div>
+      <div class="vh-sheet-body match-body">
+        <van-loading v-if="matchesLoading" class="sheet-loading" />
+        <div v-else-if="matchesFailed" class="match-empty" @click="loadRounds(true)">
+          加载失败，点这里重试
+        </div>
+        <div v-else-if="!matchRows.length" class="match-empty">
+          还没有{{ matchResult === 'win' ? '赢' : '输' }}过的比赛
+        </div>
+        <div v-else class="match-list">
+          <div v-for="row in matchRows" :key="row.matchId" class="match-row">
+            <span class="m-no">第{{ row.no }}场</span>
+            <span class="m-score" :class="row.won ? 'won' : 'lost'">{{ row.score }}</span>
+            <span class="m-detail">
+              <span class="m-partner">搭挡 {{ row.partner }}</span>
+              <span class="m-vs"> · 对手 {{ row.opponents.join(' / ') }}</span>
+            </span>
+            <span v-if="row.where" class="m-where">{{ row.where }}</span>
+          </div>
+        </div>
+      </div>
+    </van-popup>
 
     <!-- 分享预览遮罩：与报名海报共用（微信内的交互约束都在组件里） -->
     <ShareImageOverlay
@@ -66,6 +107,7 @@ import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
+import { withGlobalIndex } from '@/utils/schedule'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -86,6 +128,97 @@ const visibleRankings = computed(() => {
 function winRate(p: any) {
   if (p.matches_played === 0) return 0
   return Math.round((p.matches_won / p.matches_played) * 100)
+}
+
+/* ---------------- 点胜/负数字看明细 ----------------
+ * 数据来自 /tournaments/{id}/rounds（点第一次时才拉，之后复用），在本地筛出
+ * 「已结束 + 我在这场的某个 pairing 里 + 赢/输」的场次。
+ * 为什么不在后端加接口：这些字段对阵表接口本来就有（全场最多 100 场），
+ * 且「第N场」的编号规则要和对阵表完全一致（withGlobalIndex）。
+ * 注意数字口径：8-4 = 胜-负，分母是**已结束**的场次，进行中的比赛不计入。
+ */
+const showMatches = ref(false)
+const matchTarget = ref<any>(null)
+const matchResult = ref<'win' | 'lose'>('win')
+const rounds = ref<any[]>([])
+const roundsLoaded = ref(false)
+const matchesLoading = ref(false)
+const matchesFailed = ref(false)
+
+const matchTitle = computed(() => {
+  const t = matchTarget.value
+  if (!t) return ''
+  const n = matchResult.value === 'win' ? t.matches_won : t.matches_lost
+  return `${t.username} · ${n} ${matchResult.value === 'win' ? '胜' : '负'}（已结束 ${t.matches_played} 场）`
+})
+
+const matchRows = computed(() =>
+  buildMatchRows(rounds.value, matchTarget.value?.user_id, matchResult.value),
+)
+
+function buildMatchRows(roundsData: any[], userId: number | undefined, result: 'win' | 'lose') {
+  if (!userId) return []
+  const rows: any[] = []
+  // withGlobalIndex：全局「第N场」编号，必须对**全量**赛程调用（与对阵表同一口径）
+  for (const r of withGlobalIndex(roundsData)) {
+    for (const m of r.matches || []) {
+      if (m.status !== 'finished') continue
+      // 没有胜方的"已结束"数据（历史脏数据）跳过：算成"负"是冤枉人，
+      // 而 PlayerStats 当初也没为这种场次记过账（结算时一定写 winner）
+      if (m.winner_pairing_id == null) continue
+      const pa = m.pairing_a
+      const pb = m.pairing_b
+      const inA = pa?.player_a?.id === userId || pa?.player_b?.id === userId
+      const inB = pb?.player_a?.id === userId || pb?.player_b?.id === userId
+      if (!inA && !inB) continue
+      const mine = inA ? pa : pb
+      const other = inA ? pb : pa
+      const won = m.winner_pairing_id === mine.id
+      if (won !== (result === 'win')) continue
+      const partner = mine.player_a.id === userId ? mine.player_b : mine.player_a
+      const mineScore = inA ? m.score_a : m.score_b
+      const oppScore = inA ? m.score_b : m.score_a
+      rows.push({
+        matchId: m.id,
+        no: m.globalIdx,
+        won,
+        score: `${mineScore ?? '-'} : ${oppScore ?? '-'}`,
+        partner: partner.username,
+        opponents: [other?.player_a?.username, other?.player_b?.username].filter(Boolean),
+        where: [m.court_name, m.start_time ? String(m.start_time).slice(0, 5) : '']
+          .filter(Boolean).join(' '),
+      })
+    }
+  }
+  return rows
+}
+
+/** 有已打完的比赛才让数字可点（0 场的点开只会是空列表） */
+function canOpen(p: any) {
+  return (p?.matches_played || 0) > 0
+}
+
+async function loadRounds(force = false) {
+  if (roundsLoaded.value && !force) return
+  matchesLoading.value = true
+  matchesFailed.value = false
+  try {
+    const res = await api.get(`/tournaments/${tid}/rounds`, { skipLoading: true } as any)
+    rounds.value = res.data || []
+    roundsLoaded.value = true
+  } catch {
+    matchesFailed.value = true
+  } finally {
+    matchesLoading.value = false
+  }
+}
+
+async function openMatches(p: any, result: 'win' | 'lose') {
+  if (!canOpen(p)) return
+  matchTarget.value = p
+  matchResult.value = result
+  showMatches.value = true
+  await loadRounds()
 }
 
 async function fetchRankings(skipLoading = false) {
@@ -178,8 +311,15 @@ onUnmounted(closeShare)
 .col-rank { width: 22px; font-weight: 700; font-size: 15px; color: #333; text-align: center; flex-shrink: 0; }
 .col-player { flex: 1.5; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .p-name { font-size: 12px; color: #333; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-wl { flex: 1; text-align: center; font-size: 15px; color: #666; letter-spacing: 2px; }
-.wl-win { font-style: normal; color: #e74c3c; font-weight: 600; margin-right: 2px; }
+.col-wl { flex: 1; text-align: center; font-size: 15px; color: #666; }
+.wl-win { font-style: normal; color: #e74c3c; font-weight: 600; }
+/* 负场保持中性色（不改原有观感），但两个数字都可以点 */
+.wl-lose { font-style: normal; font-weight: 600; color: #666; }
+.wl-dash { margin: 0 1px; }
+/* 可点的数字：**不加**静态下划线 —— 15px 的数字上压一条虚线下划线，看起来像多出来的
+   短横（"2 -1" 会被看成 "2 --1"）。改用按下时的高亮做反馈，干净且不误导。 */
+.col-wl .tappable { cursor: pointer; padding: 0 2px; border-radius: 4px; }
+.col-wl .tappable:active { background: rgba(0, 0, 0, .07); }
 .col-diff { flex: 1; text-align: center; font-size: 15px; font-weight: 600; }
 .positive { color: #07c160; }
 .negative { color: #e74c3c; }
@@ -187,4 +327,27 @@ onUnmounted(closeShare)
 
 /* ---- 分享 ---- */
 .share-btn { color: #1989fa; padding: 4px 2px; }
+
+/* ---- 点胜/负看明细 ---- */
+.picker-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; font-size: 14px; color: #1989fa; flex-shrink: 0;
+}
+.picker-title { color: #323233; font-weight: 600; font-size: 15px; }
+.sheet-loading { display: flex; justify-content: center; padding: 40px 0; }
+.match-body { padding: 0 16px 16px; }
+.match-empty { padding: 40px 0; text-align: center; color: #969799; font-size: 13px; }
+.match-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 9px 0; border-bottom: 1px solid #f5f5f5; font-size: 13px;
+}
+.match-row:last-child { border-bottom: none; }
+.m-no { color: #969799; font-size: 12px; flex-shrink: 0; }
+.m-score { font-weight: 700; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.m-score.won { color: #07c160; }
+.m-score.lost { color: #e74c3c; }
+/* 搭挡/对手一行里允许折行：名字不能截断（场地时间在右侧固定） */
+.m-detail { flex: 1; min-width: 0; color: #323233; word-break: break-word; }
+.m-vs { color: #969799; }
+.m-where { color: #c8c9cc; font-size: 11px; flex-shrink: 0; }
 </style>
