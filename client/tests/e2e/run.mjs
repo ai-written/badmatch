@@ -2117,8 +2117,109 @@ async function scenarioAccessLogExcludeSelf(page) {
     JSON.stringify(accessReqs().map((r) => r.search)))
 }
 
+/** 场景 19：房主/管理员把报名者移出名单（报名中 = 代取消报名）
+ *
+ * 原先只有本人能取消报名：报名期有人来不了、又不肯自己在手机上点，房主就一点办法
+ * 没有（名额被占着）。这条入口是后加的，守住几件容易做错的事：
+ *   1. 只有房主/管理员点**别人**才出操作面板；点自己还是看战绩（自己的行不给"移出"）
+ *   2. 必须二次确认，且文案要说清"他会收到站内提醒"
+ *   3. 请求打到 cancel-registration/{对方 user_id}，不是自己
+ *   4. 移完名单要刷新（少一个人）
+ *   5. 普通路人点别人：不出面板
+ */
+async function scenarioRemoveRegistration(page) {
+  console.log('19) 赛事详情：房主/管理员移出报名者')
+  const host = { id: 1, username: '房主', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  const stranger = { id: 9, username: '路人', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  const baseRegs = () => [
+    { id: 11, user_id: 1, username: '房主', avatar: '', created_at: '2026-11-01T10:00:00', user_is_active: true },
+    { id: 12, user_id: 2, username: '张三', avatar: '', created_at: '2026-11-01T10:05:00', user_is_active: true },
+    { id: 13, user_id: 3, username: '李四', avatar: '', created_at: '2026-11-01T10:06:00', user_is_active: true },
+  ]
+  let regs = baseRegs()
+  const detail = () => ({
+    id: 2, creator_id: 1, title: '周五养生局', description: null, location: '奥体中心',
+    start_date: '2026-11-06T19:00:00', end_date: '2026-11-06T21:00:00',
+    max_participants: 8, status: 'open', courts: [], registered_count: regs.length,
+    cancelled_count: 0, pending_referee_count: 0, started_match_count: 0,
+    total_matches: null, points_to_win: 11, registration_open_at: null,
+    server_now: '2026-11-05T10:00:00', is_registered: true, is_on_site: false,
+    created_at: '2026-11-01T09:00:00',
+  })
+  const mockFor = (who) => (path) => {
+    if (/auth\/me$/.test(path)) return who
+    if (/\/registrations$/.test(path)) return regs
+    if (/cancel-registration\/\d+$/.test(path)) {
+      const uid = Number(path.split('/').pop())
+      regs = regs.filter((r) => r.user_id !== uid)
+      return { ok: true, message: '已移出报名名单' }
+    }
+    if (/\/tournaments\/2$/.test(path)) return detail()
+    if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  }
+
+  const chipClick = (name) => page.ev(`(() => {
+    const c = [...document.querySelectorAll('.player-chip')].find(e => (e.textContent || '').includes(${JSON.stringify(name)}))
+    if (!c) return 'NOCHIP'
+    c.click(); return 'OK' })()`)
+  const sheetVisible = () => page.ev(`[...document.querySelectorAll('.van-action-sheet')].some(el => getComputedStyle(el).display !== 'none')`)
+  const sheetActions = () => page.ev(`[...document.querySelectorAll('.van-action-sheet__item')].map(e => (e.textContent || '').trim())`)
+  const clickSheetAction = async (text) => {
+    const r = await page.ev(`(() => {
+      const el = [...document.querySelectorAll('.van-action-sheet__item')].find(e => (e.textContent || '').trim() === ${JSON.stringify(text)})
+      if (!el) return 'NOTFOUND'
+      el.click(); return 'OK' })()`)
+    await sleep(600)
+    return r
+  }
+  const cancelPosts = () => page.requests.filter((r) => /cancel-registration\//.test(r.path))
+  const chipCount = () => page.ev(`document.querySelectorAll('.player-chip').length`)
+  const toastText = () => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
+
+  await page.enableMock(mockFor(host))
+  await page.setToken()
+  await page.goto('/tournament/2', 2400)
+
+  // ---- 房主点别人：出操作面板，能移出 ----
+  assert('房主点报名者的头像', (await chipClick('张三')) === 'OK')
+  await sleep(500)
+  assert('弹出操作面板', (await sheetVisible()) === true)
+  const acts = await sheetActions()
+  assert('面板里有「查看战绩」和「移出报名名单」',
+    acts.includes('查看战绩') && acts.includes('移出报名名单'), JSON.stringify(acts))
+
+  page.requests = []
+  assert('选「移出报名名单」', (await clickSheetAction('移出报名名单')) === 'OK')
+  const d = await page.dialog()
+  assert('先弹确认框', (d?.标题 || '') === '移出报名名单', d?.标题)
+  assert('确认框写明被移出的人会收到站内提醒', (d?.正文 || '').includes('站内提醒'), d?.正文)
+  await page.confirmDialog()
+  const posts = cancelPosts()
+  assert('恰好 1 个代取消请求', posts.length === 1, JSON.stringify(posts.map((p) => p.path)))
+  assert('请求打给被移出的人（user_id=2），不是自己',
+    /cancel-registration\/2$/.test(posts[0]?.path || ''), posts[0]?.path)
+  assert('提示已移出', (await toastText()) === '已移出报名名单', await toastText())
+  assert('名单刷新后少了一个人', (await chipCount()) === 2, await chipCount())
+
+  // ---- 点自己的头像：还是看战绩，不给自己"移出" ----
+  await chipClick('房主')
+  await sleep(600)
+  assert('点自己不出现"移出"面板', (await sheetVisible()) === false)
+
+  // ---- 普通路人点别人：不出面板 ----
+  regs = baseRegs().slice(0, 2)
+  await page.enableMock(mockFor(stranger))
+  await page.goto('/tournament/2', 2200)
+  await chipClick('张三')
+  await sleep(600)
+  assert('路人点别人不会出"移出"面板', (await sheetVisible()) === false)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

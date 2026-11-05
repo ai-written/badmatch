@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.security import require_user, _auth_user_loads
 from app.core.audit import audit, get_client_ip
 from app.models.user import User
-from app.models.round import Match, MatchStatus
+from app.models.round import Match, MatchStatus, Notification
 from app.models.tournament import (
     Tournament, TournamentStatus, Registration, PlayerStats, Court, TimeSlot,
 )
@@ -652,6 +652,23 @@ async def register(
     return {"ok": True}
 
 
+async def _deactivate_registration(db: AsyncSession, t: Tournament, target_user_id: int) -> Registration:
+    """把某人的报名标记为失效（不删行、记取消时间）。没报名/已失效 → 400。"""
+    result = await db.execute(
+        select(Registration).where(
+            Registration.tournament_id == t.id,
+            Registration.user_id == target_user_id,
+        )
+    )
+    reg = result.scalar_one_or_none()
+    if not reg or not reg.is_active:
+        raise HTTPException(status_code=400, detail="未报名")
+    reg.is_active = False
+    # 时间交给数据库生成（now()），与 created_at 的 server_default=func.now() 同一时区口径
+    reg.cancelled_at = func.now()
+    return reg
+
+
 @router.post("/{tournament_id}/cancel-register")
 async def cancel_register(
     tournament_id: int,
@@ -670,23 +687,73 @@ async def cancel_register(
     # 该选手还在打，报名人数与报名列表却少了他。
     if t.status != TournamentStatus.OPEN:
         raise HTTPException(status_code=400, detail="报名已截止，无法取消报名")
-    result = await db.execute(
-        select(Registration).where(
-            Registration.tournament_id == tournament_id,
-            Registration.user_id == user.id,
-        )
-    )
-    reg = result.scalar_one_or_none()
-    if not reg or not reg.is_active:
-        raise HTTPException(status_code=400, detail="未报名")
-    reg.is_active = False
-    # 时间交给数据库生成（now()），与 created_at 的 server_default=func.now() 同一时区口径
-    reg.cancelled_at = func.now()
+    await _deactivate_registration(db, t, user.id)
     # 先提交再广播再审计（同上）
     await db.commit()
     await manager.broadcast(tournament_id, {"type": "registration_updated"})
-    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id, ip=get_client_ip(request))
-    return {"ok": True}
+    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id,
+                detail={"target_user_id": user.id, "by": "self"},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return {"ok": True, "message": "已取消报名"}
+
+
+@router.post("/{tournament_id}/cancel-registration/{user_id}")
+async def cancel_registration_for_other(
+    tournament_id: int,
+    user_id: int,
+    request: Request,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """房主 / 管理员 / 超管把**别人**从报名名单里移出（等价于他自己点「取消报名」）。
+
+    为什么需要：报名期"有人说来不了"很常见，而他本人未必会在手机上点取消 ——
+    房主原先没有任何办法把人移出名单：名额被占着、后面的球友报不进来，只能催他本人，
+    或者动用「禁用账号」那种重手段（还不立即生效，要等到开赛那一刻才自动取消报名）。
+
+    边界与 cancel-register 完全一致，只多了一层"代人操作"的权限判断：
+    - 仅**报名中**可用；开赛后必须走 withdraw（它会同时失效 PlayerStats），
+      否则会出现「报名已失效、人却还在打」的名单错位；
+    - 只标记失效、不删行，记 cancelled_at，在「取消/退赛记录」里查得到（审计记了谁代的）；
+    - **不能代取消房主自己**：房主要走的话自己点「取消报名」；被别人从名单里移掉
+      只会让页面上的「房主」徽标凭空消失，赛事看起来没人管；
+    - 权限与"编辑赛事"同一口径：赛事创建者、管理员、超级管理员。
+    """
+    t_result = await db.execute(
+        select(Tournament).where(Tournament.id == tournament_id).options(*_brief_loads()).with_for_update()
+    )
+    t = t_result.scalar_one_or_none()
+    if not t:
+        raise HTTPException(status_code=404, detail="赛事不存在")
+    if t.status != TournamentStatus.OPEN:
+        raise HTTPException(status_code=400, detail="报名已截止，开赛后请用「退赛」")
+    is_self = user_id == user.id
+    is_host = t.creator_id == user.id
+    is_admin = user.role in ("admin", "superadmin")
+    if not (is_self or is_host or is_admin):
+        raise HTTPException(status_code=403, detail="只有房主、管理员或超级管理员可以移出报名者")
+    if t.creator_id == user_id and not is_self:
+        raise HTTPException(status_code=400, detail="不能把房主移出报名名单，房主请自行取消报名")
+
+    await _deactivate_registration(db, t, user_id)
+
+    if not is_self:
+        # 被移出的人得知道发生了什么（他可能正在路上/刚跟人说好要来）
+        db.add(Notification(
+            user_id=user_id,
+            tournament_id=t.id,
+            type="registration_removed",
+            message=f"你已被{'房主' if is_host else '管理员'}移出「{t.title}」的报名名单。",
+        ))
+
+    # 先提交再广播再审计（同 cancel_register）
+    await db.commit()
+    await manager.broadcast(tournament_id, {"type": "registration_updated"})
+    await audit(user=user, action="cancel_registration", target_type="tournament", target_id=t.id,
+                detail={"target_user_id": user_id,
+                        "by": "self" if is_self else ("host" if is_host else "admin")},
+                ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return {"ok": True, "message": "已移出报名名单" if not is_self else "已取消报名"}
 
 
 @router.get("/{tournament_id}/registrations", response_model=list[RegistrationOut])

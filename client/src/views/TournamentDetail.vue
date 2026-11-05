@@ -79,7 +79,7 @@
           </span>
         </div>
         <div class="player-grid" v-if="registrations.length > 0">
-          <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="viewPlayer(r)">
+          <div v-for="r in registrations" :key="r.id" class="player-chip" @click.stop="onPlayerChip(r)">
             <div class="avatar-badge-sm">
               <van-image lazy-load round width="40" height="40" :src="r.avatar || defaultAvatar" />
               <span v-if="r.user_id === tournament.creator_id" class="host-badge">房主</span>
@@ -229,6 +229,17 @@
         </div>
       </div>
     </van-popup>
+
+    <!-- 房主/管理员点报名者的头像：看战绩，或把 TA 移出名单
+         （报名中 = 代取消报名；进行中 = 代退赛，未开打的轮次会重排） -->
+    <van-action-sheet
+      v-model:show="showPlayerActions"
+      :title="playerActionTarget?.username"
+      :actions="playerActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="onPlayerActionSelect"
+    />
 
     <!-- 报名海报预览（遮罩组件与积分榜分享图共用） -->
     <ShareImageOverlay
@@ -402,6 +413,65 @@ async function viewPlayer(r: any) {
     // 不能把「拉取失败」显示成「暂无比赛记录」——那是两回事
     statsFailed.value = true
   }
+}
+
+// ---- 房主/管理员把某人移出名单（报名中 = 代取消报名；进行中 = 代退赛）----
+// 后端同一套权限：赛事创建者、管理员、超级管理员；且只有「报名中/进行中」有这条路
+// （已结束的赛事谁也不能改）。
+const showPlayerActions = ref(false)
+const playerActionTarget = ref<any>(null)
+
+/** 这一行能不能被"移出"：自己的行不给（自己走「取消报名 / 退出比赛」），
+ *  房主自己也不给（后端同样拦：他被移掉只会让页面上的"房主"徽标凭空消失）。 */
+function canRemovePlayer(r: any) {
+  const st = tournament.value?.status
+  if (!canManage.value || (st !== 'open' && st !== 'ongoing')) return false
+  if (!r || r.user_id === auth.user?.id) return false
+  if (r.user_id === tournament.value?.creator_id) return false
+  return true
+}
+
+const playerActions = computed(() => {
+  const open = tournament.value?.status === 'open'
+  return [
+    { name: '查看战绩' },
+    { name: open ? '移出报名名单' : '移出比赛（退赛）', color: '#ee0a24' },
+  ]
+})
+
+function onPlayerChip(r: any) {
+  if (!canRemovePlayer(r)) { viewPlayer(r); return }
+  playerActionTarget.value = r
+  showPlayerActions.value = true
+}
+
+async function onPlayerActionSelect(action: any) {
+  const target = playerActionTarget.value
+  if (!target) return
+  if (action.name === '查看战绩') { viewPlayer(target); return }
+  await removePlayer(target)
+}
+
+async function removePlayer(r: any) {
+  const open = tournament.value?.status === 'open'
+  const iAmCreator = auth.user?.id === tournament.value?.creator_id
+  const asWhom = iAmCreator ? '你是房主' : '你是管理员'
+  try {
+    await showConfirmDialog({
+      title: open ? '移出报名名单' : '移出比赛',
+      message: open
+        ? `${asWhom}，把 ${r.username} 从报名名单移出？他会收到站内提醒，记录保留在「取消/退赛」里。`
+        : `${asWhom}，把 ${r.username} 移出比赛？未开打的场次会按剩余人数重排（已开打的轮次不动）。`,
+    })
+  } catch { return }
+  await withSubmitting(async () => {
+    const url = open
+      ? `/tournaments/${route.params.id}/cancel-registration/${r.user_id}`
+      : `/tournaments/${route.params.id}/withdraw/${r.user_id}`
+    const res = await api.post(url)
+    showToast({ message: res.data?.message || '已移出', duration: 2600 })
+    await refreshBoth()
+  })
 }
 
 async function fetchDetail(skipLoading = false) {

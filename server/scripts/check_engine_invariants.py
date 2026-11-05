@@ -29,6 +29,9 @@
     （实测 8 人 14 场打完 12 场退一人 → 26 场；连退两人 14 → 20 → 27 场）；
     没有可删的轮次时不硬排；剩余不足 4 人时 `total_matches` 要写回真实场次数；
     冻结轮次里含退赛者的待打场次必须提醒房主
+14. **移出报名者**：房主/管理员/超管能把别人移出报名名单（原先是本人才能取消），
+    路人不行、房主自己不能被别人移出；报名中走 cancel-registration、开赛后必须走 withdraw；
+    被移出的人收到站内提醒，审计记 by=host/admin/self
 
 用法（必须指向一个**一次性试点库**，脚本会 drop/create 全部表）：
 
@@ -62,6 +65,7 @@ import app.api.auth as auth_mod                              # noqa: E402
 import app.api.engine_api as engine_mod                      # noqa: E402
 import app.api.matches as matches_mod                        # noqa: E402
 import app.api.referee as referee_mod                        # noqa: E402
+import app.api.tournaments as tournaments_mod                # noqa: E402
 from app.core.database import Base                           # noqa: E402
 from app.models import user, tournament, round, audit, password_reset  # noqa: E402,F401
 from app.models.user import User                             # noqa: E402
@@ -78,6 +82,9 @@ from app.api.engine_api import (                              # noqa: E402
     start_tournament, withdraw_player, WithdrawBody,
 )
 from app.api.auth import set_user_active, register            # noqa: E402
+from app.api.tournaments import (                              # noqa: E402
+    cancel_register, cancel_registration_for_other,
+)
 
 FAILED: list[str] = []
 AUDITS: list[dict] = []
@@ -509,6 +516,120 @@ async def check_withdraw_sizing():
         t = await s.get(Tournament, tid)
     check("f) 计划上限始终不超过最初的计划（14 场）",
           (t.plan_total_matches or 0) <= 14, t.plan_total_matches)
+
+
+async def check_registration_removal():
+    """房主/管理员把别人移出报名名单，以及赛中的"代退赛"。
+
+    2026-11 新加的能力，守这几条边界：
+    - 房主、管理员、超管都能把**别人**移出（原先只有本人能取消报名，房主无路可走）；
+    - 路人不行（403）；**房主自己不能被别人移出**（400，他要走就自己点取消）；
+    - 报名中只能走 cancel-registration，开赛后必须走 withdraw —— 否则会出现
+      「报名已失效、人却还在打」的名单错位；
+    - 被移出的人收到站内提醒；审计记下 by=host/admin/self + target_user_id。
+    """
+    print("\n14) 移出报名者：房主/管理员可、路人不可、房主自己不可；开赛后只能走退赛")
+    admin, ids = await mk_users("rm", 6)
+    host = ids[0]
+    async with Session() as s:
+        t = Tournament(creator_id=host, title="移出测试", start_date=datetime.now(),
+                       end_date=datetime.now() + timedelta(hours=3),
+                       max_participants=6, status=TournamentStatus.OPEN, total_matches=6)
+        s.add(t)
+        await s.flush()
+        for uid in ids:
+            s.add(Registration(tournament_id=t.id, user_id=uid, is_active=True))
+        await s.commit()
+        tid = t.id
+
+    async def reg_of(uid):
+        async with Session() as s:
+            return (await s.execute(select(Registration).where(
+                Registration.tournament_id == tid,
+                Registration.user_id == uid))).scalar_one()
+
+    async def cancel_as(caller_id, target_id):
+        async with Session() as s:
+            return await cancel_registration_for_other(
+                tournament_id=tid, user_id=target_id, request=fake_request(),
+                user=await s.get(User, caller_id), db=s)
+
+    # 房主代取消
+    await cancel_as(host, ids[3])
+    reg = await reg_of(ids[3])
+    check("房主能把别人移出报名名单",
+          reg.is_active is False and reg.cancelled_at is not None, (reg.is_active, reg.cancelled_at))
+    async with Session() as s:
+        notes = (await s.execute(select(Notification).where(
+            Notification.tournament_id == tid,
+            Notification.user_id == ids[3]))).scalars().all()
+    check("被移出的人收到站内提醒", bool(notes) and "移出" in notes[0].message,
+          [n.message for n in notes])
+    check("审计记了 by=host + target_user_id",
+          any((a.get("detail") or {}).get("by") == "host"
+              and (a.get("detail") or {}).get("target_user_id") == ids[3] for a in AUDITS),
+          [a.get("detail") for a in AUDITS if a.get("action") == "cancel_registration"])
+
+    # 管理员（超管）代取消
+    await cancel_as(admin, ids[4])
+    check("管理员能把别人移出报名名单", (await reg_of(ids[4])).is_active is False,
+          (await reg_of(ids[4])).is_active)
+
+    # 路人不行
+    try:
+        await cancel_as(ids[2], ids[5])
+        check("路人不能把别人移出（应 403）", False, "竟然成功了")
+    except HTTPException as e:
+        check("路人不能把别人移出（403）", e.status_code == 403, (e.status_code, e.detail))
+
+    # 房主自己不能被别人（管理员）移出
+    try:
+        await cancel_as(admin, host)
+        check("房主不能被别人移出（应 400）", False, "竟然成功了")
+    except HTTPException as e:
+        check("房主不能被别人移出（400，让他自己取消）",
+              e.status_code == 400 and "房主" in str(e.detail), (e.status_code, e.detail))
+
+    # 本人自己取消仍然可用
+    await cancel_as(ids[5], ids[5])
+    check("本人仍可自己取消报名", (await reg_of(ids[5])).is_active is False,
+          (await reg_of(ids[5])).is_active)
+
+    # 开赛之后：这个接口一律拒绝（要走退赛）
+    async with Session() as s:
+        row = await s.get(Tournament, tid)
+        row.status = TournamentStatus.ONGOING
+        await s.commit()
+    try:
+        await cancel_as(host, ids[1])
+        check("开赛后不能走「取消报名」（应 400）", False, "竟然成功了")
+    except HTTPException as e:
+        check("开赛后不能走「取消报名」，提示改用退赛",
+              e.status_code == 400 and "退赛" in str(e.detail), (e.status_code, e.detail))
+
+    # 赛中：管理员可以代退赛（原先只有房主能）
+    admin2, ids2 = await mk_users("rm2", 6)
+    tid2 = await seed_ongoing(ids2[0], ids2, 6)
+    async with Session() as s:
+        res = await withdraw_player(tournament_id=tid2, player_id=ids2[3],
+                                    request=fake_request(), body=WithdrawBody(),
+                                    user=await s.get(User, admin2), db=s)
+    check("管理员能在赛中把别人移出（代退赛）", res.get("ok") is True, res)
+    check("代退赛审计记了 by=admin",
+          any(a.get("action") == "tournament_withdraw"
+              and (a.get("detail") or {}).get("by") == "admin" for a in AUDITS), "无")
+
+    # 路人代退赛仍然不行
+    admin3, ids3 = await mk_users("rm3", 6)
+    tid3 = await seed_ongoing(ids3[0], ids3, 6)
+    try:
+        async with Session() as s:
+            await withdraw_player(tournament_id=tid3, player_id=ids3[4],
+                                  request=fake_request(), body=WithdrawBody(),
+                                  user=await s.get(User, ids3[2]), db=s)
+        check("路人不能代退赛（应 403）", False, "竟然成功了")
+    except HTTPException as e:
+        check("路人不能代退赛（403）", e.status_code == 403, (e.status_code, e.detail))
 
 
 async def check_owner_and_invite():
@@ -1134,6 +1255,8 @@ async def main() -> int:
     matches_mod.audit = fake_audit
     # 同理：分配/认领裁判的接口也在自己模块里 import 了 audit
     referee_mod.audit = fake_audit
+    # 报名/赛事模块同样自己 import 了 audit（cancel-register 那条路径用它）
+    tournaments_mod.audit = fake_audit
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -1145,6 +1268,7 @@ async def main() -> int:
     await check_start_keeps_requested_matches_with_history()
     await check_withdraw_and_totals()
     await check_withdraw_sizing()
+    await check_registration_removal()
     await check_owner_and_invite()
     await check_reschedule()
     await check_reschedule_with_started_round()

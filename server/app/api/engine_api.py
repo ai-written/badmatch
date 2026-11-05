@@ -764,8 +764,13 @@ async def withdraw_player(
     if not tournament:
         raise HTTPException(status_code=404)
     is_self = player_id == user.id
-    if not is_self and tournament.creator_id != user.id:
+    # 房主可以代别人退赛；管理员/超管同样可以（与「编辑/重排/结束赛事」同一套权限口径）——
+    # 组织者临时不在、或者现场就他一个人有手机时，别让整场赛事卡住。
+    is_host = tournament.creator_id == user.id
+    is_admin = user.role in ("admin", "superadmin")
+    if not (is_self or is_host or is_admin):
         raise HTTPException(status_code=403, detail="无权操作")
+    withdrew_by = "self" if is_self else ("host" if is_host else "admin")
 
     # self-withdraw before tournament starts: just cancel registration
     if is_self and tournament.status == TournamentStatus.OPEN:
@@ -787,7 +792,7 @@ async def withdraw_player(
         await db.commit()
         await manager.broadcast(tournament_id, {"type": "registration_updated"})
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
-                    detail={"player_id": player_id, "self": True, "phase": "open"},
+                    detail={"player_id": player_id, "self": True, "phase": "open", "by": "self"},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         return {"ok": True, "message": "已取消报名"}
 
@@ -851,6 +856,16 @@ async def withdraw_player(
         return {"ok": True, "message": "选手已退赛"}
 
     ps.is_active = False
+
+    if not is_self:
+        # 被人移出的人得知道发生了什么：否则他打开详情页只看到「报名」按钮，
+        # 会以为是自己没报上或者被系统吞了
+        db.add(Notification(
+            user_id=player_id,
+            tournament_id=tournament_id,
+            type="registration_removed",
+            message=f"你已被{'房主' if is_host else '管理员'}移出「{tournament.title}」的比赛。",
+        ))
 
     # handle creator transfer
     if tournament.creator_id == player_id and body.new_creator_id:
@@ -1002,7 +1017,7 @@ async def withdraw_player(
         # 两条都记：一条「谁退的赛」，一条「结束赛事」。
         await audit(user=user, action="tournament_withdraw", target_type="tournament", target_id=tournament.id,
                     detail={"player_id": player_id, "remaining": remaining_count,
-                            "auto_finished": True, "reason": "players_below_4"},
+                            "auto_finished": True, "reason": "players_below_4", "by": withdrew_by},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
         await audit(user=user, action="tournament_end", target_type="tournament", target_id=tournament.id,
                     detail={"auto": True, "reason": "players_below_4"},
@@ -1147,6 +1162,7 @@ async def withdraw_player(
                         "new_matches": new_matches_count,
                         "stranded_matches": len(stranded_matches),
                         "auto_finished": auto_finished,
+                        "by": withdrew_by,
                         # 用上了哪一级避重历史（0 = 冻结轮次+最近几场，1 = 只冻结轮次）
                         "history_level": reschedule_history_level},
                 ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
