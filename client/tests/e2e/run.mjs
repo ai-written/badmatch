@@ -2240,6 +2240,32 @@ async function scenarioRemoveRegistration(page) {
   await chipClick('张三')
   await sleep(600)
   assert('路人点别人不会出"移出"面板', (await sheetVisible()) === false)
+
+  // ---- 进行中：同一入口变成「移出比赛（退赛）」，打的是 withdraw ----
+  let withdrawPath = ''
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return host
+    if (/\/registrations$/.test(path)) return baseRegs().slice(0, 2)
+    if (/withdraw\/\d+$/.test(path)) { withdrawPath = path; return { ok: true, message: '选手已退出' } }
+    if (/\/tournaments\/2$/.test(path)) return { ...detail(), status: 'ongoing', cancelled_count: 0, started_match_count: 1 }
+    if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    if (/match-options/.test(path)) return { options: [], per_person: 0 }
+    return {}
+  })
+  await page.goto('/tournament/2', 2400)
+  assert('进行中点别人的头像', (await chipClick('张三')) === 'OK')
+  await sleep(500)
+  const ongoingActs = await sheetActions()
+  assert('进行中的选项是「移出比赛（退赛）」',
+    ongoingActs.includes('移出比赛（退赛）'), JSON.stringify(ongoingActs))
+  assert('选「移出比赛（退赛）」', (await clickSheetAction('移出比赛（退赛）')) === 'OK')
+  const d2 = await page.dialog()
+  assert('确认框说明未开打的轮次会重排', (d2?.正文 || '').includes('重排'), d2?.正文)
+  await page.confirmDialog()
+  assert('进行中走的是 withdraw/{user_id}（不是 cancel-registration）',
+    /\/withdraw\/2$/.test(withdrawPath), withdrawPath || '(没发请求)')
 }
 
 // ---------------------------------------------------------------- 运行

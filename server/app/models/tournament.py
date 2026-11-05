@@ -69,8 +69,10 @@ class Registration(Base):
     # **谁**把它取消/移出的：本人自取消 = 自己的 id；房主/管理员代操作时记操作者。
     # 「取消/退赛记录」据此显示"由房主 X 代取消"。老数据没有这一列（迁移留 NULL），
     # 前端按"本人"处理、不显示代言。
+    # ondelete=SET NULL：账号被删时这里自动置空（老库没建 FK，靠 auth.delete_user 里
+    # 显式 UPDATE 兜住，两处都保留）
     cancelled_by_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True, default=None
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, default=None
     )
 
     tournament: Mapped["Tournament"] = relationship(back_populates="registrations")

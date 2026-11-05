@@ -81,7 +81,7 @@ from app.api.engine_api import (                              # noqa: E402
     AddMatchesBody, StartRequest, add_matches, extra_match_options,
     start_tournament, withdraw_player, WithdrawBody,
 )
-from app.api.auth import set_user_active, register            # noqa: E402
+from app.api.auth import set_user_active, register, delete_user       # noqa: E402
 from app.api.tournaments import (                              # noqa: E402
     cancel_register, cancel_registration_for_other, list_cancellations,
 )
@@ -658,6 +658,44 @@ async def check_registration_removal():
         check("路人不能代退赛（应 403）", False, "竟然成功了")
     except HTTPException as e:
         check("路人不能代退赛（403）", e.status_code == 403, (e.status_code, e.detail))
+
+    # ---- 删账号不能被他"代取消过报名"的记录顶住（registrations.cancelled_by_id 外键）----
+    # 实测踩过：新库有 FK、老库没有，不处理的话这个 admin 从此删不掉（500 外键冲突）
+    admin4, ids4 = await mk_users("rm4", 3)
+    async with Session() as s:
+        extra = User(username="del-admin", password_hash="x", role="admin",
+                     invite_code="del-admin", invited_by=ids4[0])
+        s.add(extra)
+        await s.commit()
+        extra_id = extra.id
+    async with Session() as s:
+        t4 = Tournament(creator_id=ids4[0], title="删账号外键", start_date=datetime.now(),
+                        end_date=datetime.now() + timedelta(hours=3),
+                        max_participants=4, status=TournamentStatus.OPEN, total_matches=4)
+        s.add(t4)
+        await s.flush()
+        s.add(Registration(tournament_id=t4.id, user_id=ids4[1], is_active=True))
+        await s.commit()
+        tid4 = t4.id
+    async with Session() as s:
+        await cancel_registration_for_other(tournament_id=tid4, user_id=ids4[1],
+                                            request=fake_request(),
+                                            user=await s.get(User, extra_id), db=s)
+    try:
+        async with Session() as s:
+            await delete_user(user_id=extra_id, request=fake_request(),
+                              admin=await s.get(User, admin), db=s)
+        deleted = True
+    except Exception as e:                                     # noqa: BLE001
+        deleted = False
+        print(f"      delete_user 异常：{type(e).__name__}: {str(e)[:120]}")
+    check("删掉「曾代别人取消过报名」的账号不会撞外键", deleted, "外键冲突")
+    async with Session() as s:
+        reg4 = (await s.execute(select(Registration).where(
+            Registration.tournament_id == tid4,
+            Registration.user_id == ids4[1]))).scalar_one()
+    check("删除后该记录的操作者被置空（不指向已删账号）", reg4.cancelled_by_id is None,
+          reg4.cancelled_by_id)
 
 
 async def check_owner_and_invite():

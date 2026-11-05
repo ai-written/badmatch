@@ -1235,6 +1235,12 @@ async def delete_user(
     from app.models.audit import AuditLog
     await db.execute(update(AuditLog).where(AuditLog.user_id == user.id).values(user_id=None))
     await db.execute(delete(Registration).where(Registration.user_id == user.id))
+    # 「谁代他取消过报名」也要断开：被删的人如果曾用「移出报名者」帮别人取消过报名，
+    # registrations.cancelled_by_id 还指着他，直接删会撞外键（新库有 FK、老库没有，
+    # 但不能依赖这点）—— 实测会 500，管理员从此删不掉这个账号。
+    await db.execute(
+        update(Registration).where(Registration.cancelled_by_id == user.id).values(cancelled_by_id=None)
+    )
     await db.execute(delete(PS).where(PS.user_id == user.id))
     await db.execute(delete(MatchSupport).where(MatchSupport.user_id == user.id))
     await db.execute(delete(Notification).where(Notification.user_id == user.id))
