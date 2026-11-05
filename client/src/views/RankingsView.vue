@@ -67,16 +67,15 @@
         <div v-else-if="matchesFailed" class="match-empty" @click="loadRounds(true)">
           加载失败，点这里重试
         </div>
-        <div v-else-if="!matchRows.length" class="match-empty">
+        <div v-else-if="!rankDetail.rows.length" class="match-empty">
           还没有{{ matchResult === 'win' ? '赢' : '输' }}过的比赛
-        </div>
-        <div v-else class="match-list">
-          <div v-for="row in matchRows" :key="row.matchId" class="match-row">
+        </div>        <div v-else class="match-list">
+          <div v-for="row in rankDetail.rows" :key="row.matchId" class="match-row">
             <span class="m-no">第{{ row.no }}场</span>
             <span class="m-score" :class="row.won ? 'won' : 'lost'">{{ row.score }}</span>
             <span class="m-detail">
               <span class="m-partner">搭挡 {{ row.partner }}</span>
-              <span class="m-vs"> · 对手 {{ row.opponents.join(' / ') }}</span>
+              <span v-if="row.opponents.length" class="m-vs"> · 对手 {{ row.opponents.join(' / ') }}</span>
             </span>
             <span v-if="row.where" class="m-where">{{ row.where }}</span>
           </div>
@@ -107,7 +106,7 @@ import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
-import { withGlobalIndex } from '@/utils/schedule'
+import { buildRankDetail } from '@/utils/rankDetail'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -131,8 +130,9 @@ function winRate(p: any) {
 }
 
 /* ---------------- 点胜/负数字看明细 ----------------
- * 数据来自 /tournaments/{id}/rounds（点第一次时才拉，之后复用），在本地筛出
- * 「已结束 + 我在这场的某个 pairing 里 + 赢/输」的场次。
+ * 数据来自 /tournaments/{id}/rounds（第一次点才拉，之后复用），在本地筛出
+ * 「已结束 + 我在这场的某个 pairing 里 + 赢/输」的场次；筛选逻辑抽在
+ * utils/rankDetail.ts（有单测），这里只管取数与弹层状态。
  * 为什么不在后端加接口：这些字段对阵表接口本来就有（全场最多 100 场），
  * 且「第N场」的编号规则要和对阵表完全一致（withGlobalIndex）。
  * 注意数字口径：8-4 = 胜-负，分母是**已结束**的场次，进行中的比赛不计入。
@@ -145,53 +145,18 @@ const roundsLoaded = ref(false)
 const matchesLoading = ref(false)
 const matchesFailed = ref(false)
 
+// 标题和列表**同源**（都从赛程算），不用积分榜行上的数字：
+// 否则赛事进行中刷新一次排名，标题的"3 胜"就可能和列表里的 2 条对不上
+const rankDetail = computed(() =>
+  buildRankDetail(rounds.value, matchTarget.value?.user_id, matchResult.value),
+)
+
 const matchTitle = computed(() => {
   const t = matchTarget.value
   if (!t) return ''
-  const n = matchResult.value === 'win' ? t.matches_won : t.matches_lost
-  return `${t.username} · ${n} ${matchResult.value === 'win' ? '胜' : '负'}（已结束 ${t.matches_played} 场）`
+  const n = rankDetail.value.rows.length
+  return `${t.username} · ${n} ${matchResult.value === 'win' ? '胜' : '负'}（已结束 ${rankDetail.value.finished} 场）`
 })
-
-const matchRows = computed(() =>
-  buildMatchRows(rounds.value, matchTarget.value?.user_id, matchResult.value),
-)
-
-function buildMatchRows(roundsData: any[], userId: number | undefined, result: 'win' | 'lose') {
-  if (!userId) return []
-  const rows: any[] = []
-  // withGlobalIndex：全局「第N场」编号，必须对**全量**赛程调用（与对阵表同一口径）
-  for (const r of withGlobalIndex(roundsData)) {
-    for (const m of r.matches || []) {
-      if (m.status !== 'finished') continue
-      // 没有胜方的"已结束"数据（历史脏数据）跳过：算成"负"是冤枉人，
-      // 而 PlayerStats 当初也没为这种场次记过账（结算时一定写 winner）
-      if (m.winner_pairing_id == null) continue
-      const pa = m.pairing_a
-      const pb = m.pairing_b
-      const inA = pa?.player_a?.id === userId || pa?.player_b?.id === userId
-      const inB = pb?.player_a?.id === userId || pb?.player_b?.id === userId
-      if (!inA && !inB) continue
-      const mine = inA ? pa : pb
-      const other = inA ? pb : pa
-      const won = m.winner_pairing_id === mine.id
-      if (won !== (result === 'win')) continue
-      const partner = mine.player_a.id === userId ? mine.player_b : mine.player_a
-      const mineScore = inA ? m.score_a : m.score_b
-      const oppScore = inA ? m.score_b : m.score_a
-      rows.push({
-        matchId: m.id,
-        no: m.globalIdx,
-        won,
-        score: `${mineScore ?? '-'} : ${oppScore ?? '-'}`,
-        partner: partner.username,
-        opponents: [other?.player_a?.username, other?.player_b?.username].filter(Boolean),
-        where: [m.court_name, m.start_time ? String(m.start_time).slice(0, 5) : '']
-          .filter(Boolean).join(' '),
-      })
-    }
-  }
-  return rows
-}
 
 /** 有已打完的比赛才让数字可点（0 场的点开只会是空列表） */
 function canOpen(p: any) {
@@ -200,14 +165,16 @@ function canOpen(p: any) {
 
 async function loadRounds(force = false) {
   if (roundsLoaded.value && !force) return
-  matchesLoading.value = true
+  // 已经有数据时静默刷新（弹层开着时被广播触发），别闪一下 loading
+  matchesLoading.value = !rounds.value.length
   matchesFailed.value = false
   try {
     const res = await api.get(`/tournaments/${tid}/rounds`, { skipLoading: true } as any)
     rounds.value = res.data || []
     roundsLoaded.value = true
   } catch {
-    matchesFailed.value = true
+    // 已经有旧数据时不要切到失败态：旧列表比"错误页"有用
+    if (!rounds.value.length) matchesFailed.value = true
   } finally {
     matchesLoading.value = false
   }
@@ -227,12 +194,26 @@ async function fetchRankings(skipLoading = false) {
 }
 
 async function onRefresh() {
-  try { await fetchRankings(true) } finally { refreshing.value = false }
+  try {
+    await fetchRankings(true)
+    roundsLoaded.value = false   // 赛程也作废，下次点数字重新拉
+  } finally { refreshing.value = false }
 }
 // 后台静默刷新：实时广播触发，不弹全局「加载中...」
-watch(lastMessage, (msg) => { if (msg?.type === 'match_updated') fetchRankings(true) })
+// 明细是赛程派生的：比赛有变动就作废缓存（弹层开着时顺手静默重拉，
+// 否则用户会看到"标题说 3 胜、列表只有 2 条"这种前后不一致）
+watch(lastMessage, (msg) => {
+  if (msg?.type !== 'match_updated') return
+  fetchRankings(true)
+  roundsLoaded.value = false
+  if (showMatches.value) loadRounds(true)
+})
 // 锁屏/后台返回时补一次刷新（冻结期间 WebSocket 可能已断，不再收得到广播）
-useResumeRefresh(() => fetchRankings(true))
+useResumeRefresh(() => {
+  fetchRankings(true)
+  roundsLoaded.value = false
+  if (showMatches.value) loadRounds(true)
+})
 onMounted(async () => {
   await Promise.all([auth.fetchMe(), fetchRankings()])
 })

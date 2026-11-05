@@ -2310,7 +2310,7 @@ async function scenarioRankingMatchDetail(page) {
     tournament_id: 2, tournament_title: '周五养生局',
     rankings: [
       { rank: 1, user_id: 1, username: '张三', avatar: '', matches_played: 3, matches_won: 2, matches_lost: 1, points_for: 27, points_against: 27, point_diff: 0, is_active: true },
-      { rank: 2, user_id: 2, username: '李四', avatar: '', matches_played: 3, matches_won: 1, matches_lost: 2, points_for: 25, points_against: 29, point_diff: -4, is_active: true },
+      { rank: 2, user_id: 2, username: '李四', avatar: '', matches_played: 3, matches_won: 2, matches_lost: 1, points_for: 28, points_against: 28, point_diff: 0, is_active: true },
       { rank: 0, user_id: 9, username: '新来的', avatar: '', matches_played: 0, matches_won: 0, matches_lost: 0, points_for: 0, points_against: 0, point_diff: 0, is_active: false },
     ],
   }
@@ -2374,7 +2374,7 @@ async function scenarioRankingMatchDetail(page) {
   // ---- 别人的数字也能点 ----
   assert('点别人的胜场数字', (await wlClick('李四', 'win')) === 'OK')
   await sleep(900)
-  assert('别人的明细也打得开', (await sheetTitle()).startsWith('李四 · 1 胜'), await sheetTitle())
+  assert('别人的明细也打得开（标题与赛程一致）', (await sheetTitle()) === '李四 · 2 胜（已结束 3 场）', await sheetTitle())
   await closeSheet()
 
   // ---- 0 场的数字点了没反应 ----
