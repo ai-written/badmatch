@@ -30,11 +30,33 @@ for tag in $TAGS; do
   docker tag badmatch-client "${REPO}:client-${tag}"
 done
 
-# 从仓库回读 digest：push 的进度行和 digest 行不一定在同一个输出流上，
-# 解析 push 输出容易拿到空值，回读才是"仓库里到底是什么"的真凭实据。
+# 从仓库回读 digest 只是「核对用」：读不到**不代表发布失败**（镜像已经在仓库里，
+# push 自己也会回一行 digest）。重试几次，仍失败就输出占位文案、不影响退出码。
 digest_of() {
-  docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null \
-    || echo "(读取 digest 失败，请手动 docker buildx imagetools inspect 核对)"
+  local attempt out
+  for attempt in 1 2 3; do
+    if out="$(docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null)" && [ -n "$out" ]; then
+      echo "$out"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then sleep 3; fi
+  done
+  echo "(读取 digest 失败，请手动 docker buildx imagetools inspect 核对)"
+}
+
+# 推镜像偶发网络抖动（实测见过 HEAD blobs 直接 EOF、push 退 1）。
+# 重试很便宜：已上传过的层会命中 "Layer already exists"，不会重传。
+push_retry() {
+  local ref="$1" attempt
+  for attempt in 1 2 3; do
+    if docker push "$ref"; then return 0; fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "  docker push $ref 第 $attempt 次失败，5 秒后重试…" >&2
+      sleep 5
+    fi
+  done
+  echo "docker push $ref 失败（已重试 3 次）" >&2
+  return 1
 }
 
 echo "=== Pushing to Docker Hub ==="
@@ -42,7 +64,8 @@ PUBLISHED=""
 for tag in $TAGS; do
   for name in server client; do
     ref="${REPO}:${name}-${tag}"
-    docker push "$ref"
+    echo "  -> $ref"
+    push_retry "$ref"
     PUBLISHED="${PUBLISHED}${ref}
     $(digest_of "$ref")
 "
