@@ -15,13 +15,15 @@ from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
 from app.models.user import User
-from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats
+from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats, Court
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
 from app.models.round import MatchSupport
 from pydantic import BaseModel
 from app.engine.scheduler import (
-    generate_schedule, compute_match_count, compute_rounds, shuffle_sides,
-    fairness_step, nearest_valid_total, floor_valid_total, _pair_key, _match_key,
+    generate_schedule, generate_round_schedule, compute_match_count, compute_rounds,
+    shuffle_sides, fairness_step, nearest_valid_total, floor_valid_total,
+    matches_per_round, use_round_engine, PLAYERS_PER_COURT, courts_allowed,
+    _pair_key, _match_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,20 @@ async def start_tournament(
     if len(player_ids) < 4:
         raise HTTPException(status_code=400, detail="至少需要 4 人参赛")
 
+    # 场地数校验（与创建/编辑时那条同源）：多场地赛事每片场地至少 5 人
+    # （4 人上场 + 至少 1 人场下执裁）。这里是报名截止、真正开赛的那一刻，
+    # 报错必须给出可执行的下一步 —— 此时赛事还是「报名中」，场地数可以回去改。
+    # 赛事**进行中**因退赛掉到线下时不在这里拦：那条路径会自动少开一片场地
+    # （见 scheduler.court_count_effective），退赛不能被一条校验挡住。
+    courts_count, _ = await _courts_and_roster(db, tournament_id,
+                                              roster_size=len(player_ids))
+    if not courts_allowed(len(player_ids), courts_count):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{courts_count} 片场地至少需要 {PLAYERS_PER_COURT * courts_count} 人，"
+                   f"当前报名 {len(player_ids)} 人。请减少场地数或再邀请几个人后再开赛。",
+        )
+
     # 开赛时把名单顺序**真随机**打散一次。两层目的各管一件事：
     # - 跨赛事避重（_new_match_history）负责"别跟最近几场撞同样的对局"；
     # - 这次洗牌负责"别总是报名最早的那 4 个人打第一场、每场的分组结构也别老一样"：
@@ -162,6 +178,12 @@ async def start_tournament(
     # 所以这一层在 N ≤ 48 时基本不会再触发 —— 贪心的**可行性**与历史无关，两个级别要么都成、
     # 要么都失败。留着它是为了 N > 48 那一档（那里历史仍参与贪心，可能真的会因此走死路），
     # 以及万一将来把历史重新放回打分。审计里的 history_level 因此通常就是 0。
+    #
+    # 多场地赛事（≥2 片场地、≥9 人）走**轮级构造**：每轮的 8 个人互不重复，
+    # "同一个人同时站两片场地"在构造上就不可能出现（见 scheduler 模块说明）。
+    # 开赛这一刻 PlayerStats 还没建（要等轮次写完），所以名单人数得显式传进去。
+    use_rounds, per_round = await _round_engine_plan(
+        db, tournament_id, len(player_ids), roster_size=len(player_ids))
     schedule = None
     adjusted_M = M
     history_level = None
@@ -175,6 +197,7 @@ async def start_tournament(
         schedule, history_level = _try_schedule(
             player_ids, cand_M,
             ((partner_history, opponent_history, match_history), ({}, {}, {})),
+            per_round=per_round if use_rounds else None,
         )
         if schedule is not None:
             adjusted_M = cand_M
@@ -193,19 +216,23 @@ async def start_tournament(
     tournament.total_matches = M
     tournament.plan_total_matches = M
 
-    matches_per_round = 2
+    # 每轮场数由场地数决定（见 _round_engine_plan）：单场地/8 人及以下仍是 2 场/轮。
     # 左右随机：排程本身是确定性的（见 scheduler），并列时总是让名单靠前的人进 A 队，
     # 不翻边的话名单第一人会在自己每一场里都站左边。翻边只改 A/B 队归属，不动对阵。
     schedule = shuffle_sides(schedule)
-    rounds_data = compute_rounds(schedule, matches_per_round)
+    rounds_data = compute_rounds(schedule, per_round)
+    court_ids = await _court_ids(db, tournament_id)
 
     for round_idx, round_matches in enumerate(rounds_data, start=1):
         r = Round(tournament_id=tournament_id, round_number=round_idx)
         db.add(r)
         await db.flush()
 
-        for match_data in round_matches:
-            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+        for court_idx, match_data in enumerate(round_matches):
+            (pa_id, pb_id), (pc_id, pd_id), _plan_court, slot_id = match_data
+            # 计划场地：轮内第 i 场预填第 i 片场地；开打那一刻还会按"此刻空着的"重分配
+            # 并写库（见 matches._assign_start_court）
+            court_id = court_ids[court_idx] if court_idx < len(court_ids) else None
 
             pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
             pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
@@ -343,13 +370,78 @@ async def _new_match_history(db: AsyncSession, tournament_id: int):
     return await _load_history(db, [tournament_id, *recent])
 
 
-def _try_schedule(players, matches, history_variants):
+async def _courts_and_roster(db: AsyncSession, tournament_id: int,
+                             roster_size: int | None = None) -> tuple[int, int]:
+    """(赛事登记的场地数, 开赛时人数)。分流判定的两个输入，抽出来给两处调用方共用。"""
+    courts = (await db.execute(
+        select(func.count(Court.id)).where(Court.tournament_id == tournament_id)
+    )).scalar() or 0
+    if roster_size is None:
+        roster_size = (await db.execute(
+            select(func.count(PlayerStats.id)).where(PlayerStats.tournament_id == tournament_id)
+        )).scalar() or 0
+    return courts, roster_size
+
+
+async def _court_ids(db: AsyncSession, tournament_id: int) -> list[int]:
+    """赛事的场地 id，按 sort_order 排序（第 i 片 = 轮内第 i 场用的那片）。
+
+    落库时给每场比赛**预填**计划场地；真正开打那一刻还会按"此刻空着的"重分配
+    （见 `matches._assign_start_court`），所以这里只是"先给个说法、好分组显示"。
+    只取 id 一列：取整行 Court 会把 time_slots（selectin）一起拉回来。
+    """
+    rows = await db.execute(
+        select(Court.id)
+        .where(Court.tournament_id == tournament_id)
+        .order_by(Court.sort_order, Court.id)
+    )
+    return [cid for (cid,) in rows.all()]
+
+
+async def is_multi_court_tournament(db: AsyncSession, tournament_id: int) -> bool:
+    """这个赛事是不是「多场地同时开打」（≥2 片场地、且 ≥9 人开赛）。
+
+    给"只关心分流结论、不关心每轮几场"的地方用，比如认领裁判时的分身校验
+    （8 人单场地的老路径不校验：那里轮内几场本来就是先后打的）。
+    """
+    courts, roster = await _courts_and_roster(db, tournament_id)
+    return use_round_engine(roster, courts)
+
+
+async def _round_engine_plan(db: AsyncSession, tournament_id: int,
+                             num_players: int,
+                             roster_size: int | None = None) -> tuple[bool, int]:
+    """这个赛事现在该用哪套排程、每轮开几场。返回 (是否轮级构造, 每轮场数)。
+
+    **分流只看场地数**（`courts` 表的行数；0 行 = 没填场地号，按 1 片算）：
+      · 场地数 = 1，或开赛时人数 ≤ 8  → 老引擎（逐场贪心），每轮固定 2 场，行为与改动前一致
+      · 场地数 ≥ 2 且开赛时人数 ≥ 9  → 轮级构造，每轮 `min(场地数, 人数//4, 人数//5)` 场
+
+    「开赛时人数」默认取 `PlayerStats` 的行数：开赛那一刻给每名选手建一行，退赛只把
+    `is_active` 置 False、**不删行**，所以整个赛事期间恒定。用它而不是当前在场人数，
+    是为了让引擎选择在赛事中途（有人退赛）也不会变 —— 否则同一份赛程会出现两套口径。
+
+    例外是**开赛那一刻**：PlayerStats 还没落库（要等轮次写完才建），所以那时必须由调用方
+    把名单人数显式传进来（`roster_size`），否则数到 0 会一律退回老引擎。
+
+    每轮场数则故意用**当前**在场人数算：退赛后可能不够"每片场地 5 人"，
+    这时自动少开一片场地（见 scheduler.court_count_effective），而不是排出没人执裁的场次。
+    """
+    courts, roster = await _courts_and_roster(db, tournament_id, roster_size)
+    if not use_round_engine(roster, courts):
+        return False, 2
+    return True, matches_per_round(num_players, courts)
+
+
+def _try_schedule(players, matches, history_variants, per_round=None):
     """按「历史逐级放宽」的顺序试排一份赛程，返回 (schedule, level)；全失败返回 (None, None)。
 
     - `history_variants`：从最完整的避重到最弱的顺序，例如
       开赛 = (跨赛事历史, 不带历史)；追加 = (跨赛事+本赛事, 只本赛事)；
       重排 = (旧赛程+最近几场, 只最近几场, 不带历史)。
     - `level` 就是用上的那一级的下标（写进审计，便于事后解释这份赛程的避重口径）。
+    - `per_round`：传了就按**轮级构造**排（多场地赛事），返回值仍是扁平列表、顺序即轮顺序；
+      不传就是老的逐场贪心（单场地/8 人及以下，行为完全不变）。
 
     注意这两级在 N ≤ 48 时**基本等价**：历史已经退出贪心打分、只影响候选挑选
     （见 scheduler.generate_schedule），所以贪心的可行性与历史无关 —— 第一级排不出来时
@@ -358,6 +450,8 @@ def _try_schedule(players, matches, history_variants):
     """
     for level, hist in enumerate(history_variants):
         try:
+            if per_round:
+                return generate_round_schedule(players, matches, per_round, *hist), level
             return generate_schedule(players, matches, *hist), level
         except ValueError:
             continue
@@ -481,11 +575,14 @@ async def add_matches(
     schedule = None
     history_level = None
     added = body.matches
+    # 多场地赛事（≥2 片场地、≥9 人）追加的比赛同样走轮级构造，每轮的 8 人互不重复
+    use_rounds, per_round = await _round_engine_plan(db, tournament_id, n)
     while current + added <= MAX_TOTAL_MATCHES:
         schedule, history_level = _try_schedule(
             players, added,
             ((partner_history, opponent_history, match_history),
              (own_partner, own_opponent, own_match)),
+            per_round=per_round if use_rounds else None,
         )
         if schedule is not None:
             break
@@ -498,14 +595,18 @@ async def add_matches(
     )
     last_num = last_num_row.scalar() or 0
 
-    rounds_data = compute_rounds(shuffle_sides(schedule), 2)
+    rounds_data = compute_rounds(shuffle_sides(schedule), per_round)
+    court_ids = await _court_ids(db, tournament_id)
     for round_idx, round_matches in enumerate(rounds_data, start=1):
         r = Round(tournament_id=tournament_id, round_number=last_num + round_idx)
         db.add(r)
         await db.flush()
 
-        for match_data in round_matches:
-            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+        for court_idx, match_data in enumerate(round_matches):
+            (pa_id, pb_id), (pc_id, pd_id), _plan_court, slot_id = match_data
+            # 计划场地：轮内第 i 场预填第 i 片场地；开打那一刻还会按"此刻空着的"重分配
+            # 并写库（见 matches._assign_start_court）
+            court_id = court_ids[court_idx] if court_idx < len(court_ids) else None
             pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
             pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
             db.add(pairing_a)
@@ -656,6 +757,9 @@ async def reschedule_schedule(
     reschedule_shuffle_seed = random.randrange(1, 2 ** 31)
     random.Random(reschedule_shuffle_seed).shuffle(players)
 
+    # 多场地赛事（≥2 片场地、≥9 人）按轮级构造重排：每轮 8 人互不重复
+    use_rounds, per_round = await _round_engine_plan(db, tournament_id, n)
+
     # 贪心在个别组合下会走死路（与开赛/追加同一层兜底）：逐级放宽历史 ——
     # ① 避开"这份旧赛程 + 最近几场" → ② 只避开最近几场 → ③ 不带历史。
     # 历史只影响打分、不改变每人场次，所以任何一级排出来都比给用户一个 400 好；
@@ -665,12 +769,14 @@ async def reschedule_schedule(
         ((partner_history, opponent_history, match_history),
          (recent_partner, recent_opponent, recent_match),
          ({}, {}, {})),
+        per_round=(per_round if use_rounds else None),
     )
     if schedule is None:
         raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
 
     schedule = shuffle_sides(schedule)          # 与开赛/追加同口径，抹掉"名单靠前者总在左队"
-    rounds_data = compute_rounds(schedule, 2)
+    rounds_data = compute_rounds(schedule, per_round)
+    court_ids = await _court_ids(db, tournament_id)
 
     # 新轮次接在最大轮号之后。正常情况下待删的轮次就是全部（一场没开打），
     # 所以 last_num 会是 0、新赛程从第 1 轮开始；照查不误是为了将来规则宽松时不用改这里。
@@ -687,8 +793,11 @@ async def reschedule_schedule(
         db.add(r)
         await db.flush()
 
-        for match_data in round_matches:
-            (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+        for court_idx, match_data in enumerate(round_matches):
+            (pa_id, pb_id), (pc_id, pd_id), _plan_court, slot_id = match_data
+            # 计划场地：轮内第 i 场预填第 i 片场地；开打那一刻还会按"此刻空着的"重分配
+            # 并写库（见 matches._assign_start_court）
+            court_id = court_ids[court_idx] if court_idx < len(court_ids) else None
 
             pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
             pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
@@ -1053,6 +1162,9 @@ async def withdraw_player(
     new_rounds_data: list = []
     reschedule_history_level = None
     if new_M > 0:
+        # 多场地赛事按轮级构造补排（与开赛/追加同口径）；退赛后人数可能不够开满场地，
+        # 每轮场数会自动降级（见 scheduler.court_count_effective）
+        use_rounds, per_round = await _round_engine_plan(db, tournament_id, remaining_count)
         recent_partner, recent_opponent, recent_match = await _load_history(
             db, await _recent_tournament_ids(db, tournament_id))
         partner_history: Counter = Counter(frozen_partner)
@@ -1060,6 +1172,7 @@ async def withdraw_player(
         new_schedule, reschedule_history_level = _try_schedule(
             remaining, new_M,
             ((partner_history, recent_opponent, recent_match), (frozen_partner, {}, {})),
+            per_round=(per_round if use_rounds else None),
         )
         if new_schedule is None:
             logger.warning(
@@ -1070,7 +1183,8 @@ async def withdraw_player(
         else:
             # 与开赛/追加同口径：落库前随机翻边。重排出来的对阵同样带着「名单靠前者总在左队」
             # 的确定性偏置（remaining 是按 PlayerStats.id 排的名单），不翻边会把偏置带进新赛程
-            new_rounds_data = compute_rounds(shuffle_sides(new_schedule), 2)
+            new_rounds_data = compute_rounds(shuffle_sides(new_schedule), per_round)
+            court_ids = await _court_ids(db, tournament_id)
 
     if new_rounds_data:
         last_num = (await db.execute(
@@ -1086,8 +1200,10 @@ async def withdraw_player(
             db.add(r)
             await db.flush()
 
-            for match_data in round_matches:
-                (pa_id, pb_id), (pc_id, pd_id), court_id, slot_id = match_data
+            for court_idx, match_data in enumerate(round_matches):
+                (pa_id, pb_id), (pc_id, pd_id), _plan_court, slot_id = match_data
+                # 计划场地：轮内第 i 场预填第 i 片场地；开打那一刻还会按"此刻空着的"重分配
+                court_id = court_ids[court_idx] if court_idx < len(court_ids) else None
                 pairing_a = RoundPairing(round_id=r.id, player_a_id=pa_id, player_b_id=pb_id)
                 pairing_b = RoundPairing(round_id=r.id, player_a_id=pc_id, player_b_id=pd_id)
                 db.add(pairing_a)

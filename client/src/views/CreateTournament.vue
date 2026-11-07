@@ -6,7 +6,33 @@
       <van-cell-group inset>
         <van-field v-model="form.title" label="赛事名称" placeholder="请输入赛事名称" required :rules="[{ required: true, message: '请输入赛事名称' }]" />
         <van-field v-model="form.location" label="地点" placeholder="比赛地点" />
-        <van-field v-model="form.court" label="场地号" placeholder="如 A1、1号场" />
+        <!-- 场地号：一行 = 一片场地。**行数就是同一时刻开几场**（2 行 = 两片场地同时开打）。
+             每片场地至少 5 人（4 人上场 + 至少 1 人场下当裁判），人数不够时不给加行。 -->
+        <van-field
+          v-for="(c, i) in form.courts"
+          :key="i"
+          v-model="form.courts[i]"
+          :label="form.courts.length > 1 ? `场地号 ${i + 1}` : '场地号'"
+          :placeholder="i === 0 ? '如 A1、1号场' : `如 A${i + 1}、${i + 1}号场`"
+        >
+          <template v-if="form.courts.length > 1" #button>
+            <span class="court-del" @click="removeCourt(i)">删除</span>
+          </template>
+        </van-field>
+        <!-- 加行做成一行轻量文字链：原先塞在 van-cell 里的实心按钮在表单里像一块凸出来的砖 -->
+        <div v-if="canAddCourt" class="add-court-row">
+          <button type="button" class="add-court-link" @click="addCourt">
+            <van-icon name="plus" /> 添加场地
+          </button>
+          <span class="add-court-tip">多一片场地 = 同一时刻多开一场</span>
+        </div>
+        <!-- 加不了的时候说清原因（否则"按钮消失"看起来像坏了） -->
+        <div v-else-if="courtAddTip" class="add-court-row">
+          <span class="add-court-tip">{{ courtAddTip }}</span>
+        </div>
+        <div v-if="form.courts.length > 1" class="court-hint-row">
+          <span :class="['court-hint', { 'court-hint--bad': !courtsEnoughPeople }]">{{ courtHint }}</span>
+        </div>
         <van-field v-model="form.description" label="备注" type="textarea" rows="2" autosize placeholder="可选，显示在赛事详情页" />
 
         <!-- 日期 -->
@@ -122,6 +148,13 @@
       </div>
       <!-- 弹层外壳固定，只有这一层滚动（.vh-sheet-body），避免父子双滚动把末行裁掉 -->
       <div class="vh-sheet-body">
+      <!-- 多场地赛事（两片场地同时开打）的档位提示：
+           档位越大、能用的搭档组合越多，重复就越少。实测 12 人 2 片场地时，
+           36 场能把"重复搭档"压到理论下限（66 对里 6 次），33 场则要多 6 次。
+           只做提示，不改用户选的数字。 -->
+      <div v-if="multiCourtTierHint" class="court-hint-cell">
+        <span class="court-hint">{{ multiCourtTierHint }}</span>
+      </div>
       <van-cell-group inset style="margin-top:10px">
         <van-cell title="自动" :label="closestMatch ? `${closestMatch.total} 场 · 每人 ${closestMatch.per_person} 场` : ''" @click="selectMatch(null)" :class="{ active: form.total_matches === closestMatch?.total }" />
         <van-cell
@@ -199,7 +232,9 @@ const form = reactive({
   title: '',
   description: '',
   location: DEFAULT_LOCATION,
-  court: '',
+  // 场地：一行一片。**行数 = 同一时刻开几场**（2 行 = 两片场地同时开打，
+  // 排程会按"轮级构造"排：每轮上 8 人、剩下的人轮空/执裁）。
+  courts: [''] as string[],
   start_date: '',
   end_date: '',
   max_participants: 8,
@@ -208,6 +243,69 @@ const form = reactive({
   enable_scheduled_registration: false,
   registration_open_at: '',
 })
+
+// --- 场地 ---
+// 与后端 scheduler.PLAYERS_PER_COURT / tournaments.MAX_COURTS 同一个口径：
+// 每片场地至少 5 人（4 人上场 + 至少 1 人场下执裁），最多 3 片。
+const MIN_PLAYERS_PER_COURT = 5
+const MAX_COURTS = 3
+/** 已经填了名字的场地数（空行不算） */
+const filledCourtCount = computed(() => form.courts.filter(c => (c || '').trim()).length)
+const courtsEnoughPeople = computed(() => {
+  const n = Math.max(1, filledCourtCount.value)
+  return (Number(form.max_participants) || 0) >= MIN_PLAYERS_PER_COURT * n
+})
+const canAddCourt = computed(() => {
+  const next = form.courts.length + 1
+  if (next > MAX_COURTS) return false
+  // 人数不够就先别加：加了也会被后端拒绝，不如让人先把人数调上去
+  return (Number(form.max_participants) || 0) >= MIN_PLAYERS_PER_COURT * next
+})
+/** 加不了的原因（人数不够 / 已到上限时为空）：显示成一行灰色说明，别让按钮"凭空消失" */
+const courtAddTip = computed(() => {
+  const next = form.courts.length + 1
+  if (next > MAX_COURTS) return ''
+  const need = MIN_PLAYERS_PER_COURT * next
+  const ppl = Number(form.max_participants) || 0
+  if (ppl >= need) return ''
+  return `再加一片场地需要至少 ${need} 人（当前 ${ppl} 人）；每片场地 ${MIN_PLAYERS_PER_COURT} 人 = 4 人上场 + 1 人场下执裁`
+})
+const courtHint = computed(() => {
+  const n = filledCourtCount.value
+  const need = MIN_PLAYERS_PER_COURT * n
+  const ppl = Number(form.max_participants) || 0
+  if (ppl >= need) {
+    return `${n} 片场地同时开打：每轮 ${4 * n} 人上场，${n} 人轮空（其中至少 ${n} 人当裁判）`
+  }
+  return `${n} 片场地至少需要 ${need} 人（每片 ${MIN_PLAYERS_PER_COURT} 人），当前只填了 ${ppl} 人`
+})
+
+/**
+ * 多场地赛事的档位建议（只提示，不改用户选的数字）。
+ *
+ * 依据：搭档组合总共只有 C(N,2) 种，一场消耗 2 个搭档位，所以总场次越多、
+ * 重复越少。取「至少让每对搭档平均碰上 1 次」的档位（2M ≥ C(N,2)），
+ * 优先落在这个范围内的 6 的倍数档 —— 实测 12 人 2 片场地时 36 场能把
+ * 重复搭档压到理论下限（66 对里 6 次），而 33 场要多 6 次。
+ */
+const multiCourtTierHint = computed(() => {
+  if (filledCourtCount.value < 2 || !matchOptions.value.length) return ''
+  const n = Number(form.max_participants) || 0
+  if (n < 4) return ''
+  const need = Math.ceil(n * (n - 1) / 4)          // 2M ≥ C(n,2)
+  const inRange = matchOptions.value.filter((o: any) => o.total >= need)
+  const pick = inRange.find((o: any) => o.total % 6 === 0) || inRange[0]
+  if (!pick) return ''
+  return `两片场地：总场次越多，重复搭档/重复对手越少。${n} 人建议至少 ${pick.total} 场（每人 ${pick.per_person} 场）。`
+})
+function addCourt() {
+  if (!canAddCourt.value) return
+  form.courts.push('')
+}
+function removeCourt(i: number) {
+  if (form.courts.length <= 1) return
+  form.courts.splice(i, 1)
+}
 
 // --- 日期 ---
 function getDefaultDate(): Date {
@@ -439,24 +537,23 @@ function clean(val: any) { return val === '' || val == null ? null : val }
 /**
  * 场地/时间段。
  *
- * 创建时表单只有「一个场地号 + 一个时间段」，所以就是一整块写进去。
- * 编辑时多一层考虑：后端允许一场赛事有多个场地（接口支持数组，只是界面从来只建一个），
- * 而表单只能表达第一个 —— 直接按单场地覆盖会把其余场地悄悄删掉（那是真数据丢失）。
- * 所以编辑路径下：只替换第一个场地，其余原样带回去；场地号填空 = 清空场地（与创建一致）。
+ * 表单里一行场地 = 后端的一个 Court 行，**行数就是同一时刻开几场**：
+ * 1 行 = 传统的一片场地；2 行 = 两片场地同时双打（排程按轮级构造排，
+ * 每轮上 8 人、其他人轮空，裁判只从场下的人里挑）。
+ * 时间段：表单只有一个时间段，所有场地写同一段。
+ *
+ * 编辑时 sort_order 沿用原来那一行（后端 `_replace_courts` 是整体删了重建，
+ * 顺序靠 sort_order 保住；比赛从不引用 court_id，所以删重建是安全的）。
  */
 function buildCourts(start: string, end: string) {
-  if (!form.court) return []
-  const first = {
-    name: form.court,
-    sort_order: originalCourts.value[0]?.sort_order ?? 0,
-    time_slots: [{ start_time: start.slice(11), end_time: end.slice(11) }],
-  }
-  if (!isEdit.value) return [first]
-  return [first, ...originalCourts.value.slice(1).map(c => ({
-    name: c.name,
-    sort_order: c.sort_order,
-    time_slots: (c.time_slots || []).map((s: any) => ({ start_time: s.start_time, end_time: s.end_time })),
-  }))]
+  const names = form.courts.map(c => (c || '').trim()).filter(Boolean)
+  if (!names.length) return []
+  const slot = [{ start_time: start.slice(11), end_time: end.slice(11) }]
+  return names.map((name, i) => ({
+    name,
+    sort_order: originalCourts.value[i]?.sort_order ?? i,
+    time_slots: slot,
+  }))
 }
 
 function buildPayload(title: string, start: string, end: string) {
@@ -480,6 +577,18 @@ function buildPayload(title: string, start: string, end: string) {
 async function onSubmit() {
   submitting.value = true
   try {
+    // 场地数校验（与后端 tournaments._check_courts 同一个口径）：
+    // 每片场地至少 5 人 —— 4 人上场、至少 1 人场下当裁判，人不够就会"开得起来没人吹"。
+    // 后端也会拦一次，这里先拦是为了不让用户白等一个来回。
+    const courtsFilled = filledCourtCount.value
+    if (courtsFilled > MAX_COURTS) {
+      showToast(`最多支持 ${MAX_COURTS} 片场地`)
+      return
+    }
+    if (courtsFilled >= 2 && Number(form.max_participants) < MIN_PLAYERS_PER_COURT * courtsFilled) {
+      showToast(`${courtsFilled} 片场地至少需要 ${MIN_PLAYERS_PER_COURT * courtsFilled} 人`)
+      return
+    }
     // 提交前先把场次档位按当前人数对齐（编辑与创建都要）：
     // 最大人数那一栏的档位重算挂在 @blur 上、是异步的 ——「改完人数立刻点保存」时
     // 它还没回来，buildPayload 就会把**上一个档位**一起送上去（典型：8 人 14 场，
@@ -548,7 +657,9 @@ async function initEdit() {
   form.title = t.title || ''
   form.description = t.description || ''
   form.location = t.location || ''
-  form.court = t.courts?.[0]?.name || ''
+  // 场地：每行一片。老赛事只有 0~1 片，读出来就是 0~1 行（空则给一个空行可填）
+  const names = (t.courts || []).map((c: any) => c.name || '')
+  form.courts = names.length ? names : ['']
   form.max_participants = t.max_participants
   form.points_to_win = t.points_to_win || 11
   form.total_matches = t.total_matches ?? null
@@ -604,4 +715,24 @@ onMounted(async () => {
 /* 人员的滚动交给 .vh-sheet-body（main.css）。原先这里用 max-height: calc(60vh - 44px)
    限制高度，而父弹层用的是百分比高度：两者在「ICB 高度 ≠ vh」的浏览器里必然错位，
    会撑破弹层并触发父层滚动，导致末行被裁且滚不到。 */
+
+/* 场地行：加行/删除都做成轻量文字链（塞实心按钮在表单里像一块凸出来的砖） */
+.court-del {
+  padding: 2px 0 2px 8px; cursor: pointer;
+  font-size: 13px; color: #e5602c;
+}
+.add-court-row {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px;
+  padding: 2px 16px 10px;
+}
+.add-court-link {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  font-size: 13px; color: #1989fa;
+}
+.add-court-tip { font-size: 11px; color: #a0aab8; }
+.court-hint-row { padding: 0 16px 10px; }
+.court-hint-cell { padding: 4px 16px 8px; }
+.court-hint { font-size: 12px; line-height: 1.5; color: #78849a; }
+.court-hint--bad { color: #e5602c; }
 </style>

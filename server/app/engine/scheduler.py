@@ -1,11 +1,21 @@
 """
 赛程引擎: 贪心构造 + 多方案择优 + 换序重试
 
-注意用词：这里**没有回溯**。贪心一次成型，走不通时靠打乱候选顺序重试
-（见 generate_schedule 的 attempts）；"回溯改善"是早期文档留下的说法。
+这里有两套构造，**由场地数分流**（见文件末尾「多场地：轮级构造」一节与
+engine_api._round_engine_plan）：
 
-每场比赛从「剩余场次没打满的人」里挑 4 个，评分同时惩罚三件事：
-重复搭档、重复对手、以及**完全相同的对局**（同 4 人 + 同分组）。
+1. `generate_schedule` —— 逐场贪心（老引擎，**冻结**）。最小单位是"一场"：
+   从「剩余场次没打满的人」里挑 4 个，评分同时惩罚重复搭档、重复对手、
+   以及**完全相同的对局**（同 4 人 + 同分组）。"轮"只是事后按 2 场切块
+   （compute_rounds），切块不看人员 —— 单场地/8 人及以下的场景它质量最好，别动。
+
+2. `generate_round_schedule` —— 轮级构造（多场地）。最小单位是"一轮"：
+   先定这一轮上场的 4P 个人（互不重复），再把这些人切成 P 场。
+   于是"同一个人同一轮出现在两场"在构造上就不可能 —— 这不是靠打分避开的。
+   12 人 2 场地用老引擎实测每份赛程有 4 轮撞人（两片场地同时开打时物理上做不到）。
+
+注意用词：两套都是**没有回溯**的贪心，走不通时靠打乱候选顺序重试
+（见各自的 attempts）；"回溯改善"是早期文档留下的说法。
 """
 import math
 import random
@@ -423,3 +433,356 @@ def compute_rounds(matches, matches_per_round=2):
     for i in range(0, len(matches), matches_per_round):
         rounds.append(matches[i:i + matches_per_round])
     return rounds
+
+
+# ============================================================================
+# 多场地：轮级构造
+# ============================================================================
+#
+# 为什么要另起一套：老引擎排的是**扁平的场次列表**，"轮"是事后两两切块
+# （compute_rounds），切块完全不看人。于是 12 人 33 场实测**每份赛程都有 4 轮**
+# 出现同一个人同时在两场里 —— 两片场地同时开打时这是物理上做不到的，
+# 连带把轮空次数也打歪（该 6 次，实际 6~7 次）。
+#
+# 轮级构造把顺序反过来：**先定这一轮上场的 4P 个人（互不重复），再把这 4P 人切成 P 场**。
+# 两场的人来自同一个 8 人池且被完全切开，交集恒为空 —— 撞人不再靠打分碰运气，
+# 而是构造上不可能。代价是"从 8 人里怎么切两场"比"从 12 人里随便挑 4 个"自由度小，
+# 实测量化：12 人 36 场搭档重复 7 次（理论下限 6），老引擎 12 人 33 场是 0/6。
+#
+# 分流规则（engine_api 那边实现，这里只给判定用的纯函数）：
+#   · 场地数 = 1，或开赛时人数 ≤ 8  → 老引擎（原样不动）
+#   · 场地数 ≥ 2 且开赛时人数 ≥ 9  → 轮级构造
+
+# 走轮级构造的最少人数：8 人正好填满两场、没有轮空，老引擎在那档质量更好，
+# 而且现场 8 个人一片场地也能打，没必要换。
+MIN_PLAYERS_FOR_MULTI_COURT = 9
+
+# 每片场地最少几个人：一场双打 4 人上场，至少还要留 1 人在场下当裁判。
+PLAYERS_PER_COURT = 5
+
+
+def use_round_engine(roster_size: int, courts: int) -> bool:
+    """这个赛事该用轮级构造还是老的逐场贪心。
+
+    `roster_size` 必须是**开赛时**的人数（库里 PlayerStats 的行数：退赛只把
+    is_active 置 False、不删行，所以它整个赛事期间恒定），不能用当前在场人数 ——
+    否则赛事中途退到 8 人以下就会换引擎，同一份赛程出现两套口径。
+    """
+    return int(courts or 0) >= 2 and int(roster_size or 0) >= MIN_PLAYERS_FOR_MULTI_COURT
+
+
+def courts_allowed(num_players: int, courts: int) -> bool:
+    """这么多片场地在这么多人的情况下是否成立。
+
+    规则：**每片场地至少 `PLAYERS_PER_COURT` 人**（4 人上场 + 至少 1 人场下执裁）。
+    一片场地不设这条（4 人打满全场、没有裁判是既有的现实用法）。
+
+    创建/编辑赛事和开赛那一刻都用它做校验 —— 两处必须同一套口径，否则会出现
+    「界面让建、开赛被拒」或者反过来「建得出来但没人执裁」。
+    """
+    courts = int(courts or 0)
+    if courts < 2:
+        return True
+    return int(num_players or 0) >= PLAYERS_PER_COURT * courts
+
+
+def court_count_effective(num_players: int, courts: int) -> int:
+    """实际能同时开几片场地。
+
+    三条上限取最小：
+      - 赛事登记的场地数；
+      - `人数 // 4`（一场双打要 4 个人）；
+      - `人数 // 5` —— 每片场地至少 5 人（4 人上场 + 至少 1 人场下执裁）。
+
+    人数不够时**降级**而不是报错：赛事进行中有人退赛是挡不住的，
+    这时少开一片场地远好过让剩下的比赛排不出来。
+    """
+    courts = int(courts or 0)
+    n = int(num_players or 0)
+    if courts < 1 or n < 4:
+        return 0
+    return max(0, min(courts, n // 4, n // PLAYERS_PER_COURT))
+
+
+def matches_per_round(num_players: int, courts: int) -> int:
+    """一轮同时开几场（只在走轮级构造的赛事里有意义）。
+
+    人数不够时自动降级（见 court_count_effective）：9 人 2 场地 → 每轮 1 场
+    （4 上 5 歇，够 1 个裁判），而不是硬开两场没人执裁。
+    """
+    return max(1, court_count_effective(num_players, courts))
+
+
+def _three_splits(idx4):
+    """4 个人（下标）怎么分成两队 —— 3 种分法全都要评估。
+
+    只取"前两个 vs 后两个"等于每场丢掉 2/3 的候选，这正是老引擎早期
+    "同一拨人第二次遇到时又排成一模一样的两队"的直接原因（见 _splits）。
+    """
+    a, b, c, d = idx4
+    return (((a, b), (c, d)), ((a, c), (b, d)), ((a, d), (b, c)))
+
+
+def _build_two_match_options():
+    """8 个人切成两场的**全部**方案：C(8,4)/2 = 35 种分组 × 每种两场各 3 种分队 = 315。
+
+    下标相对于"这一轮上场的 8 个人"的排序，与具体是谁无关，所以全进程只算一次。
+    """
+    options = []
+    seen = set()
+    everyone = frozenset(range(8))
+    for g1 in combinations(range(8), 4):
+        s1 = frozenset(g1)
+        key = frozenset((s1, everyone - s1))
+        if key in seen:          # (A,B) 与 (B,A) 是同一种分组
+            continue
+        seen.add(key)
+        g2 = tuple(i for i in range(8) if i not in s1)
+        for split1 in _three_splits(g1):
+            for split2 in _three_splits(g2):
+                options.append((split1, split2))
+    return tuple(options)
+
+
+_TWO_MATCH_OPTIONS = _build_two_match_options()
+
+
+def _as_ids(pair, on):
+    """下标对 → 选手对（统一成 (小 id, 大 id)）。"""
+    return _pair_key(on[pair[0]], on[pair[1]])
+
+
+def _round_option_score(option, on, partner_count, opponent_count, match_count):
+    """给"这一轮怎么切"的一个候选方案打分（越大越好）。
+
+    权重与逐场贪心完全一致（搭档 3 / 对局 20 / 对手 2），口径也一致：
+    搭档两个方向都查（库里历史数据的键方向不保证），对手按 _pair_key 归一。
+    """
+    score = 0
+    for pair1, pair2 in option:
+        t1 = _as_ids(pair1, on)
+        t2 = _as_ids(pair2, on)
+        score -= PARTNER_PENALTY * (partner_count[t1] + partner_count[t1[::-1]]
+                                    + partner_count[t2] + partner_count[t2[::-1]])
+        score -= DUPLICATE_PENALTY * match_count[_match_key(t1, t2)]
+        for u in t1:
+            for v in t2:
+                score -= OPPONENT_PENALTY * opponent_count[_pair_key(u, v)]
+    return score
+
+
+def _pick_round(on, want_matches, partner_count, opponent_count, match_count, rng=None):
+    """把这一轮的 `4 * want_matches` 个人切成 `want_matches` 场，取打分最好的切法。
+
+    want_matches == 2 时全枚举 315 种（最优）；≥3 场全枚举是十几万种，
+    改成"一场一场地贪心"—— 每挑完一场就把这 4 个人移出候选池，再挑下一场。
+    """
+    on = tuple(on)
+    if want_matches == 1:
+        best, best_score = None, None
+        for split in _three_splits((0, 1, 2, 3)):
+            s = _round_option_score((split,), on, partner_count, opponent_count, match_count)
+            if best_score is None or s > best_score or (
+                    rng is not None and s == best_score and rng.random() < 0.5):
+                best, best_score = split, s
+        return [(_as_ids(best[0], on), _as_ids(best[1], on))]
+
+    if want_matches == 2:
+        best, best_score = None, None
+        for option in _TWO_MATCH_OPTIONS:
+            s = _round_option_score(option, on, partner_count, opponent_count, match_count)
+            if best_score is None or s > best_score or (
+                    rng is not None and s == best_score and rng.random() < 0.5):
+                best, best_score = option, s
+        return [(_as_ids(pair1, on), _as_ids(pair2, on)) for pair1, pair2 in best]
+
+    # ≥3 场（例如 3 片场地 12 人）：逐场贪心，且用**本轮临时计数**，
+    # 免得同一轮里出现"同一对搭档被切两次"。
+    rest = list(on)
+    games = []
+    local_partner = defaultdict(int, partner_count)
+    local_opponent = defaultdict(int, opponent_count)
+    local_match = defaultdict(int, match_count)
+    for _ in range(want_matches):
+        best, best_score = None, None
+        for combo in combinations(range(len(rest)), 4):
+            for split in _three_splits(combo):
+                s = _round_option_score((split,), rest, local_partner,
+                                        local_opponent, local_match)
+                if best_score is None or s > best_score:
+                    best, best_score = split, s
+        t1 = _as_ids(best[0], rest)
+        t2 = _as_ids(best[1], rest)
+        games.append((t1, t2))
+        local_partner[t1] += 1
+        local_partner[t1[::-1]] += 1
+        local_partner[t2] += 1
+        local_partner[t2[::-1]] += 1
+        local_match[_match_key(t1, t2)] += 1
+        for u in t1:
+            for v in t2:
+                local_opponent[_pair_key(u, v)] += 1
+        used = set(t1) | set(t2)
+        rest = [p for p in rest if p not in used]
+    return games
+
+
+def _select_round_players(players, played, target, want, partner_count, rng=None):
+    """挑这一轮上场的 `want` 个人。
+
+    配额优先：剩余场次多的人先上（这是"每人场次相等"的保证 —— 和逐场贪心的
+    played < target 是同一个硬约束）；
+    同档内按「跟本轮已选的人搭档次数最少」排序、并列随机 —— 这一步决定跨组混合。
+
+    注意**不能**用"谁歇得久"来排同档：那样会让同一批人反复凑在一起
+    （16 人 2 场地实测退化成两组交替，搭档重复从 0 变 8 次）。
+    """
+    remaining = {p: target - played[p] for p in players}
+    live = [p for p in players if remaining[p] > 0]
+    picked = []
+    while len(picked) < want and live:
+        top = max(remaining[p] for p in live)
+        level = [p for p in live if remaining[p] == top]
+        level.sort(key=lambda p: (
+            sum(partner_count[_pair_key(p, q)] + partner_count[_pair_key(q, p)]
+                for q in picked),
+            rng.random() if rng is not None else 0,
+        ))
+        take = level[:want - len(picked)]
+        picked.extend(take)
+        live = [p for p in live if p not in take]
+    return picked
+
+
+def _build_rounds_greedy(players, total_matches, target, per_round,
+                         partner_count, opponent_count, match_count, rng=None):
+    """一轮一轮地排：定人 → 切场 → 记账。走不通就抛 ValueError 交给上层换序重试。"""
+    played = {p: 0 for p in players}
+    schedule = []
+    left = total_matches
+    while left > 0:
+        live_count = sum(1 for p in players if played[p] < target)
+        want_matches = min(per_round, left, live_count // 4)
+        if want_matches < 1:
+            raise ValueError(
+                f"排程走入死路：还剩 {left} 场时只有 {live_count} 人还没打满"
+            )
+        want = 4 * want_matches
+        on = _select_round_players(players, played, target, want, partner_count, rng)
+        if len(on) != want:
+            raise ValueError(f"排程走入死路：本轮需要 {want} 人，只选出 {len(on)} 人")
+        games = _pick_round(on, want_matches, partner_count, opponent_count,
+                            match_count, rng)
+        if len(games) != want_matches:
+            raise ValueError("排程走入死路：本轮切不出足够的场次")
+        for t1, t2 in games:
+            schedule.append((t1, t2, None, None))
+            partner_count[t1] += 1
+            partner_count[t1[::-1]] += 1
+            partner_count[t2] += 1
+            partner_count[t2[::-1]] += 1
+            match_count[_match_key(t1, t2)] += 1
+            for u in t1:
+                for v in t2:
+                    opponent_count[_pair_key(u, v)] += 1
+            for p in t1 + t2:
+                played[p] += 1
+        left -= want_matches
+
+    # 不允许"静默少排"：宁可抛出去让上层换序重试，也不要落库一份残缺赛程
+    if left:
+        raise ValueError(f"排程走入死路：还剩 {left} 场没排出来")
+    for p in players:
+        if played[p] != target:
+            raise ValueError(f"排程走入死路：选手 {p} 排了 {played[p]} 场，目标是 {target}")
+    return schedule
+
+
+def _round_attempts(num_players: int) -> int:
+    """轮级构造允许「多排几次挑最好」的次数。
+
+    每份成本比逐场贪心高（每轮要把 8 人切成两场的 315 种全部打分），
+    所以档位收得更紧：实测 12 人 36 场单份约 14ms，K=40 → 约 0.6s，
+    而且达标会提前收工（无重复对局 + 搭档到理论下限 + 对手够均衡 + 不撞历史）。
+    """
+    if num_players <= 12:
+        return 40
+    if num_players <= 20:
+        return 16
+    if num_players <= 32:
+        return 6
+    if num_players <= 48:
+        return 3
+    return 1
+
+
+def generate_round_schedule(players, total_matches, per_round=2,
+                            partner_history=None, opponent_history=None,
+                            match_history=None):
+    """排一份（新增的）赛程，**按轮为最小单位**。多场地专用。
+
+    与 generate_schedule 的对外约定完全一致：返回扁平的
+    `[(队伍a, 队伍b, None, None), ...]`，且**顺序就是轮的顺序**（每轮 per_round 场，
+    最后一轮可能不足）—— 所以调用方仍然用 `compute_rounds(schedule, per_round)`
+    切轮，落库代码一行都不用改。
+
+    硬保证（单测锁死）：
+      · 每一轮的 4*per_round 个人互不相同（同一时刻不会有人站两片场地）；
+      · 每名选手恰好打 `4 * total_matches // num_players` 场；
+      · 总场次恰好 `total_matches` 场（排不满就抛 ValueError，绝不静默少排）。
+
+    partner/opponent/match_history 用法与老引擎一致：默认**不参与打分**，
+    只用来在若干份"场内同样均衡"的候选里挑一份最不撞历史的（唯一例外是
+    attempts == 1 的大规模档位，那时没有挑选余地，历史直接参与打分）。
+    """
+    N = len(players)
+    if per_round < 1:
+        raise ValueError("每轮场数至少 1 场")
+    if not total_matches:
+        raise ValueError("总场次必须大于 0")
+    target = (4 * total_matches) // N
+    if target * N != 4 * total_matches:
+        raise ValueError(
+            f"{N} 人打 {total_matches} 场无法让每人场次相等"
+        )
+
+    partner_history = partner_history or {}
+    opponent_history = opponent_history or {}
+    match_history = match_history or {}
+
+    attempts = _round_attempts(N)
+    history_in_greedy = attempts == 1
+    partner_floor = max(0, 2 * total_matches - N * (N - 1) // 2)
+    # 与老引擎同一口径：≤8 人把"对手次数极差 0"当目标，9 人以上结构上往往做不到 0
+    spread_goal = 0 if N <= 8 else 2
+
+    best = None
+    best_key = None
+    last_error = None
+    for attempt in range(attempts):
+        rng = random.Random(attempt) if attempt else None
+        if history_in_greedy:
+            pc = defaultdict(int, partner_history)
+            oc = defaultdict(int, opponent_history)
+            mc = defaultdict(int, match_history)
+        else:
+            pc, oc, mc = defaultdict(int), defaultdict(int), defaultdict(int)
+        try:
+            schedule = _build_rounds_greedy(players, total_matches, target, per_round,
+                                            pc, oc, mc, rng)
+        except ValueError as e:
+            last_error = e
+            continue
+        quality = _quality(schedule)
+        collision = _history_collision(schedule, partner_history,
+                                       opponent_history, match_history)
+        key = (quality, collision)
+        if best_key is None or key < best_key:
+            best, best_key = schedule, key
+        if (quality[0] == 0 and quality[1] <= partner_floor
+                and quality[3] <= spread_goal and collision == 0):
+            break
+
+    if best is None:
+        raise last_error or ValueError("总场次无法为每名选手安排相同比赛场次")
+    return best

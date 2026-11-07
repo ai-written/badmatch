@@ -6,8 +6,9 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import require_user, _auth_user_loads
 from app.core.audit import audit, get_client_ip
-from app.api.matches import load_writable_tournament
-from app.api.engine_api import _active_player_ids
+from app.core.occupancy import busy_match_of
+from app.api.matches import load_writable_tournament, _current_round_ids
+from app.api.engine_api import _active_player_ids, is_multi_court_tournament
 from app.engine.referee_assign import assign_referees, can_assign
 from app.models.user import User
 from app.models.round import Match, MatchStatus, Notification, Round, RoundPairing
@@ -48,6 +49,18 @@ async def claim_referee(
     replaced_referee_id = None
     if m.referee_id is not None and m.referee_id != user.id and m.has_active_referee:
         replaced_referee_id = m.referee_id
+
+    # 分身校验（只在多场地赛事里做）：两片场地可能同时开打，正在场上打球的人
+    # 不能同时去另一片场地执裁。8 人及以下的单场地赛事保持原样 —— 那里轮内
+    # 几场本来就是先后打的，"边打边吹"是既有的正常用法。
+    if await is_multi_court_tournament(db, tournament_id):
+        busy = await busy_match_of(db, tournament_id, user.id, exclude_match_id=match_id)
+        if busy is not None:
+            raise HTTPException(status_code=400, detail={
+                "code": "player_busy",
+                "message": "您正在另一场比赛里，打完再认领裁判",
+                "match_id": busy,
+            })
 
     m.referee_id = user.id
     # 接手 / 收回都清空卸任时间，恢复在任状态
@@ -131,6 +144,26 @@ class AutoAssignBody(BaseModel):
     scope: str = "current"
 
 
+def round_referee_pool(candidates, live_matches, pairings, multi_court: bool) -> list[int]:
+    """这一轮可以当裁判的人（纯函数，便于单测）。
+
+    - 多场地赛事（≥2 片场地）：**本轮场下的人** —— 两场同时开打，场上的人不能分身执裁。
+      实测 12 人时老口径约有 50% 的概率把"正在邻场打球的人"派成裁判。
+    - 老路径（单场地 / 8 人及以下）：返回全部在场选手，交给 assign_referees 只排除
+      "本场 4 人"。8 人局全员上场，只有靠这个回退才派得出裁判（那里轮内两场先后打）。
+    """
+    if not multi_court:
+        return list(candidates)
+    on_court: set[int] = set()
+    for m in live_matches:
+        for pid in (m.pairing_a_id, m.pairing_b_id):
+            pairing = pairings.get(pid)
+            if pairing is not None:
+                on_court.add(pairing.player_a_id)
+                on_court.add(pairing.player_b_id)
+    return [c for c in candidates if c not in on_court]
+
+
 @router.post("/auto-assign-referees")
 async def auto_assign_referees(
     tournament_id: int,
@@ -142,9 +175,15 @@ async def auto_assign_referees(
     """指派裁判（手动点一次）。
 
     规则：
-    - scope=current：最早一个**还有比赛没打完**的轮次；scope=all：全部这样的轮次都分完；
-    - 候选人 = 本赛事在场选手（未退赛、账号未禁用）里**不参加该场**的人 ——
-      注意同一批里另一场的选手也算"不在这一场"，8 人局里两场互为对方的候选人池；
+    - scope=current：「当前这一批」= 正在进行中的场次所在轮次 + 最早一个还有未打完场次的
+      轮次（与 /rounds 的 is_current 完全同源，见 matches._current_round_ids）；
+      scope=all：全部还没打完的轮次都分完；
+    - 候选人池分两种口径（由场地数分流，与排程引擎同一套判定）：
+      · **多场地赛事**（≥2 片场地、≥9 人）：只能从**本轮场下的人**里挑 ——
+        两场是同时开打的，场上的人不可能分身去执裁；
+      · **老路径**（单场地 / 8 人及以下）：本赛事在场选手里**不参加该场**的人 ——
+        同一批里另一场的选手也算"不在这一场"（8 人局里两场互为对方的候选人池）。
+        那套语义只在"轮内两场先后打"时成立，所以必须留在老路径里，不能套到多场地上；
     - **均衡轮转 + 并列随机**：优先挑**本赛事已安排执裁场次最少**的人，次数并列的人之间
       等概率随机。所以它仍是"随机分配"（并列者里谁被挑中是随机的），但不再出现
       "有人吹 4 场、有人一场没吹"那种纯随机的偏斜（实测见 README）；
@@ -170,18 +209,33 @@ async def auto_assign_referees(
             "只有房主、管理员、超级管理员或本赛事在场选手可以一次性分配裁判" if scope == "all"
             else "只有本赛事在场选手可以分配裁判"))
 
-    r_stmt = (
-        select(Round)
+    # 「当前这一批」的判定与 /rounds 的 is_current 完全同源（matches._current_round_ids）：
+    # 正在进行中的场次所在轮次 + 最早一个还有未打完场次的轮次。
+    # 只取"最早一个没打完的轮次"在开启跳场以后会派错地方 —— 正在打的可能是后面的轮次，
+    # 而最早那个轮次还一场没开打。
+    live_round_ids = [rid for (rid,) in (await db.execute(
+        select(Round.id)
         .where(Round.tournament_id == tournament_id)
         .where(Round.matches.any(Match.status != MatchStatus.FINISHED))
         .order_by(Round.round_number)
-    )
+    )).all()]
     if scope == "current":
-        r_stmt = r_stmt.limit(1)
-    rounds_to_do = (await db.execute(r_stmt)).scalars().all()
+        ongoing_round_ids = set((await db.execute(
+            select(Match.round_id)
+            .where(Match.tournament_id == tournament_id,
+                   Match.status == MatchStatus.ONGOING)
+            .distinct()
+        )).scalars().all())
+        live_round_ids = sorted(_current_round_ids(live_round_ids, ongoing_round_ids))
+    rounds_to_do = (await db.execute(
+        select(Round).where(Round.id.in_(live_round_ids)).order_by(Round.round_number)
+    )).scalars().all() if live_round_ids else []
     if not rounds_to_do:
         return {"ok": True, "scope": scope, "assigned": [], "skipped": [],
                 "message": "没有还没打完的场次"}
+
+    # 多场地赛事（≥2 片场地、≥9 人）：裁判只能从**本轮场下的人**里挑（见下面的 pool）。
+    multi_court = await is_multi_court_tournament(db, tournament_id)
 
     # 「第 N 场」的编号必须与前端 withGlobalIndex 一致：轮次顺序 + 轮内 Match.id 顺序。
     # 界面上只有「第 N 场」、没有「第 N 轮」（轮次只是内部概念，对阵表并不显示），
@@ -232,8 +286,9 @@ async def auto_assign_referees(
         if not need:
             continue
 
-        # 本场 4 名选手：用来把"参加这场的人"排除出候选人
-        pairing_ids = {pid for m in need for pid in (m.pairing_a_id, m.pairing_b_id)}
+        # 本场 4 名选手：用来把"参加这场的人"排除出候选人。
+        # 连**本轮所有没打完的场次**的配对一起查：多场地赛事要靠它算出"本轮场下的人"。
+        pairing_ids = {pid for m in live for pid in (m.pairing_a_id, m.pairing_b_id)}
         p_res = await db.execute(select(RoundPairing).where(RoundPairing.id.in_(pairing_ids)))
         pairings = {p.id: p for p in p_res.scalars().all()}
         round_targets: list[tuple[int, set[int]]] = []
@@ -245,6 +300,9 @@ async def auto_assign_referees(
             round_targets.append((m.id, {pa.player_a_id, pa.player_b_id,
                                          pb.player_a_id, pb.player_b_id}))
 
+        # 候选人池：口径见 round_referee_pool（多场地 = 本轮场下的人）
+        pool = round_referee_pool(candidates, live, pairings, multi_court)
+
         # 同一批里已经在执裁的人，不能再分给别的场次；跨批次重新计算（每轮各自一份 busy）
         busy_ids = {m.referee_id for m in live
                     if m.has_active_referee and m.referee_id is not None}
@@ -252,7 +310,7 @@ async def auto_assign_referees(
         # 卸任会让他变成次数最少的那个 —— 不加这层就会立刻把他分回同一场。
         # 想吹回来可以手动认领（认领不看这层）。
         forbidden = {m.id: {m.referee_id} for m in need if m.referee_id is not None}
-        round_picks = assign_referees(round_targets, candidates, busy_ids=busy_ids,
+        round_picks = assign_referees(round_targets, pool, busy_ids=busy_ids,
                                       served=served, forbidden=forbidden)
         picked_map = dict(round_picks)
         picks.extend(round_picks)

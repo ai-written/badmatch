@@ -25,6 +25,10 @@ class MatchOut(BaseModel):
     pairing_a: RoundPairingOut
     pairing_b: RoundPairingOut
     court_name: str | None = None
+    # 「这场在几号场」：多场地赛事按"轮内第 i 场 → 第 i 片场地"推导出来的展示标签。
+    # 与 court_name 的区别：court_name 读的是 matches.court_id（永远为空 —— 排程不写它，
+    # 因为编辑赛事时 courts 会整体删了重建）；court_label 不落库、纯推导，只用于显示。
+    court_label: str | None = None
     start_time: time | None = None
     end_time: time | None = None
     score_a: int | None = None
@@ -45,6 +49,10 @@ class MatchOut(BaseModel):
     support_a_users: list[str] = []
     support_b_users: list[str] = []
     is_swapped: bool = False
+    # 「这场现在还不能开打，因为这几个人还在别的场上」——提前告诉前端，别等裁判
+    # 点一下记分才弹一个错误。空列表 = 可以开打（含已开打/已结束的场次）。
+    # 只在**多场地赛事**里填（单场地赛事一场一场打，不存在撞期，老行为不变）。
+    blocked_by: list[dict] = []
     duration_seconds: int | None = None
     # 比赛开始/结束时间：前端据此本地走字（配合 now 换算基准，不依赖本机时钟）
     started_at: datetime | None = None
@@ -65,7 +73,15 @@ class RoundOut(BaseModel):
     status: str
     is_regenerated: bool
     matches: list[MatchOut] = []
+    # 轮空名单。**列表**而不是单值：12 人 2 片场地时一轮有 4 个人轮空，
+    # 老字段 bye_player 只放其中一位（取 id 最小），多人轮空时会误导。
+    # 两个字段同时返回，老客户端继续读 bye_player 不受影响。
+    bye_players: list[PlayerInfo] = []
     bye_player: PlayerInfo | None = None
+    # 是否「当前这一批」：正在进行的场次所在轮次 + 最早一个还有未打完场次的轮次。
+    # 由服务端算（不能各端自己算）：开启跳场后"最早未完成的场次"≠"正在打的场次"，
+    # 前后端口径一旦不一致，就会出现「按钮给 X 场派裁判、裁判跑去了 Y 场」。
+    is_current: bool = False
 
     class Config:
         from_attributes = True

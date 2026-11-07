@@ -33,7 +33,7 @@
         <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
         <div class="info-grid">
           <div class="ig-item"><van-icon name="location-o" /><span>{{ tournament.location || '待定' }}</span></div>
-          <div class="ig-item" v-if="tournament.courts && tournament.courts.length > 0"><van-icon name="guide-o" /><span>场地号{{ tournament.courts[0].name }}</span></div>
+          <div class="ig-item" v-if="courtNames"><van-icon name="guide-o" /><span>场地号{{ courtNames }}</span></div>
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
@@ -604,10 +604,20 @@ const posterQuotaText = computed(() => {
   return left > 0 ? `${base}（还剩 ${left} 个）` : base
 })
 const posterQrTitle = computed(() => (isStarted.value ? '扫码看赛程' : '扫码报名'))
+/**
+ * 场地名：多场地赛事要全部列出来（"1号场、2号场"）。
+ * 只显示第一个会让人以为这局只开一片场地 —— 而"两片场地同时开打"和"一片场地"。
+ * 场上同时在打几场、每个人几场，完全是两回事。
+ */
+function courtNamesOf(t: any): string {
+  const names = (t?.courts || []).map((c: any) => c?.name).filter(Boolean)
+  return names.join('、')
+}
+const courtNames = computed(() => courtNamesOf(tournament.value))
 const posterPlaceText = computed(() => {
   const t = tournament.value
   if (!t) return ''
-  const court = t.courts?.[0]?.name
+  const court = courtNamesOf(t)
   return [t.location || '地点待定', court ? `场地号${court}` : ''].filter(Boolean).join(' ')
 })
 // 邀请码只有管理员能生成（见 auth.generate_invite），普通成员的海报里就没有邀请码：

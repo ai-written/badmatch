@@ -12,7 +12,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   normalizeFilter, matchVisible, emptyFilter, isFilterActive, filterRounds,
-  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter, shortRefereeName,
+  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter, shortRefereeName, filterRoundsByCourt, courtProgress, hoistNextUp,
 } from '../../src/utils/schedule.ts'
 
 const P = (id) => ({ id, username: `p${id}` })
@@ -337,4 +337,80 @@ test('filterRounds 在「搭档」下只留这两人同队的场次', () => {
   assert.deepEqual(asPair[0].matches.map((m) => m.id), [101])
   const asRivals = filterRounds(rounds, normalizeFilter({ onlyPlayerIds: [1, 3], onlyMode: 'partner' }))
   assert.deepEqual(asRivals[0].matches.map((m) => m.id), [102], '只留他们同队那场，对手那场不算')
+})
+
+// ---- 多场地：按场地裁剪 + 「这条队打到第几场」 ----
+
+const MJ = (id, court, status = 'pending', globalIdx = id) => ({
+  ...M([1, 2, 3, 4]), id, court_label: court, status, globalIdx,
+})
+const R = (matches) => ({ id: matches[0]?.id ?? 0, round_number: 1, matches })
+
+test('filterRoundsByCourt：空串表示全部（原样返回，不重建数组）', () => {
+  const rounds = [R([MJ(1, '1号场'), MJ(2, '2号场')])]
+  assert.equal(filterRoundsByCourt(rounds, ''), rounds)
+})
+
+test('filterRoundsByCourt：只留该场地的比赛，轮次结构保留', () => {
+  const rounds = [R([MJ(1, '1号场'), MJ(2, '2号场')]), R([MJ(3, '1号场'), MJ(4, '2号场')])]
+  const only1 = filterRoundsByCourt(rounds, '1号场')
+  assert.deepEqual(only1.map((r) => r.matches.map((m) => m.id)), [[1], [3]])
+  assert.equal(only1[0].round_number, 1, '轮次结构要保留（渲染时再丢空轮次）')
+})
+
+test('filterRoundsByCourt：单场地赛事（没有 court_label）不会误伤', () => {
+  const rounds = [R([{ ...M([1, 2, 3, 4]), id: 1, status: 'pending' }])]
+  assert.equal(filterRoundsByCourt(rounds, '1号场')[0].matches.length, 0)
+  assert.equal(filterRoundsByCourt(rounds, '')[0].matches.length, 1)
+})
+
+test('courtProgress：取该场地第一条没打完的', () => {
+  const rounds = [
+    R([MJ(1, '1号场', 'finished'), MJ(2, '2号场', 'finished')]),
+    R([MJ(3, '1号场', 'ongoing'), MJ(4, '2号场', 'pending')]),
+  ]
+  const p = courtProgress(rounds)
+  assert.equal(p['1号场'], '第3场')
+  assert.equal(p['2号场'], '第4场')
+})
+
+test('courtProgress：全部打完的场地给「已打完」', () => {
+  const rounds = [R([MJ(1, '1号场', 'finished'), MJ(2, '2号场', 'pending')])]
+  const p = courtProgress(rounds)
+  assert.equal(p['1号场'], '已打完')
+  assert.equal(p['2号场'], '第2场')
+})
+
+// ---- 多场地：「现在该上场」的场次提到待打段最前 ----
+
+const MS = (id, status = 'pending') => ({ id, status, globalIdx: id })
+
+test('hoistNextUp：空集合 -> 原样返回（同一引用）', () => {
+  const ms = [MS(1), MS(2)]
+  assert.equal(hoistNextUp(ms, new Set()), ms)
+})
+
+test('hoistNextUp：提到"第一条待打"之前，不越过已完成/进行中', () => {
+  const ms = [MS(8, 'finished'), MS(25, 'ongoing'), MS(23), MS(24), MS(26)]
+  const out = hoistNextUp(ms, new Set([26]))
+  assert.deepEqual(out.map((m) => m.id), [8, 25, 26, 23, 24])
+  assert.equal(out[2].globalIdx, 26, '编号不动')
+})
+
+test('hoistNextUp：排序不改变任何一场的比赛编号', () => {
+  const ms = [MS(1, 'finished'), MS(2), MS(3), MS(4)]
+  const out = hoistNextUp(ms, new Set([4, 3]))
+  assert.deepEqual(out.map((m) => m.id), [1, 3, 4, 2])
+  assert.deepEqual(out.map((m) => m.globalIdx), [1, 3, 4, 2])
+})
+
+test('hoistNextUp：全是已完成时把它们正常接在后面（不越到历史前）', () => {
+  const ms = [MS(1, 'finished'), MS(2, 'finished')]
+  const out = hoistNextUp(ms, new Set([2]))
+  assert.deepEqual(out.map((m) => m.id), [1, 2])
+})
+
+test('hoistNextUp：集合里没有真场次时不动（不凭空多东西）', () => {
+  const ms = [MS(1)]
+  assert.equal(hoistNextUp(ms, new Set([999])), ms)
 })

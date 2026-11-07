@@ -45,10 +45,29 @@
         </span>
       </div>
 
+      <!-- 多场地赛事：两片场地各是一条队列，切 Tab 只看一条（Tab 上标着这条队打到第几场） -->
+      <div v-if="courtTabs.length > 1" class="court-tabs">
+        <span class="court-tab" :class="{ on: courtTab === '' }" @click="selectCourtTab('')">全部</span>
+        <span
+          v-for="c in courtTabs"
+          :key="c"
+          class="court-tab"
+          :class="{ on: courtTab === c }"
+          @click="selectCourtTab(c)"
+        >
+          {{ c }}<em class="court-tab-sub">{{ courtProgressMap[c] }}</em>
+        </span>
+      </div>
+
       <!-- 赛事已提前结束：所有比赛只读 -->
       <div v-if="tournamentEnded" class="readonly-banner">
         <van-icon name="lock" />
         <span>赛事已结束，赛程与比分已锁定</span>
+      </div>
+      <!-- 多场地赛事：某一场得先等谁打完（顶部只留这一条提示） -->
+      <div v-if="nextUpHint" class="court-banner skip-banner">
+        <van-icon name="exchange" />
+        <span>{{ nextUpHint }}</span>
       </div>
       <!-- 默认折叠较早的已完成比赛，只留最近 1 场；点击展开查看全部 -->
       <div v-if="hasHiddenFinished" class="hidden-toggle" @click="showAllFinished = !showAllFinished">
@@ -62,7 +81,7 @@
       </van-empty>
       <van-empty v-else-if="visibleRounds.length === 0" description="已完成比赛已全部收起" />
 
-      <template v-for="r in visibleRounds" :key="r.id">
+      <template v-for="r in displayRounds" :key="r.id">
         <div class="round-section">
           <div
             v-for="m in r.matches"
@@ -108,6 +127,17 @@
               </div>
               <!-- 场次编号放在 VS/比分的正下方（e2e 按 .match-card .match-num 取编号，class 不能改） -->
               <span class="match-num">第{{ m.globalIdx }}场</span>
+              <!-- 多场地赛事：这场在几号场。单独一个 span（不并进 .match-num 的文本里，
+                   否则 e2e 断言的编号文本会变成"第3场1号场"）。
+                   后面直接接「该上场 / 等谁」——**在列表上就能看出能不能打**，
+                   不用点进记分页试一次才知道。 -->
+              <span
+                v-if="m.court_label"
+                class="match-court"
+                :class="{ 'is-next': isNextUp(m), 'is-wait': !!blockedText(m) }"
+              >
+                {{ m.court_label }}<template v-if="isNextUp(m)"> · 该上场</template><template v-else-if="blockedText(m)"> · 等{{ blockedText(m) }}</template>
+              </span>
             </div>
 
             <div class="match-side" :class="{ win: m.winner_pairing_id === m.pairing_b.id }">
@@ -209,7 +239,8 @@ import { useGoBack } from '@/composables/useGoBack'
 import {
   withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
   normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
-  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter,
+  pruneFilter, isOnlyMeFilter, nextOnlyMeFilter, filterRoundsByCourt, courtProgress,
+  hoistNextUp,
   emptyFilter, shortRefereeName, type ScheduleFilter, type OnlyMode,
 } from '@/utils/schedule'
 import { showToast, showConfirmDialog } from 'vant'
@@ -247,11 +278,34 @@ async function fetchRounds(skipLoading = false) {
     loadFailed.value = false
     // 记下"这个赛事的赛程已成功加载过"，剪枝护栏用（见 roundsLoadedFor 的说明）
     roundsLoadedFor.value = tid
+    // 多场地赛事还要知道"现在该上哪几场"（跳场判定 + 本批轮空）—— 见 fetchNextUp
+    fetchNextUp()
   } catch (e) {
     // 赛事不存在（后端现在返回 404）或网络异常：
     // 不能让它显示成「暂无赛程」——那是「赛事还没有比赛」的意思，两回事
     if (rounds.value.length === 0) loadFailed.value = true
     throw e
+  }
+}
+
+/**
+ * 「现在该上哪几场」：服务端算好的跳场判定。
+ *
+ * 多场地赛事里两片场地各打各的，最早那场如果有人在邻场还没打完就跳过它先打后面的。
+ * 只有 `courts >= 2`（真的多场地同时开打）才会用到下面的提示条 —— 单场地赛事
+ * 这份数据是 `courts: 1`，界面与以前完全一样。
+ * 失败静默：这是锦上添花的提示，不能因为它让整页报错。
+ */
+async function fetchNextUp() {
+  if (nextUpOff) return
+  try {
+    const res = await api.get(`/tournaments/${route.params.id}/next-up`, { skipLoading: true } as any)
+    nextUp.value = res.data
+    // 单场地赛事（courts < 2）用不上跳场与轮空提示：问一次就够了，之后不再打这个接口，
+    // 免得每次实时刷新都多一次请求
+    if ((res.data?.courts || 0) < 2) nextUpOff = true
+  } catch {
+    nextUp.value = null
   }
 }
 
@@ -351,18 +405,77 @@ const tournamentEnded = computed(() =>
 // 没活干时后端也不会重新分配，留一个点了没反应的按钮只会让人困惑；
 // 当前这批打完后自动轮到下一批，有缺口时它自己就回来。
 const assigning = ref(false)
-// 用带 globalIdx 的编号副本：号码必须与列表里显示的「第 N 场」完全一致
-const currentRound = computed(() =>
-  numberedRounds.value.find((r: any) => (r.matches || []).some((m: any) => m.status !== 'finished')) || null
+// ── 多场地赛事（两片场地同时开打）专用的两块提示 ───────────────────────────
+// next-up 是服务端算的"现在该上哪几场"：最早那场有人在邻场没打完就跳过它。
+// 只有服务端说 courts >= 2 时才认为这局是多场地，界面与单场地赛事完全一样。
+const nextUp = ref<any | null>(null)
+// 单场地赛事第一次就关掉这个接口（见 fetchNextUp）：别让每次实时刷新都多一次请求
+let nextUpOff = false
+const isMultiCourt = computed(() => (nextUp.value?.courts || 0) >= 2)
+/** 跳场提示：某一场被跳过了 / 或者两片场地都在打（都说明"现在该打哪一场"） */
+const nextUpHint = computed(() => {
+  if (!isMultiCourt.value) return ''
+  const skipped = nextUp.value?.skipped || []
+  const playing = (nextUp.value?.playing || []).map((p: any) => `第${p.match_number}场`)
+  const canPlay = (nextUp.value?.next || []).map((n: any) => `第${n.match_number}场`)
+  if (skipped.length) {
+    const s = skipped[0]
+    const waiting = s.waiting || []
+    const who = waiting.map((w: any) => w.username).filter(Boolean).join('、') || '有人'
+    const theirNo = waiting[0]?.match_number
+    const head = `第${s.match_number}场要等 ${who} 打完${theirNo ? `第${theirNo}场` : '另一场'}`
+    return canPlay.length ? `${head}，可先打 ${canPlay.join('、')}` : `${head}，先等一等`
+  }
+  // 没有可跳的，且所有场地都在打：说清"为什么下面还没轮到"
+  const courts = nextUp.value?.courts || 0
+  if (!canPlay.length && playing.length >= courts && courts >= 2) {
+    return `${courts} 片场地都在打（${playing.join('、')}），等任一场结束后自动轮到下一场`
+  }
+  return ''
+})
+/** 「现在就该上」的场次 id（服务端算的，见 /next-up）：列表上标「该上场」 */
+const nextUpIds = computed<Set<number>>(
+  () => new Set<number>((nextUp.value?.next || []).map((n: any) => Number(n.match_id)))
 )
-/** 当前轮次里还没打完的场次编号 */
+/** 被跳过的场次 → 在等谁（只在"轮到它但被卡住"时才出现在这个窗口里） */
+const skippedWaiters = computed(() => {
+  const map = new Map<number, string>()
+  for (const s of (nextUp.value?.skipped || [])) {
+    const names = (s.waiting || []).map((w: any) => w?.username).filter(Boolean)
+    map.set(s.match_id, names.join('、'))
+  }
+  return map
+})
+function isNextUp(m: any): boolean {
+  return isMultiCourt.value && nextUpIds.value.has(m.id)
+}
+/** 列表上只标「当前窗口」里被卡住的那一两场 —— 给全部 pending 都标橙会吵得看不清 */
+function blockedText(m: any): string {
+  if (!isMultiCourt.value) return ''
+  return skippedWaiters.value.get(m.id) || ''
+}
+// 用带 globalIdx 的编号副本：号码必须与列表里显示的「第 N 场」完全一致。
+// 「当前这一批」以**服务端**的 is_current 为准（正在进行中的场次所在轮次 + 最早一个
+// 还有未打完场次的轮次）：开启跳场后"最早未完成的轮次"不再是唯一答案，各端自己算
+// 会和服务端派裁判的口径分叉（按钮给第 7 场派、裁判跑去了第 8 场）。
+// 老服务端没有这个字段时退回原来的算法，行为不变。
+const currentRounds = computed(() => {
+  const list = numberedRounds.value || []
+  const flagged = list.filter((r: any) => r.is_current)
+  if (flagged.length) return flagged
+  const first = list.find((r: any) => (r.matches || []).some((m: any) => m.status !== 'finished'))
+  return first ? [first] : []
+})
+/** 当前这一批里还没打完的场次编号（可能跨两个轮次：跳场之后这是正常形态） */
 const liveMatchNo = computed(() =>
-  (currentRound.value?.matches || [])
+  currentRounds.value
+    .flatMap((r: any) => r.matches || [])
     .filter((m: any) => m.status !== 'finished').map((m: any) => m.globalIdx)
 )
 /** 其中「还没有在任裁判」的场次编号 */
 const pendingMatchNo = computed(() =>
-  (currentRound.value?.matches || [])
+  currentRounds.value
+    .flatMap((r: any) => r.matches || [])
     .filter((m: any) => m.status !== 'finished' && !m.active_referee).map((m: any) => m.globalIdx)
 )
 /** [3,4] → 「3、4」；太多时省略成「3、4、5 等 6」 */
@@ -618,18 +731,61 @@ function toggleOnlyMe() {
 //   2. 再按人裁剪 —— 折叠规则只针对筛完剩下的比赛（只看某人时也能折叠他的旧战绩）
 //   3. 最后折叠 + 丢掉空轮次
 const numberedRounds = computed(() => withGlobalIndex(rounds.value))
-const filteredRounds = computed(() => filterRounds(numberedRounds.value, activeFilter.value))
+// 多场地赛事：两片场地各自是一条独立队列，可以只挑一片看（见场地 Tab）。
+// '' = 全部。**先按人裁、再按场地裁**：两件事互不干扰，且都不动「第N场」编号。
+const filteredRounds = computed(() => {
+  const byPeople = filterRounds(numberedRounds.value, activeFilter.value)
+  // 只裁不重排：折叠/隐藏要按**原顺序**算（"最后一场已完成的保持展开"依赖它），
+  // "该上场提前"放到 displayRounds 里做，见下面。
+  return filterRoundsByCourt(byPeople, courtTab.value)
+})
 const hiddenIds = computed(() => hiddenFinishedIds(filteredRounds.value, showAllFinished.value, tournamentEnded.value))
 const hiddenFinishedCount = computed(() => hiddenIds.value.size)
+// ---- 多场地：场地 Tab（'' = 全部）----
+// 两片场地是两条独立队列，混在一个列表里看不出现场"这条队排到哪了"。
+// Tab 上直接标出该场地现在打到第几场（courtProgress），切过去就是那条队的顺序。
+const courtTab = ref('')
+const courtTabs = computed(() => {
+  if (!isMultiCourt.value) return [] as string[]
+  const names: string[] = []
+  for (const r of numberedRounds.value || []) {
+    for (const m of r.matches || []) {
+      if (m.court_label && !names.includes(m.court_label)) names.push(m.court_label)
+    }
+  }
+  return names
+})
+const courtProgressMap = computed(() => courtProgress(numberedRounds.value || []))
+function selectCourtTab(name: string) {
+  courtTab.value = name
+}
 const hasHiddenFinished = computed(() => hiddenFinishedCount.value > 0 || showAllFinished.value)
 const visibleRounds = computed(() => renderRounds(filteredRounds.value, hiddenIds.value))
+/**
+ * 真正渲染的列表：多场地赛事把「现在就能上场」的那几场提到**待打段的最前面**
+ * （不越过已完成/进行中的场次），避免每次下滑很久才找到该上的那场。
+ * 单独一层而不是塞进 filteredRounds：折叠/隐藏要先按原顺序算完，再重排展示顺序。
+ */
+const displayRounds = computed(() => {
+  const vis = visibleRounds.value
+  if (!isMultiCourt.value || !nextUpIds.value.size) return vis
+  const flat = vis.flatMap((r: any) => r.matches || [])
+  return [{ id: -1, round_number: 0, matches: hoistNextUp(flat, nextUpIds.value) }]
+})
 
 // --- 进入页面时自动定位到当前该关注的比赛 ---
 // 优先「进行中」的第一场；没有进行中的则取「待打」的第一场；
 // 全部已结束（都折叠了）则不动。仅对本次进入页面生效，之后实时刷新不再抢占滚动位置。
 // 落点在**筛选后**的比赛里取：只看某人时，别把视口滚到他根本不参加的场次上。
+// 多场地赛事另有一条优先：直接定位到「该上场」的那一场（列表里它已经被提前，顺着看到即可）。
 const initialScrollDone = ref(false)
-const targetMatchId = computed<number | null>(() => focusMatchId(filteredRounds.value))
+const targetMatchId = computed<number | null>(() => {
+  if (isMultiCourt.value) {
+    const firstNext = (nextUp.value?.next || [])[0]
+    if (firstNext) return Number(firstNext.match_id)
+  }
+  return focusMatchId(filteredRounds.value)
+})
 const targetCard = ref<HTMLElement | null>(null)
 // 高亮不能跟着 initialScrollDone 一起消失：批处理会在首次绘制前就把它移除，等于从未显示。
 // 因此单独用一个 id 记录「本次落点」，并在若干帧后由定时器清除，让高亮真正可见一段时间。
@@ -784,6 +940,32 @@ onMounted(() => {
   background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
 }
 
+/* 多场地赛事的场地 Tab：两片场地各一条队列，"全部"看总览 */
+.court-tabs {
+  display: flex; gap: 8px; align-items: center;
+  padding: 0 12px 8px; flex-wrap: wrap;
+}
+.court-tab {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  padding: 5px 10px; border-radius: 14px;
+  font-size: 13px; color: #5b6b7f;
+  background: #f2f5f9; border: 1px solid #e3eaf3;
+}
+.court-tab.on {
+  color: #fff; background: #4a7ab0; border-color: #4a7ab0;
+}
+.court-tab-sub { font-style: normal; font-size: 10px; opacity: 0.75; }
+
+/* 多场地赛事的顶部提示（只留"某场要先等谁打完"这一条）。
+   服务端说 courts>=2 时才出现，所以单场地赛事不会多出任何东西。 */
+.court-banner {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  margin: 0 12px 12px; padding: 8px 12px;
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+  border-radius: 10px;
+}
+.skip-banner { color: #8a5a2b; background: #fdf3e6; border: 1px solid #f6dfc2; }
+
 /* 折叠提示条：不明显抢戏，但可点击区域要够大（移动端） */
 .hidden-toggle {
   display: flex; align-items: center; justify-content: center; gap: 4px;
@@ -841,6 +1023,15 @@ onMounted(() => {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 .match-num { font-size: 10px; color: #aaa; }
+/* 多场地赛事："第 N 场"下面那行场地号 —— 比编号稍微显眼一点（场上的人先看这个） */
+.match-court {
+  display: block; margin-top: 1px;
+  font-size: 10px; font-weight: 600; color: #4a7ab0;
+  white-space: nowrap;
+}
+/* is-next = 现在就该上（绿）；is-wait = 有人在别场没打完（橙，后面直接写等谁） */
+.match-court.is-next { color: #2f9e5e; }
+.match-court.is-wait { color: #d4821f; }
 .match-dur { font-size: 10px; color: #bbb; }
 .match-info .van-button { font-size: 10px; height: 22px; padding: 0 6px; }
 

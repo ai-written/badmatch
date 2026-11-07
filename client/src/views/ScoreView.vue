@@ -46,7 +46,9 @@
             </van-tag>
           </div>
           <div class="sb-info">
-            <span v-if="match.court_name">{{ match.court_name }}</span>
+            <!-- 场地：court_name 来自 matches.court_id（排程从不写它，所以通常是空）；
+                 多场地赛事显示服务端推导出来的 court_label（"1号场"/"2号场"） -->
+            <span v-if="match.court_name || match.court_label">{{ match.court_name || match.court_label }}</span>
             <span v-if="match.referee">裁判 {{ match.referee.username }}<template v-if="!match.active_referee">（已卸任）</template></span>
           </div>
           <div class="swap-hint">{{ canOperateLive ? '点击交换场地' : (locked ? '赛事已结束，本场已锁定' : (isFinishedMatch ? '比赛已结束' : '仅裁判可交换场地')) }}</div>
@@ -509,6 +511,58 @@ let confirmedScore: { score_a: number; score_b: number } | null = null
 const wheelSide = ref<string | null>(null)
 let wheelGesture: { id: number; y: number; acc: number; side: string } | null = null
 
+/**
+ * 「这场还不能开打」：只有「知道了」，**没有**"强制开打"。
+ *
+ * 为什么不留出口：人不能同时站两片场地、一片场地也不能同时打两场 —— 都是物理约束。
+ * 硬开出来只会在数据里制造"同一时刻两场在同一片场地上"，事后对不上账。
+ * 现场最常见的误会是"那场其实打完了、只是没人点结束"，所以提示里直接告诉他先去结束它。
+ */
+async function showStartBlocked(message: string) {
+  try {
+    await showConfirmDialog({
+      title: '这场还不能开打',
+      message,
+      confirmButtonText: '知道了',
+      showCancelButton: false,
+    })
+  } catch {
+    /* 关掉即可 */
+  }
+}
+
+/** 人还占着：把冲突的人列出来（服务端 400 的 player_busy 与进页面时的 blocked_by 共用） */
+function busyMessage(who: string): string {
+  return `${who} 还在另一场没打完。\n等那一场结束再开这场；如果那一场其实已经打完了，先去把它结束。`
+}
+
+async function handleBusyConflict(detail: any) {
+  const names = (detail?.conflicts || [])
+    .map((c: any) => c?.username).filter(Boolean).join('、')
+  await showStartBlocked(busyMessage(names || '有人'))
+}
+
+/**
+ * 进页面就直接弹：这场现在开不了（4 人里有人还在邻场没打完）。
+ *
+ * 只在**第一次拉到比赛详情**时弹一次 —— 每 30 秒的校准刷新不重复弹，否则裁判会被
+ * 同一个弹窗追着烦；状态变了还能从记分被 400 拦下时再看到。
+ */
+const busyPrompted = ref(false)
+const blockedNames = computed(() => {
+  const list = (match.value as any)?.blocked_by || []
+  return list.map((b: any) => b?.username).filter(Boolean).join('、')
+})
+watch(
+  () => [match.value?.id, blockedNames.value] as const,
+  async ([id, names]) => {
+    if (!id || !names || busyPrompted.value) return
+    busyPrompted.value = true
+    await showStartBlocked(busyMessage(names))
+  },
+  { immediate: true },
+)
+
 async function flushScoreNow() {
   if (!pendingScore || !match.value) return
   let data = pendingScore
@@ -561,6 +615,15 @@ async function flushScoreNow() {
         // 以服务端为准再拉一次：超时的情况下请求可能其实已经落库（响应丢在路上），
         // 盲回滚就会把真实比分显示少一分。这次 GET 用的是新代数，会被正常采纳。
         await fetchMatch().catch(() => {})
+        // 多场地赛事的「按人拦截」：这场 4 人里有人还在邻场没打完，服务端不肯开打。
+        // 单独处理，否则裁判只会看到"点了一分又跳回去"却不知道为什么。
+        const detail = e?.response?.status === 400 ? e.response.data?.detail : null
+        if (detail && detail.code === 'player_busy') {
+          await handleBusyConflict(detail)
+        } else if (detail && detail.code === 'no_court_free') {
+          // 两片场地都还在打：物理上开不了这场（服务端不给"强制开打"的出口）
+          await showStartBlocked(detail.message)
+        }
         break
       }
     }
@@ -797,6 +860,7 @@ onUnmounted(() => {
   font-size: 13px; color: #8a6d3b;
   background: #fdf6e3; border: 1px solid #f5e2b8; border-radius: 10px;
 }
+/* 「这场还不能开打」改成进页面直接弹窗（见 askBusyThenMaybeForce），不再占用页面顶部 */
 .loading { display: flex; justify-content: center; margin-top: 120px; }
 .load-failed {
   display: flex; flex-direction: column; align-items: center; gap: 6px;

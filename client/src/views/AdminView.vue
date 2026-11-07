@@ -292,7 +292,7 @@ const ACTION_LABELS: Record<string, string> = {
   match_sides_randomized: '重置对阵左右',
   tournament_withdraw: '退赛', registration: '报名', cancel_registration: '取消报名',
   round_start: '开始轮次', match_force_end: '结束比赛', match_score_update: '记分',
-  match_swap_sides: '交换场地',
+  match_force_start: '强制开打', match_swap_sides: '交换场地',
   support_vote: '投票', referee_claim: '认领裁判', referee_release: '释放裁判',
   referee_auto_assign: '自动分配裁判',
   update_profile: '修改资料', upload_avatar: '上传头像', generate_invite: '生成邀请码',

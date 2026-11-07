@@ -1,13 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import lazyload, noload
 from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
+from app.core.occupancy import conflicts_for_match, ongoing_map, match_players
+from app.engine.scheduler import use_round_engine, matches_per_round
+# 分流判定（"这局是不是多场地同时开打"）放在 engine_api 里，与此处的拦截共用同一套口径。
+# engine_api 不 import matches，所以这里不会成环。
+from app.api.engine_api import is_multi_court_tournament
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, PlayerStats, Court, TimeSlot
 from app.models.round import (
@@ -25,6 +30,28 @@ router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["matches"])
 _user_brief_cache: tuple | None = None
 _pairing_brief_cache: tuple | None = None
 _court_brief_cache: tuple | None = None
+
+# 开打闸门的咨询锁命名空间（任意固定常数，只要和别的 advisory lock 不撞即可；
+# auth 里首用户创建用的是单参数形式 pg_advisory_xact_lock(1)，与此不冲突）
+START_GATE_LOCK_NS = 20261106
+
+
+def _current_round_ids(live_round_ids: list[int],
+                       ongoing_round_ids: set[int]) -> set[int]:
+    """「当前这一批」是哪些轮次 = 正在进行中的场次所在轮次 ∪ 最早一个还有未打完场次的轮次。
+
+    `live_round_ids` 必须已按轮次升序。
+
+    为什么不能只取"最早一个还没打完的轮次"：开启跳场后（某场 4 人里有人还在打，
+    就先打后面能打的），正在打的可能是后面的轮次，而最早那个轮次还一场没开打 ——
+    只按"最早未完成"给裁判，就会出现"按钮给第 7 场派裁判、裁判跑去了第 8 场"。
+
+    没有进行中的场次时，退化回老口径（最早一个还有未打完场次的轮次），
+    所以单场地/8 人及以下的赛事行为完全不变。
+    """
+    if not live_round_ids:
+        return set()
+    return (set(ongoing_round_ids) & set(live_round_ids)) | {live_round_ids[0]}
 
 
 def _user_brief() -> tuple:
@@ -142,6 +169,13 @@ async def list_rounds(
         matches_by_round.setdefault(m.round_id, []).append(m)
 
     bye_map = await _get_bye_players(rounds, db)
+    # 当前批次：按"有未打完场次的轮次"（升序）和"有进行中场次的轮次"算出来，见 _current_round_ids
+    current_round_ids = _current_round_ids(
+        [r.id for r in rounds
+         if any(m.status != MatchStatus.FINISHED for m in matches_by_round.get(r.id, []))],
+        {r.id for r in rounds
+         if any(m.status == MatchStatus.ONGOING for m in matches_by_round.get(r.id, []))},
+    )
 
     # 一次批量组装所有比赛（内部按 id.in_ 批量查配对/用户/场地/时间段/应援），
     # 再按轮次分组拼装，避免每轮重复付一次批量查询的钱
@@ -151,18 +185,54 @@ async def list_rounds(
     round_number_of = {
         m.id: r.round_number for r in rounds for m in matches_by_round.get(r.id, [])
     }
+    # 「这场在几号场」= 真实分配到的那片场地（开赛按计划预填、开打那一刻可重分配，
+    # 见 _assign_start_court）。court_name 就是从 matches.court_id 解析出来的名字。
     for mo in match_outs:
         mo.round_number = round_number_of.get(mo.id, 0)
+        mo.court_label = mo.court_name
+
+    # 多场地赛事：把「这场现在能不能开打」提前算出来给前端 ——
+    # 否则裁判得点一下记分才知道"测试4 还在另一场"，现场很别扭。
+    # 单场地赛事不算（那里一场一场打，不存在撞期，老行为一行不变）。
+    if await is_multi_court_tournament(db, tournament_id):
+        busy = await ongoing_map(db, tournament_id)
+        if busy:
+            players_by_match = await match_players(db, all_matches)
+            names = await db.execute(
+                select(User.id, User.username).where(User.id.in_(set(busy)))
+            )
+            name_of = {uid: uname for uid, uname in names.all()}
+            number_of: dict[int, int] = {}
+            seq = 0
+            for r in rounds:                      # 与前端 withGlobalIndex 同一套编号
+                for m in matches_by_round.get(r.id, []):
+                    seq += 1
+                    number_of[m.id] = seq
+            for mo in match_outs:
+                if mo.status != "pending":
+                    continue
+                mine = players_by_match.get(mo.id, set())
+                hits = sorted(p for p in mine if p in busy)
+                if hits:
+                    mo.blocked_by = [
+                        {"player_id": p, "username": name_of.get(p, ""),
+                         "match_id": busy[p], "match_number": number_of.get(busy[p], 0)}
+                        for p in hits
+                    ]
 
     out = []
     for r in rounds:
+        byes = bye_map.get(r.id) or []
         out.append(RoundOut(
             id=r.id,
             round_number=r.round_number,
             status=r.status.value,
             is_regenerated=r.is_regenerated,
             matches=[out_by_id[m.id] for m in matches_by_round.get(r.id, []) if m.id in out_by_id],
-            bye_player=bye_map.get(r.id),
+            # 新字段是列表（12 人一轮 4 人轮空）；老字段保留第一位，只为老客户端不炸
+            bye_players=byes,
+            bye_player=byes[0] if byes else None,
+            is_current=r.id in current_round_ids,
         ))
     return out
 
@@ -185,7 +255,13 @@ async def get_match(
     # （报名/场地/轮次/比赛/战绩）拉一遍 —— 记分页每 30s 刷新一次，白付 9 条查询
     t = await db.execute(select(Tournament.status).where(Tournament.id == tournament_id))
     t_status = t.scalar_one_or_none()
-    return await _build_match_out(m, db, user, t_status.value if t_status else None)
+    out = await _build_match_out(m, db, user, t_status.value if t_status else None)
+    # 「这场在几号场」就是 court_name（match.court_id 解析出来的真实场地）
+    out.court_label = out.court_name
+    if (await is_multi_court_tournament(db, tournament_id)) and m.status == MatchStatus.PENDING:
+        # 还没开打时就把「谁在别场上、能不能开打」告诉记分页：别让裁判点了记分才弹窗
+        out.blocked_by = await conflicts_for_match(db, tournament_id, m)
+    return out
 
 
 @router.put("/matches/{match_id}/score")
@@ -246,8 +322,12 @@ async def update_score(
             },
         )
 
-    # 首次记分视为比赛开始
+    # 首次记分视为比赛开始。**多场地赛事**里另一片场地可能正在打同一批人、或者两片场地
+    # 都还占着 —— 一个人不能同时站两片场地、场地也不能分身，所以开打前先过闸门
+    # （见 _ensure_can_start）。单场地赛事不做（那里本来就是一场一场打）。
     if m.status == MatchStatus.PENDING:
+        if await is_multi_court_tournament(db, tournament_id):
+            await _ensure_can_start(db, tournament_id, m)
         m.status = MatchStatus.ONGOING
         m.started_at = datetime.now()
 
@@ -862,8 +942,220 @@ async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession, user=No
     )
 
 
-async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, PlayerInfo | None]:
-    """批量计算每轮的轮空选手，避免逐轮查询。"""
+async def _ensure_can_start(db: AsyncSession, tournament_id: int,
+                            match: Match) -> None:
+    """开打前的闸门：**人齐 且 有场地空着**才允许开这场（多场地赛事）。
+
+    - 人齐：这 4 个人里没有谁还在别的场上（`player_busy`）。刻意**不**用"必须等整轮
+      打完"：模拟过 12 人 36 场、单场 5±1.5 分钟、2 片场地，整轮闸门要多花 12.7 分钟
+      （场地累计空等 26 分钟），按人拦只要冲突那几场稍等。
+    - 有场地：两片场地都还在打 → 物理上不可能再开一场（`no_court_free`）。这里**不给**
+      "强制开打"的出口：真开出来就是"同一时刻两场在一片场地上"，那是假数据。
+      现场若那场其实已经打完，正确操作是先把它结束（提示里就这么写）。
+
+    并发保护：两个人同时给两场比赛记第一分时，双方都会读到"对方还没开打"而**都放行**，
+    于是同一个人真的会同时出现在两片场地上。这里用一个事务级咨询锁按赛事把这次检查
+    **连同场地分配一起**串行化。不能改成给赛事行加 FOR UPDATE：本事务已经持有 FOR SHARE
+    （见 load_writable_tournament），两个记分事务互相等着对方升级，直接死锁。
+    锁随事务提交/回滚释放，只罩住"首次记分"这一小段 —— 后续记分仍互不阻塞。
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :tid)").bindparams(
+            ns=START_GATE_LOCK_NS, tid=tournament_id)
+    )
+    conflicts = await conflicts_for_match(db, tournament_id, match)
+    if conflicts:
+        names = "、".join(c["username"] or f"#{c['player_id']}" for c in conflicts)
+        raise HTTPException(status_code=400, detail={
+            "code": "player_busy",
+            "message": f"{names} 还在另一场没打完，等那场结束再开这场；"
+                       "如果那场其实已经打完，先去结束它。",
+            "conflicts": conflicts,
+        })
+    # 人要齐了才轮得到场地：把这场挂到一片此刻空着的场地上（写库，见 _assign_start_court）
+    if not await _assign_start_court(db, tournament_id, match):
+        usage = await _ongoing_court_usage(db, tournament_id, match.id)
+        where = "、".join(
+            f"{u['court_name'] or '未定场地'}（第{u['round_number']}轮）" for u in usage
+        ) or "所有场地"
+        raise HTTPException(status_code=400, detail={
+            "code": "no_court_free",
+            "message": f"{where}都还在打，等任一场结束后再开这场；"
+                       "如果某场其实已经打完，先去结束它。",
+            "courts": usage,
+        })
+
+
+def _pick_next_matches(ordered_matches, players_by_match: dict[int, set[int]],
+                       busy: dict[int, int], slots: int):
+    """从待打场次里挑出"现在就能上的那几场"（纯函数，便于单测）。
+
+    顺序走一遍：**4 个人都空闲**的收进 `next`，有人在邻场没打完的记进 `skipped`
+    并继续看后面 —— 这就是"跳场"：只改**上场顺序**，人员构成一个都不动，
+    所以每人场次、搭档、对手、轮空全部不变。
+    """
+    next_ids: list[int] = []
+    skipped: list[tuple] = []
+    if slots <= 0:
+        return next_ids, skipped
+    for m in ordered_matches:
+        if m.status != MatchStatus.PENDING:
+            continue
+        mine = players_by_match.get(m.id, set())
+        waiting = sorted(p for p in mine if p in busy)
+        if waiting:
+            # 已经凑够这一批就不再往后找；被跳过的只报"挡在它前面的那些"
+            skipped.append((m, waiting))
+            continue
+        next_ids.append(m.id)
+        if len(next_ids) >= slots:
+            break
+    return next_ids, skipped
+
+
+@router.get("/next-up")
+async def next_up(
+    tournament_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """现在该开哪几场 —— 「跳场」的判定结果（多场地赛事用）。
+
+    两片场地各打各的，谁先打完谁先上下一场。最早那场如果有人在邻场还没打完，
+    就**跳过它**去打后面能打的（只改顺序，不改人员）。响应里 `skipped` 说明谁在等、
+    等的是哪一场，前端据此提示"第 7 场等张三打完第 5 场，可先打第 8 场"。
+
+    老路径（单场地 / 8 人及以下）没有并发：`courts=1`，永远只报最早那一场。
+    """
+    rows = (await db.execute(
+        select(Match, Round.round_number)
+        .join(Round, Round.id == Match.round_id)
+        .where(Match.tournament_id == tournament_id)
+        .order_by(Round.round_number, Match.id)
+    )).all()
+    if not rows:
+        return {"ok": True, "courts": 0, "playing": [], "next": [], "skipped": []}
+
+    matches = [m for m, _ in rows]
+    # 「第 N 场」按 (轮次, 比赛 id) 编号 —— 与前端 withGlobalIndex、referee.py 的 ordinal 同源
+    number = {m.id: idx for idx, (m, _) in enumerate(rows, start=1)}
+
+    courts = (await db.execute(
+        select(func.count(Court.id)).where(Court.tournament_id == tournament_id)
+    )).scalar() or 0
+    roster = (await db.execute(
+        select(func.count(PlayerStats.id)).where(PlayerStats.tournament_id == tournament_id)
+    )).scalar() or 0
+    live_count = (await db.execute(
+        select(func.count(PlayerStats.id)).where(
+            PlayerStats.tournament_id == tournament_id,
+            PlayerStats.is_active == True,
+        )
+    )).scalar() or 0
+
+    multi = use_round_engine(roster, courts)
+    courts_now = matches_per_round(live_count, courts) if multi else 1
+
+    playing = [m for m in matches if m.status == MatchStatus.ONGOING]
+    busy = await ongoing_map(db, tournament_id)
+    players_by_match = await match_players(db, matches)
+    slots = max(0, courts_now - len(playing))
+    next_ids, skipped = _pick_next_matches(matches, players_by_match, busy, slots)
+
+    wait_names: dict[int, str] = {}
+    if skipped:
+        wait_ids = {p for _m, waiting in skipped for p in waiting}
+        named = await db.execute(select(User).where(User.id.in_(wait_ids)))
+        wait_names = {u.id: u.username for u in named.scalars().all()}
+
+    return {
+        "ok": True,
+        "courts": courts_now,
+        "playing": [{"match_id": m.id, "match_number": number[m.id]} for m in playing],
+        "next": [{"match_id": mid, "match_number": number[mid]} for mid in next_ids],
+        "skipped": [
+            {
+                "match_id": m.id,
+                "match_number": number[m.id],
+                "waiting": [
+                    {
+                        "player_id": p,
+                        "username": wait_names.get(p, ""),
+                        "match_id": busy.get(p),
+                        "match_number": number.get(busy.get(p), 0),
+                    }
+                    for p in waiting
+                ],
+            }
+            for m, waiting in skipped
+        ],
+    }
+
+
+async def _assign_start_court(db: AsyncSession, tournament_id: int,
+                              match: Match) -> bool:
+    """开打那一刻给这场分配一片**此刻空着的**场地，并写进 `matches.court_id`。
+
+    返回是否"有场地可用"：单片场地（老路径，不做分配）恒为 True。
+
+    为什么必须"开打时分配"而不是开赛时定死：现场两片场地节奏不一样 ——
+    2 号场先打完，下一场就该换到 2 号场。计划值（开赛时按轮内位置预填的）一旦
+    与现实脱节，界面上的场地号就会说假话（曾经按"轮内第几场"推导，结果两场
+    同时都显示"2号场"）。
+
+    规则：本场计划用的那片场地如果空着就沿用它；否则挑一片**没有进行中比赛**的。
+    两片都占着 → 返回 False，调用方据此拒绝开打（物理上不可能两场同时在一片场地上）。
+
+    必须在取到开打咨询锁之后调用（见 `_ensure_can_start`），
+    否则两场同时开打可能都挑到同一片场地。
+    """
+    courts = (await db.execute(
+        select(Court.id)
+        .where(Court.tournament_id == tournament_id)
+        .order_by(Court.sort_order, Court.id)
+    )).scalars().all()
+    if len(courts) < 2:
+        return True
+    ongoing = (await db.execute(
+        select(Match.court_id).where(
+            Match.tournament_id == tournament_id,
+            Match.status == MatchStatus.ONGOING,
+            Match.id != match.id,
+        )
+    )).scalars().all()
+    occupied = {cid for cid in ongoing if cid is not None}
+    if match.court_id in courts and match.court_id not in occupied:
+        return True
+    free = [cid for cid in courts if cid not in occupied]
+    if not free:
+        return False
+    match.court_id = free[0]
+    return True
+
+
+async def _ongoing_court_usage(db: AsyncSession, tournament_id: int,
+                               exclude_match_id: int) -> list[dict]:
+    """此刻占着场地的是哪几场（给"没有空场地"的提示用）。"""
+    rows = await db.execute(
+        select(Match.id, Round.round_number, Court.name)
+        .join(Round, Round.id == Match.round_id)
+        .outerjoin(Court, Court.id == Match.court_id)
+        .where(Match.tournament_id == tournament_id,
+               Match.status == MatchStatus.ONGOING,
+               Match.id != exclude_match_id)
+        .order_by(Round.round_number, Match.id)
+    )
+    return [{"match_id": mid, "round_number": rn, "court_name": cn}
+            for mid, rn, cn in rows.all()]
+
+
+async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, list[PlayerInfo]]:
+    """批量计算每轮的轮空选手，避免逐轮查询。
+
+    返回**列表**：12 人 2 片场地时一轮有 4 个人轮空，只给一个名字会误导
+    （而且"给哪一个"取决于 id 大小，固定偏向最早注册的账号）。
+    `RoundOut.bye_player` 仍取第一位，纯粹为了老客户端不炸。
+    """
     if not rounds:
         return {}
 
@@ -890,24 +1182,19 @@ async def _get_bye_players(rounds: list[Round], db: AsyncSession) -> dict[int, P
         rows = await db.execute(select(User).where(User.id.in_(all_player_ids)).options(*_user_brief()))
         users_map = {u.id: u for u in rows.scalars().all()}
 
-    result: dict[int, PlayerInfo | None] = {}
+    result: dict[int, list[PlayerInfo]] = {}
     for r in rounds:
         bye_ids = all_player_ids - paired_by_round.get(r.id, set())
-        bye_player = None
-        if bye_ids:
-            # 取最小 user_id 而不是 set.pop()：pop 返回的是「任意一个」，
-            # 多人轮空时（例如 6 人赛每轮 2 人轮空）显示谁取决于 set 的内部布局，
-            # 属于未定义行为，也会让同一份数据在不同环境/版本下显示不同的人。
-            # 注意：多人轮空时这里**只展示其中一位**（取 id 最小者），
-            # 因此结果虽稳定，但会固定偏向最早注册的账号 —— 要全部列出得改成列表字段。
-            uid = min(bye_ids)
+        # 按 id 排序（而不是 set 的迭代顺序）：同一份数据在不同环境/版本下必须显示同样的顺序
+        bye_list: list[PlayerInfo] = []
+        for uid in sorted(bye_ids):
             u = users_map.get(uid)
             if u:
-                bye_player = PlayerInfo(
+                bye_list.append(PlayerInfo(
                     id=u.id,
                     username=u.username,
                     avatar=u.avatar or "",
                     gender=u.gender,
-                )
-        result[r.id] = bye_player
+                ))
+        result[r.id] = bye_list
     return result

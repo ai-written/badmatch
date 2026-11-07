@@ -626,3 +626,35 @@ def test_shuffle_sides_edge_cases():
     for (u1, u2, *_), (t1, t2, *_) in zip(schedule, shuffle_sides(schedule)):
         assert {u1, u2} == {t1, t2}
 
+
+# ---- 引擎分流：_try_schedule 传了 per_round 就必须走轮级构造 ----
+
+def test_try_schedule_switches_to_round_engine_when_per_round_given():
+    """多场地赛事（≥2 片场地、≥9 人）靠这个参数切到轮级构造。
+
+    盯的是"接线"本身：如果哪天有人在 engine_api 里把 per_round 忘了传，
+    老引擎排出来的扁平列表会被按 2 场切块，12 人时每份赛程都有几轮撞人 ——
+    下面这条"每轮 8 人互不相同"就会当场失败。
+    """
+    from app.api.engine_api import _try_schedule
+
+    players = list(range(1, 13))
+    schedule, level = _try_schedule(players, 36, (({}, {}, {}),), per_round=2)
+    assert schedule is not None and level == 0
+    rounds = compute_rounds(schedule, 2)
+    assert len(rounds) == 18
+    for idx, rnd in enumerate(rounds):
+        on = []
+        for t1, t2, *_ in rnd:
+            on += list(t1) + list(t2)
+        assert len(set(on)) == len(on), f"第 {idx + 1} 轮有人同时出现在两场：{sorted(on)}"
+
+
+def test_try_schedule_keeps_legacy_engine_without_per_round():
+    """不传 per_round = 老引擎（单场地 / 8 人及以下的既有行为完全不变）。"""
+    from app.api.engine_api import _try_schedule
+
+    schedule, level = _try_schedule(list(range(1, 9)), 14, (({}, {}, {}),))
+    assert schedule is not None and level == 0
+    assert len(schedule) == 14
+

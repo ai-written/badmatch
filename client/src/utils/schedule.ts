@@ -222,6 +222,64 @@ export function pruneFilter(f: ScheduleFilter, playerIds: number[]): ScheduleFil
 }
 
 /**
+ * 按**场地**裁剪赛程：多场地赛事里两片场地各自是一条独立的队列。
+ *
+ * `courtLabel` 传空串 = 不裁剪（「全部」）。
+ * 保留轮次结构（裁完可能出现空轮次，交给 renderRounds 丢掉），也不动 `globalIdx` ——
+ * 「第 N 场」是全赛程统一编号，切场地不该让它变。
+ */
+export function filterRoundsByCourt(rounds: any[], courtLabel: string): any[] {
+  if (!courtLabel) return rounds
+  return rounds.map((r) => ({
+    ...r,
+    matches: (r.matches || []).filter((m: any) => (m.court_label || '') === courtLabel),
+  }))
+}
+
+/**
+ * 每片场地"现在打到第几场"（按赛程顺序，取该场地第一条还没打完的）。
+ *
+ * 给场地 Tab 用：现场最关心的就是"我这条队排到哪了"。返回 `{场地名: 文案}`，
+ * 没有未打完场次的场地给出「已打完」。
+ */
+export function courtProgress(rounds: any[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const r of rounds) {
+    for (const m of r.matches || []) {
+      const court = m.court_label
+      if (!court) continue
+      if (out[court] === undefined) out[court] = '已打完'
+      if (m.status !== 'finished' && out[court] === '已打完') {
+        out[court] = `第${m.globalIdx}场`
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * 把「现在就能上场」的场次提到**待打那一段的最前面**（多场地赛事专用）。
+ *
+ * 现场最关心"现在该哪场上"，但赛程顺序里它可能排在很后面，前面压着一堆
+ * "在等某某打完"的场次 —— 每次都要滑很久才找到。所以把它提到待打段的最前面。
+ *
+ * 边界（都踩过）：
+ * - **不能越过已完成的场次**：历史该按时间线留在上面，提上去看着像"倒着打"；
+ * - 也不越过**正在进行**的场次（场上正打着的比"下一场"更该在最上面看）；
+ * - 只重排顺序，`globalIdx`（第 N 场）不动；已完成的折叠/隐藏逻辑在调用方照旧。
+ */
+export function hoistNextUp(matches: any[], nextIds: Set<number>): any[] {
+  if (!nextIds.size) return matches
+  const hoisted = matches.filter((m) => nextIds.has(m.id))
+  if (!hoisted.length) return matches
+  const rest = matches.filter((m) => !nextIds.has(m.id))
+  // 插到"第一条待打的场次"之前 —— 也就是让 已完成 / 进行中 都排在它上面
+  const firstPending = rest.findIndex((m) => m.status === 'pending')
+  const at = firstPending < 0 ? rest.length : firstPending
+  return [...rest.slice(0, at), ...hoisted, ...rest.slice(at)]
+}
+
+/**
  * 「只看我」是否正处于生效状态：条件正好是「只看我一个人」
  * （没有别的只看对象，也没有排除）。高亮与开关判断共用它。
  *

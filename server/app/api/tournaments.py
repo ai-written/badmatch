@@ -14,7 +14,13 @@ from app.models.tournament import (
 )
 from app.core.websocket import manager
 from app.core.mailer import send_tournament_invite
-from app.engine.scheduler import fairness_step, nearest_valid_total
+from app.engine.scheduler import (
+    fairness_step, nearest_valid_total, PLAYERS_PER_COURT, courts_allowed,
+)
+
+# 一个赛事最多支持几片场地同时开打（排程引擎里 2 片场地是全枚举最优解，
+# 3 片走轮内贪心；再多就需要重做分组算法，先卡在 3）
+MAX_COURTS = 3
 from app.core.config import get_settings
 from app.schemas.tournament import (
     TournamentCreate, TournamentUpdate, TournamentBrief, TournamentListOut, TournamentDetail,
@@ -95,21 +101,24 @@ async def list_tournaments(
     )
     count_map = dict(cnt_result.all())
 
-    # 批量首场地：一次查所有场地，Python 侧取每赛事 sort_order 最小者（1 次查询替代 N 次）
-    # 只要场地名，不需要时间段
+    # 批量场地名：一次查所有场地，按 sort_order 拼成"1号场、2号场"（1 次查询替代 N 次）。
+    # 只要场地名，不需要时间段。
+    # 多场地赛事的列表卡片上要能看出"这局是两片场地同时开"，只显示第一个会让人以为
+    # 只开了一片（场上同时在打几场完全不一样）。
     court_result = await db.execute(
         select(Court)
         .where(Court.tournament_id.in_(tournament_ids))
         .options(noload(Court.time_slots))
         .order_by(Court.tournament_id, Court.sort_order)
     )
-    first_court_map: dict[int, Court] = {}
+    court_names_map: dict[int, list[str]] = {}
     for c in court_result.scalars().all():
-        first_court_map.setdefault(c.tournament_id, c)
+        if c.name:
+            court_names_map.setdefault(c.tournament_id, []).append(c.name)
 
     out = []
     for t in tournaments:
-        first_court = first_court_map.get(t.id)
+        court_names = court_names_map.get(t.id) or []
         out.append(TournamentBrief(
             id=t.id,
             title=t.title,
@@ -122,7 +131,7 @@ async def list_tournaments(
             points_to_win=t.points_to_win,
             registration_open_at=t.registration_open_at,
             registered_count=count_map.get(t.id, 0),
-            court_name=first_court.name if first_court else None,
+            court_name="、".join(court_names) or None,
             created_at=t.created_at.isoformat() if t.created_at else "",
         ))
     return TournamentListOut(
@@ -202,6 +211,28 @@ def _check_capacity(max_participants: int, registered: int = 0) -> None:
         )
 
 
+def _check_courts(courts, max_participants: int) -> None:
+    """场地数与人数必须匹配：每片场地至少 `PLAYERS_PER_COURT` 人。
+
+    为什么：多片场地意味着同一时刻要多开几场，一场双打 4 人上场，还要留 1 人在场下
+    当裁判（`assign_referees` 只从场下人员里挑）。人不够就会出现「开得起来但没人执裁判」
+    ——9 个人 2 片场地就是 8 人上场、只剩 1 个场下，两场里必有一场没人吹。
+
+    在**报名阶段**（创建/编辑）就拦住：这时还能改，报错里直接给出下一步。
+    开赛那一刻还有一道同样的校验（`engine_api.start_tournament`），因为实际报名人数
+    要到那时才知道；赛事进行中因退赛掉到线下的，走的是"自动少开一片场地"的降级路径。
+    """
+    count = len(courts or [])
+    if count > MAX_COURTS:
+        raise HTTPException(status_code=400, detail=f"最多支持 {MAX_COURTS} 片场地")
+    if not courts_allowed(max_participants, count):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{count} 片场地至少需要 {PLAYERS_PER_COURT * count} 人"
+                   f"（每片场地 {PLAYERS_PER_COURT} 人：4 人上场 + 至少 1 人场下当裁判）",
+        )
+
+
 def _resolve_registration_open_at(data: TournamentCreate) -> datetime | None:
     """定时开放报名：启用时必须选择未来时间；未启用则一律立即开放。
 
@@ -243,6 +274,7 @@ async def _create_tournament(
     email_tasks: list | None = None,
 ) -> Tournament:
     _check_capacity(data.max_participants)
+    _check_courts(data.courts, data.max_participants)
     registration_open_at = _resolve_registration_open_at(data)
 
     preselected = list(dict.fromkeys(data.preselect_player_ids))
@@ -531,6 +563,7 @@ async def update_tournament(
     )
     registered = cnt_result.scalar() or 0
     _check_capacity(data.max_participants, registered)
+    _check_courts(data.courts, data.max_participants)
 
     registration_open_at = _resolve_registration_open_at(data)
 

@@ -1524,10 +1524,12 @@ async function scenarioEditTournament(page) {
   assert('管理员能编辑别人创建的报名中赛事',
     (await btnTexts()).includes('编辑赛事信息'), JSON.stringify(await btnTexts()))
 
-  // ---- 多场地：表单只能表达第一个，其余必须原样带回去（不能悄悄删掉） ----
+  // ---- 多场地：场地是**可加行的列表**（行数 = 同一时刻开几场）----
+  // 以前的表单只能表达第一个场地、靠"原样带回"保住其余的；现在每片场地都是独立一行，
+  // 用户既能改名字，也能删掉一行。所以断言从"只回填第一个"改成"两行都回填"。
   me = { ...me, id: 1, username: 'p1', role: 'user' }
   detail = {
-    ...detail, creator_id: 1, status: 'open',
+    ...detail, creator_id: 1, status: 'open', max_participants: 12, total_matches: 15,
     courts: [
       { id: 1, name: 'A1', sort_order: 0, time_slots: [{ id: 1, start_time: '19:00:00', end_time: '21:00:00' }] },
       { id: 2, name: 'B1', sort_order: 1, time_slots: [{ id: 2, start_time: '20:00:00', end_time: '21:00:00' }] },
@@ -1536,24 +1538,31 @@ async function scenarioEditTournament(page) {
   await page.goto('/tournament/2', 2200)
   await page.clickText('编辑赛事信息')
   await sleep(900)
-  assert('多场地时表单只回填第一个场地号', (await fieldValue('场地号')) === 'A1', await fieldValue('场地号'))
-  assert('改第一个场地号', (await setField('场地号', 'B9')) === 'OK')
+  const court1 = await fieldValue('场地号 1')
+  const court2 = await fieldValue('场地号 2')
+  assert('两片场地都回填成独立的行（不只是第一个）', court1 === 'A1' && court2 === 'B1',
+    JSON.stringify([court1, court2]))
+  assert('改第一个场地号', (await setField('场地号 1', 'B9')) === 'OK')
   page.requests = []
   await page.clickText('保存修改')
   await sleep(900)
   const multi = JSON.parse(puts()[0]?.body || '{}')
-  assert('第二个场地没有被吞掉（两条都发出去）', multi.courts?.length === 2,
+  assert('两个场地都发出去（没被吞）', multi.courts?.length === 2,
     JSON.stringify(multi.courts?.map((x) => x.name)))
-  assert('第一个场地用新名字 + 新时间段',
+  assert('第一个场地用新名字 + 表单里的时间段',
     multi.courts?.[0]?.name === 'B9'
     && multi.courts[0].time_slots[0].start_time === '19:00:00'
     && multi.courts[0].time_slots[0].end_time === '21:00:00',
     JSON.stringify(multi.courts?.[0]))
-  assert('第二个场地原样保留（名字/次序/时间段都没动）',
-    multi.courts?.[1]?.name === 'B1' && multi.courts[1].sort_order === 1
-    && multi.courts[1].time_slots[0].start_time === '20:00:00'
-    && multi.courts[1].time_slots[0].end_time === '21:00:00',
+  assert('第二个场地保留名字与次序',
+    multi.courts?.[1]?.name === 'B1' && multi.courts[1].sort_order === 1,
     JSON.stringify(multi.courts?.[1]))
+  // 时间段是**整场赛事共用一个**（表单只有一个时间段输入），所以两片场地都写同一段。
+  // 以前"第二个场地保留它自己的旧时间段"，但那其实是个副作用：两片场地本来就该同时开。
+  assert('两片场地共用表单里的时间段',
+    multi.courts?.[1]?.time_slots?.[0]?.start_time === '19:00:00'
+    && multi.courts[1].time_slots[0].end_time === '21:00:00',
+    JSON.stringify(multi.courts?.[1]?.time_slots))
 
   // ---- 改完人数「立刻」保存：总场次必须按新人数对齐（否则开赛时会被临时换档）----
   // 场景：8 人 / 14 场左右，报名期间把上限改成 12。档位重算挂在 @blur 上是异步的，
