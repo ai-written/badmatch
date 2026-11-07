@@ -19,20 +19,31 @@
             <span class="court-del" @click="removeCourt(i)">删除</span>
           </template>
         </van-field>
-        <!-- 加行做成一行轻量文字链：原先塞在 van-cell 里的实心按钮在表单里像一块凸出来的砖 -->
+        <!-- 加行做成一行轻量文字链：原先塞在 van-cell 里的实心按钮在表单里像一块凸出来的砖。
+             这里**不放说明文案**（"多一片场地 = 同时多开一场"那类），表单已经够长了；
+             人数不够时链接直接不出现，提交时另有 toast 拦（见 onSubmit）。 -->
         <div v-if="canAddCourt" class="add-court-row">
           <button type="button" class="add-court-link" @click="addCourt">
             <van-icon name="plus" /> 添加场地
           </button>
-          <span class="add-court-tip">多一片场地 = 同一时刻多开一场</span>
         </div>
-        <!-- 加不了的时候说清原因（否则"按钮消失"看起来像坏了） -->
-        <div v-else-if="courtAddTip" class="add-court-row">
-          <span class="add-court-tip">{{ courtAddTip }}</span>
-        </div>
-        <div v-if="form.courts.length > 1" class="court-hint-row">
-          <span :class="['court-hint', { 'court-hint--bad': !courtsEnoughPeople }]">{{ courtHint }}</span>
-        </div>
+        <!-- 排赛模式：只有多场地才有意义（1 片场地时服务端会强制按"优先公平性"处理） -->
+        <template v-if="filledCourtCount >= 2">
+          <van-field label="排赛模式">
+            <template #input>
+              <div class="mode-chips">
+                <span
+                  class="mode-chip" :class="{ on: form.schedule_mode === 'court_first' }"
+                  @click="form.schedule_mode = 'court_first'"
+                >优先场地</span>
+                <span
+                  class="mode-chip" :class="{ on: form.schedule_mode === 'balanced' }"
+                  @click="form.schedule_mode = 'balanced'"
+                >优先公平性</span>
+              </div>
+            </template>
+          </van-field>
+        </template>
         <van-field v-model="form.description" label="备注" type="textarea" rows="2" autosize placeholder="可选，显示在赛事详情页" />
 
         <!-- 日期 -->
@@ -235,6 +246,8 @@ const form = reactive({
   // 场地：一行一片。**行数 = 同一时刻开几场**（2 行 = 两片场地同时开打，
   // 排程会按"轮级构造"排：每轮上 8 人、剩下的人轮空/执裁）。
   courts: [''] as string[],
+  // 排赛模式：balanced 优先公平性 / court_first 优先场地（仅多场地时可选）
+  schedule_mode: 'court_first' as 'balanced' | 'court_first',
   start_date: '',
   end_date: '',
   max_participants: 8,
@@ -251,35 +264,12 @@ const MIN_PLAYERS_PER_COURT = 5
 const MAX_COURTS = 3
 /** 已经填了名字的场地数（空行不算） */
 const filledCourtCount = computed(() => form.courts.filter(c => (c || '').trim()).length)
-const courtsEnoughPeople = computed(() => {
-  const n = Math.max(1, filledCourtCount.value)
-  return (Number(form.max_participants) || 0) >= MIN_PLAYERS_PER_COURT * n
-})
 const canAddCourt = computed(() => {
   const next = form.courts.length + 1
   if (next > MAX_COURTS) return false
   // 人数不够就先别加：加了也会被后端拒绝，不如让人先把人数调上去
   return (Number(form.max_participants) || 0) >= MIN_PLAYERS_PER_COURT * next
 })
-/** 加不了的原因（人数不够 / 已到上限时为空）：显示成一行灰色说明，别让按钮"凭空消失" */
-const courtAddTip = computed(() => {
-  const next = form.courts.length + 1
-  if (next > MAX_COURTS) return ''
-  const need = MIN_PLAYERS_PER_COURT * next
-  const ppl = Number(form.max_participants) || 0
-  if (ppl >= need) return ''
-  return `再加一片场地需要至少 ${need} 人（当前 ${ppl} 人）；每片场地 ${MIN_PLAYERS_PER_COURT} 人 = 4 人上场 + 1 人场下执裁`
-})
-const courtHint = computed(() => {
-  const n = filledCourtCount.value
-  const need = MIN_PLAYERS_PER_COURT * n
-  const ppl = Number(form.max_participants) || 0
-  if (ppl >= need) {
-    return `${n} 片场地同时开打：每轮 ${4 * n} 人上场，${n} 人轮空（其中至少 ${n} 人当裁判）`
-  }
-  return `${n} 片场地至少需要 ${need} 人（每片 ${MIN_PLAYERS_PER_COURT} 人），当前只填了 ${ppl} 人`
-})
-
 /**
  * 多场地赛事的档位建议（只提示，不改用户选的数字）。
  *
@@ -571,6 +561,8 @@ function buildPayload(title: string, start: string, end: string) {
     // 预选名单只在创建时生效（编辑路径上后端会忽略它），编辑页也不提供这个入口
     preselect_player_ids: isEdit.value ? [] : preselectedIds.value,
     courts: buildCourts(start, end),
+    // 只有多场地才谈得上模式；1 片场地一律 balanced（与后端同口径）
+    schedule_mode: filledCourtCount.value >= 2 ? form.schedule_mode : 'balanced',
   }
 }
 
@@ -660,6 +652,7 @@ async function initEdit() {
   // 场地：每行一片。老赛事只有 0~1 片，读出来就是 0~1 行（空则给一个空行可填）
   const names = (t.courts || []).map((c: any) => c.name || '')
   form.courts = names.length ? names : ['']
+  form.schedule_mode = (t.schedule_mode === 'court_first' ? 'court_first' : 'balanced')
   form.max_participants = t.max_participants
   form.points_to_win = t.points_to_win || 11
   form.total_matches = t.total_matches ?? null
@@ -730,9 +723,13 @@ onMounted(async () => {
   padding: 0; border: 0; background: none; cursor: pointer;
   font-size: 13px; color: #1989fa;
 }
-.add-court-tip { font-size: 11px; color: #a0aab8; }
-.court-hint-row { padding: 0 16px 10px; }
 .court-hint-cell { padding: 4px 16px 8px; }
 .court-hint { font-size: 12px; line-height: 1.5; color: #78849a; }
-.court-hint--bad { color: #e5602c; }
+/* 排赛模式的二选一（轻量 chip，与场地 Tab 同一套观感） */
+.mode-chips { display: flex; gap: 8px; }
+.mode-chip {
+  padding: 4px 12px; border-radius: 14px; cursor: pointer;
+  font-size: 13px; color: #5b6b7f; background: #f2f5f9; border: 1px solid #e3eaf3;
+}
+.mode-chip.on { color: #fff; background: #4a7ab0; border-color: #4a7ab0; }
 </style>

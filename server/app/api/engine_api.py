@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
+from app.core.jit_schedule import jit_fill
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats, Court
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
@@ -184,6 +185,38 @@ async def start_tournament(
     # 开赛这一刻 PlayerStats 还没建（要等轮次写完），所以名单人数得显式传进去。
     use_rounds, per_round = await _round_engine_plan(
         db, tournament_id, len(player_ids), roster_size=len(player_ids))
+
+    # 「优先场地」模式（court_first）：**不排完整赛程**，只生成"当前这一批"
+    # （= 场地数那么多场）。之后每打完一场由 update_score 补一场（见 core/jit_schedule）。
+    # 代价（产品上已确认）：看不到完整赛程、搭档重复多一些、每人场次允许差 1 场。
+    if tournament.schedule_mode == "court_first" and use_rounds:
+        tournament.total_matches = M
+        tournament.plan_total_matches = M
+        for pid in player_ids:
+            db.add(PlayerStats(tournament_id=tournament_id, user_id=pid))
+        await db.flush()
+        created = await jit_fill(db, tournament)
+        tournament.status = TournamentStatus.ONGOING
+        await db.commit()
+        await manager.broadcast(tournament_id, {"type": "tournament_started"})
+        await audit(
+            user=user, action="tournament_start",
+            target_type="tournament", target_id=tournament.id,
+            detail={"players": len(player_ids), "matches": M, "rounds": len(created),
+                    "schedule_mode": "court_first", "first_batch": len(created),
+                    "disabled_registrations_cancelled": disabled_cancelled,
+                    "shuffle_seed": shuffle_seed},
+            ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+        )
+        return {"ok": True, "rounds": len(created), "matches": len(created),
+                "total_matches": M, "schedule_mode": "court_first"}
+
+    # 走到这里说明走的是「完整赛程」那条路（1 片场地 / 人数不足 9 等）。
+    # 库里若还记着 court_first，就改回 balanced —— 否则界面会显示"打完一场自动排下一场"，
+    # 而实际上一整份赛程早就排好了（页面上还会看到全部场次），自相矛盾。
+    if tournament.schedule_mode == "court_first":
+        tournament.schedule_mode = "balanced"
+
     schedule = None
     adjusted_M = M
     history_level = None
@@ -562,6 +595,39 @@ async def add_matches(
             status_code=400,
             detail=f"总场次上限 {MAX_TOTAL_MATCHES} 场（现有 {current} 场）",
         )
+
+    # 「优先场地」模式：没有"要不要重排"的问题 —— 只是把**计划场次**调大，
+    # 之后每打完一场，补排（core/jit_schedule.jit_fill）会按新配额自然多排几场。
+    if tournament.schedule_mode == "court_first":
+        plan = tournament.plan_total_matches or tournament.total_matches or current
+        new_plan = plan + body.matches
+        if new_plan > MAX_TOTAL_MATCHES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"总场次上限 {MAX_TOTAL_MATCHES} 场（计划 {plan} 场）",
+            )
+        tournament.total_matches = new_plan
+        tournament.plan_total_matches = new_plan
+        created = await jit_fill(db, tournament)
+        await db.commit()
+        await manager.broadcast(tournament_id, {"type": "schedule_updated"})
+        await audit(
+            user=user, action="tournament_add_matches",
+            target_type="tournament", target_id=tournament_id,
+            detail={"added": body.matches, "requested": body.matches,
+                    "total_matches": new_plan, "players": n,
+                    "rounds": len(created), "schedule_mode": "court_first"},
+            ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+        )
+        return {
+            "ok": True,
+            "added": body.matches,
+            "requested": body.matches,
+            "total_matches": new_plan,
+            "rounds": len(created),
+            "per_person_added": (4 * body.matches) // n,
+            "schedule_mode": "court_first",
+        }
 
     partner_history, opponent_history, match_history = await _new_match_history(db, tournament_id)
     # 只避"本赛事已排的重复"这一级历史（= 加上跨赛事避重之前的行为）：带着跨赛事历史
@@ -1161,7 +1227,11 @@ async def withdraw_player(
     # 退化成「这次不补排」，写进审计并提醒房主手动处理。
     new_rounds_data: list = []
     reschedule_history_level = None
-    if new_M > 0:
+    if tournament.schedule_mode == "court_first":
+        # 「优先场地」模式：本来就只有一两场待打，退赛不需要重排赛程 ——
+        # 删掉含退赛者的待打场次（上面已经删了）之后，按新人数直接补排即可。
+        await jit_fill(db, tournament)
+    elif new_M > 0:
         # 多场地赛事按轮级构造补排（与开赛/追加同口径）；退赛后人数可能不够开满场地，
         # 每轮场数会自动降级（见 scheduler.court_count_effective）
         use_rounds, per_round = await _round_engine_plan(db, tournament_id, remaining_count)
@@ -1246,13 +1316,16 @@ async def withdraw_player(
 
     # 把真实总场次写回 tournaments.total_matches（详情页「共 N 场」用它）：
     # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，也不等于计划值。
-    tournament.total_matches = (await db.execute(
-        select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
-    )).scalar() or new_M
-    # 计划上限跟着**当前真实场次**走（只会往下、不会往上，见上面 budget 的算法）。
-    # 不这么做的话档位会随人数整除约束来回跳：8 人 14 场打完 2 场退一人 → 9 场，
-    # 再退一人时 6 人又能排满 12 场 → 又跳回 14 场（实测过），看起来像"人越退场次越多"。
-    tournament.plan_total_matches = tournament.total_matches
+    # 例外是「优先场地」模式：那边库里永远只有"当前这一批"场次（其余还没排），
+    # 写成真实行数会让详情页显示"共 2 场"，所以保持计划值不变。
+    if tournament.schedule_mode != "court_first":
+        tournament.total_matches = (await db.execute(
+            select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+        )).scalar() or new_M
+        # 计划上限跟着**当前真实场次**走（只会往下、不会往上，见上面 budget 的算法）。
+        # 不这么做的话档位会随人数整除约束来回跳：8 人 14 场打完 2 场退一人 → 9 场，
+        # 再退一人时 6 人又能排满 12 场 → 又跳回 14 场（实测过），看起来像"人越退场次越多"。
+        tournament.plan_total_matches = tournament.total_matches
 
     # 收尾：这次操作之后一场没打完的都不剩了（典型：剩余额度用尽、不再补排），
     # 赛事必须结束，否则会永远停在「进行中」。口径与记分路径的自动收尾一致。

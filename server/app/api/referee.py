@@ -219,7 +219,8 @@ async def auto_assign_referees(
         .where(Round.matches.any(Match.status != MatchStatus.FINISHED))
         .order_by(Round.round_number)
     )).all()]
-    if scope == "current":
+    # 「优先场地」模式：一轮就是一场，正在打 + 待打的**都是**当前批次（不按轮收窄）
+    if scope == "current" and (tournament.schedule_mode or "balanced") != "court_first":
         ongoing_round_ids = set((await db.execute(
             select(Match.round_id)
             .where(Match.tournament_id == tournament_id,

@@ -64,6 +64,12 @@
         <van-icon name="lock" />
         <span>赛事已结束，赛程与比分已锁定</span>
       </div>
+      <!-- 「优先场地」模式：没有完整赛程，打完一场才排下一场 —— 得在页面上说清楚，
+           否则用户会以为"赛程怎么只有两场" -->
+      <div v-if="isCourtFirst" class="court-banner jit-banner">
+        <van-icon name="clock-o" />
+        <span>优先场地模式：打完一场自动排下一场，场地不空等（因此看不到完整赛程）</span>
+      </div>
       <!-- 多场地赛事：某一场得先等谁打完（顶部只留这一条提示） -->
       <div v-if="nextUpHint" class="court-banner skip-banner">
         <van-icon name="exchange" />
@@ -412,6 +418,8 @@ const nextUp = ref<any | null>(null)
 // 单场地赛事第一次就关掉这个接口（见 fetchNextUp）：别让每次实时刷新都多一次请求
 let nextUpOff = false
 const isMultiCourt = computed(() => (nextUp.value?.courts || 0) >= 2)
+/** 「优先场地」模式：没有完整赛程，打完一场自动排下一场（见后端 core/jit_schedule） */
+const isCourtFirst = computed(() => detail.value?.schedule_mode === 'court_first')
 /** 跳场提示：某一场被跳过了 / 或者两片场地都在打（都说明"现在该打哪一场"） */
 const nextUpHint = computed(() => {
   if (!isMultiCourt.value) return ''
@@ -965,6 +973,7 @@ onMounted(() => {
   border-radius: 10px;
 }
 .skip-banner { color: #8a5a2b; background: #fdf3e6; border: 1px solid #f6dfc2; }
+.jit-banner { color: #2f6f8f; background: #eaf5fb; border: 1px solid #cfe8f4; }
 
 /* 折叠提示条：不明显抢戏，但可点击区域要够大（移动端） */
 .hidden-toggle {

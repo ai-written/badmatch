@@ -34,6 +34,16 @@ class Tournament(Base):
     # 写回的膨胀值又成为下次退赛的基准 —— 8 人 14 场连退两人实测变成 20 → 27 场。
     plan_total_matches: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     points_to_win: Mapped[int] = mapped_column(Integer, default=11)
+    # 排赛模式（多场地赛事才有意义）：
+    #   'balanced'    = 优先公平性：开赛时一次性排完整赛程（每人场次严格相等、搭档/对手
+    #                   尽量不重复），执行时按「4 人空闲 + 有空场地」开打，必要时跳过等着的场次；
+    #   'court_first' = 优先场地：开赛不排赛程，**打完一场就现场排下一场**，场地不空等；
+    #                   代价是看不到完整赛程、搭档重复会多一些、每人场次允许差 1 场。
+    # 默认 court_first（优先场地）：新建的多场地赛事不再空等一片场地。
+    # 报名中可改，开赛后锁定（两套执行逻辑不能混在一份赛程里）。
+    schedule_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="court_first", server_default="court_first"
+    )
     end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     max_participants: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[TournamentStatus] = mapped_column(

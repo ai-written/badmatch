@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
+from app.core.jit_schedule import jit_fill
 from app.core.occupancy import conflicts_for_match, ongoing_map, match_players
 from app.engine.scheduler import use_round_engine, matches_per_round
 # 分流判定（"这局是不是多场地同时开打"）放在 engine_api 里，与此处的拦截共用同一套口径。
@@ -147,16 +148,20 @@ async def list_rounds(
     rounds = result.scalars().all()
 
     # 读取赛事状态：已结束时前端据此把整页置为只读（这里不抛错，只用于展示）。
-    # 只取 status 这一列 —— 整行 ORM 会把赛事的 5 个 selectin 集合也一起拉回来。
+    # 顺带取 schedule_mode（排赛模式）：court_first（优先场地）下每一场"当前都是要打的"，
+    # is_current 得整片标上 —— 那边没有"轮"的概念，一轮就是一场。
+    # 只取这两列 —— 整行 ORM 会把赛事的 5 个 selectin 集合也一起拉回来。
     status_row = await db.execute(
-        select(Tournament.status).where(Tournament.id == tournament_id)
+        select(Tournament.status, Tournament.schedule_mode)
+        .where(Tournament.id == tournament_id)
     )
-    t_status_value = status_row.scalar_one_or_none()
+    t_row = status_row.first()
     # 赛事不存在时返回 404，而不是「200 + 空数组」：
     # 后者会让前端把「赛事已被删除/链接失效」显示成「该赛事还没有赛程」
-    if t_status_value is None:
+    if t_row is None:
         raise HTTPException(status_code=404, detail="赛事不存在")
-    t_status = t_status_value.value
+    t_status = t_row[0].value
+    is_court_first = (t_row[1] or "balanced") == "court_first"
 
     # 必须显式按 id 排序：PostgreSQL 无 ORDER BY 时按堆内物理顺序返回，而 UPDATE（认领裁判、
     # 记分）会把行写成新版本并挪到堆尾，导致同一场比赛在刷新后位置漂移、对阵表顺序跳动。
@@ -169,13 +174,19 @@ async def list_rounds(
         matches_by_round.setdefault(m.round_id, []).append(m)
 
     bye_map = await _get_bye_players(rounds, db)
-    # 当前批次：按"有未打完场次的轮次"（升序）和"有进行中场次的轮次"算出来，见 _current_round_ids
-    current_round_ids = _current_round_ids(
-        [r.id for r in rounds
-         if any(m.status != MatchStatus.FINISHED for m in matches_by_round.get(r.id, []))],
-        {r.id for r in rounds
-         if any(m.status == MatchStatus.ONGOING for m in matches_by_round.get(r.id, []))},
-    )
+    # 当前批次：按"有未打完场次的轮次"（升序）和"有进行中场次的轮次"算出来，见 _current_round_ids。
+    # 「优先场地」模式没有轮的概念（一轮一场），正在打 + 待打的**都是**当前批次。
+    live_round_ids = [r.id for r in rounds
+                      if any(m.status != MatchStatus.FINISHED
+                             for m in matches_by_round.get(r.id, []))]
+    if is_court_first:
+        current_round_ids = set(live_round_ids)
+    else:
+        current_round_ids = _current_round_ids(
+            live_round_ids,
+            {r.id for r in rounds
+             if any(m.status == MatchStatus.ONGOING for m in matches_by_round.get(r.id, []))},
+        )
 
     # 一次批量组装所有比赛（内部按 id.in_ 批量查配对/用户/场地/时间段/应援），
     # 再按轮次分组拼装，避免每轮重复付一次批量查询的钱
@@ -275,7 +286,7 @@ async def update_score(
 ):
     # 顺序：先取赛事的共享锁，再锁比赛行（见 load_writable_tournament 的说明）。
     # 反过来的话，与"退赛先锁赛事再删比赛"会形成环路而死锁。
-    await load_writable_tournament(db, tournament_id)
+    tournament = await load_writable_tournament(db, tournament_id)
     result = await db.execute(
         select(Match).where(Match.id == match_id, Match.tournament_id == tournament_id).with_for_update()
     )
@@ -347,6 +358,12 @@ async def update_score(
             raise HTTPException(status_code=400, detail="比分相同，无法结束")
         winner = m.pairing_a_id if sa > sb else m.pairing_b_id
         await _finalize_match(m, winner, db, previous=previous)
+        # 「优先场地」模式：这一场打完了，立刻补排下一场 —— 场地不空等正是这个模式的意义。
+        # 必须在 _maybe_finish_tournament 之前：补完之后才判断"是不是所有场次都打完了"。
+        # `previous` 非空 = 这是在**修正一场已经结束的比赛**（改比分再结束一次），
+        # 那种情况不能补排：否则管理员改个比分会凭空多出一场比赛。
+        if tournament.schedule_mode == "court_first" and previous is None:
+            await jit_fill(db, tournament)
         await _maybe_finish_tournament(tournament_id, db, user=user, request=request)
         # 先提交再广播（同 swap_sides）：广播是网络 IO，不应在持有行锁时进行；
         # 提交后订阅者立刻拉取也能读到最新比分与赛事状态。
@@ -923,6 +940,14 @@ async def _maybe_finish_tournament(tournament_id: int, db: AsyncSession, user=No
     if (remaining.scalar() or 0) > 0:
         return
     tournament.status = TournamentStatus.FINISHED
+    # 「优先场地」模式实际打出来的场次可能和计划差 1~2 场（尾段凑不齐 4 个还没打满的人就收尾），
+    # 详情页「共 N 场」写计划值会误导，所以收尾时按真实行数回写一次。
+    # 其它模式不动（那边的 total_matches 由重排/追加各自维护）。
+    if (tournament.schedule_mode or "balanced") == "court_first":
+        real = await db.execute(
+            select(func.count(Match.id)).where(Match.tournament_id == tournament_id)
+        )
+        tournament.total_matches = real.scalar() or tournament.total_matches
     await db.flush()
     # 先提交再广播：订阅者收到 tournament_finished 后可能立刻回查赛事详情，
     # 若此时事务未提交，读到的是仍是 ongoing 的旧状态，这次实时更新就被吞掉了

@@ -134,6 +134,9 @@ async def main_async():
             total_matches=TOTAL_MATCHES,
             plan_total_matches=TOTAL_MATCHES,
             points_to_win=11,
+            # 这份测试数据要的是"完整 36 场赛程"（用来看轮次/轮空/跳场/场地 Tab），
+            # 所以显式钉成 balanced；想看「优先场地（边打边排）」请建赛事时选那一项。
+            schedule_mode="balanced",
             status=TournamentStatus.OPEN,
         )
         db.add(t)

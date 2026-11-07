@@ -309,6 +309,26 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
         )
         await conn.execute(text("UPDATE tournaments SET plan_total_matches = total_matches"))
 
+    # 排赛模式（多场地赛事用）：'court_first' 优先场地（默认，边打边排）/ 'balanced' 优先公平性。
+    # 已有的行一律不动（存量赛事继续按它们原来的方式跑），只把**列默认值**切到新默认；
+    # 新建赛事由 API 显式写入（见 tournaments._resolve_schedule_mode）。
+    if await _table_exists(conn, "tournaments"):
+        if not await _column_exists(conn, "tournaments", "schedule_mode"):
+            logger.info("migration: adding tournaments.schedule_mode column")
+            await conn.execute(
+                text(
+                    "ALTER TABLE tournaments "
+                    "ADD COLUMN schedule_mode VARCHAR(16) NOT NULL DEFAULT 'court_first'"
+                )
+            )
+        else:
+            await conn.execute(
+                text(
+                    "ALTER TABLE tournaments "
+                    "ALTER COLUMN schedule_mode SET DEFAULT 'court_first'"
+                )
+            )
+
     # 自增序列对齐（幂等）：修一次就够，但每次启动都检查一遍，
     # 这样「用 dump 恢复过数据库」之后也不用记得手工执行 setval。
     await _ensure_fk_indexes(conn)

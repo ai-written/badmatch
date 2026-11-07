@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -58,6 +59,13 @@ class TournamentCreate(BaseModel):
     registration_open_at: datetime | None = None
     courts: list[CourtCreate] = []
     preselect_player_ids: list[int] = []
+    # 排赛模式（多场地赛事才有意义；1 片场地 / 8 人及以下时服务端一律按 balanced 处理）：
+    #   balanced    优先公平性：开赛时一次性排完整赛程（每人场次严格相等、搭档/对手尽量不重复）
+    #   court_first 优先场地：开赛不排赛程，**打完一场现场排下一场**，场地不空等
+    #               （代价：看不到完整赛程、搭档重复会多些、每人场次允许差 1 场）
+    # 默认「优先场地」：人多场地少时最痛的是"一片打完了干等另一片"，默认就不空等。
+    # 1 片场地 / 8 人及以下时服务端会回落成 balanced（见 tournaments._resolve_schedule_mode）
+    schedule_mode: Literal["balanced", "court_first"] = "court_first"
 
     @field_validator("title")
     @classmethod
@@ -116,6 +124,8 @@ class TournamentBrief(BaseModel):
     total_matches: int | None = None
     points_to_win: int = 11
     registration_open_at: datetime | None = None
+    # 排赛模式：balanced 优先公平性 / court_first 优先场地
+    schedule_mode: str = "balanced"
     created_at: str
 
     class Config:
@@ -151,6 +161,8 @@ class TournamentDetail(BaseModel):
     total_matches: int | None = None
     points_to_win: int = 11
     registration_open_at: datetime | None = None
+    # 排赛模式：balanced 优先公平性 / court_first 优先场地（见 models/tournament.py）
+    schedule_mode: str = "balanced"
     server_now: datetime
     is_registered: bool = False
     # 「在场选手」：未退赛、且账号未被禁用（与裁判候选人池 `_active_player_ids` 同一口径）。

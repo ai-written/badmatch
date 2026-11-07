@@ -130,6 +130,7 @@ async def list_tournaments(
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
             registration_open_at=t.registration_open_at,
+            schedule_mode=t.schedule_mode or "balanced",
             registered_count=count_map.get(t.id, 0),
             court_name="、".join(court_names) or None,
             created_at=t.created_at.isoformat() if t.created_at else "",
@@ -209,6 +210,18 @@ def _check_capacity(max_participants: int, registered: int = 0) -> None:
             status_code=400,
             detail=f"最大人数不能小于当前已报名人数（{registered} 人）",
         )
+
+
+def _resolve_schedule_mode(mode: str | None, courts) -> str:
+    """排赛模式落库值：只有**多场地**才有"优先场地"可言。
+
+    默认是 court_first（优先场地）—— 多场地最痛的就是"一片打完了干等另一片"。
+    1 片场地时一律回落成 balanced：那里本来就是一条队列，"边打边排"没有任何好处，
+    却会让界面看不到赛程。改成 1 片场地时也会自动回落，避免存下用不上的模式。
+    """
+    if (mode or "court_first") == "court_first" and len(courts or []) >= 2:
+        return "court_first"
+    return "balanced"
 
 
 def _check_courts(courts, max_participants: int) -> None:
@@ -310,6 +323,8 @@ async def _create_tournament(
         plan_total_matches=_align_total_matches(data.max_participants, data.total_matches),
         points_to_win=data.points_to_win,
         registration_open_at=registration_open_at,
+        # 排赛模式：1 片场地时自动回落成 balanced（见 _resolve_schedule_mode）
+        schedule_mode=_resolve_schedule_mode(data.schedule_mode, data.courts),
     )
     db.add(t)
     await db.flush()
@@ -600,6 +615,8 @@ async def update_tournament(
     t.plan_total_matches = _align_total_matches(data.max_participants, data.total_matches)
     t.points_to_win = data.points_to_win
     t.registration_open_at = registration_open_at
+    # 排赛模式：报名中可改，开赛后锁定（上面 assert_can_edit 只允许 open 状态）
+    t.schedule_mode = _resolve_schedule_mode(data.schedule_mode, data.courts)
     await _replace_courts(t.id, data.courts, db)
 
     def _jsonable(v):
@@ -1007,6 +1024,7 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
             total_matches=t.total_matches,
             points_to_win=t.points_to_win,
         registration_open_at=t.registration_open_at,
+        schedule_mode=t.schedule_mode or "balanced",
         server_now=datetime.now(),
         courts=court_outs,
         registered_count=registered_count,

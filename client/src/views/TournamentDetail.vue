@@ -37,6 +37,7 @@
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
+          <div class="ig-item" v-if="tournament.schedule_mode === 'court_first'"><van-icon name="clock-o" /><span>优先场地（打完一场自动排下一场）</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>

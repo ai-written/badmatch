@@ -78,7 +78,7 @@ async def seed():
         return boss, players
 
 
-async def create_and_start(c, auth, players, courts, total, title):
+async def create_and_start(c, auth, players, courts, total, title, schedule_mode="balanced"):
     start = datetime.now() + timedelta(days=1)
     payload = {
         "title": title,
@@ -88,6 +88,7 @@ async def create_and_start(c, auth, players, courts, total, title):
         "max_participants": len(players),
         "total_matches": total,
         "points_to_win": 11,
+        "schedule_mode": schedule_mode,      # balanced（默认）/ court_first（边打边排）
         "courts": [
             {"name": f"{i + 1}号场", "sort_order": i,
              "time_slots": [{"start_time": "19:00:00", "end_time": "21:00:00"}]}
@@ -218,6 +219,28 @@ async def phase_legacy(c, auth, players):
     assert r.status_code == 200, ("单场地赛事不该被按人拦截", r.status_code, r.text)
 
 
+async def phase_court_first(c, auth, players):
+    """「优先场地」模式：开赛只排一批，打完一场自动补一场（场地不空等）。"""
+    print("== D. 12 人 2 片场地：优先场地（边打边排）==")
+    tid, rounds, _ = await create_and_start(c, auth, players[:12], 2, 36, "优先场地冒烟",
+                                            schedule_mode="court_first")
+    assert len(rounds) == 2, ("开赛只该排一批（= 场地数）", len(rounds))
+    assert all(r["is_current"] for r in rounds), "优先场地模式下未打完的都是当前批次"
+    print(f"   开赛首排 {len(rounds)} 场（不排完整赛程）")
+
+    for i in range(4):
+        rr = (await c.get(f"/api/tournaments/{tid}/rounds", headers=auth)).json()
+        pend = [m for r in rr for m in r["matches"] if m["status"] != "finished"]
+        assert len(pend) == 2, ("未打完的场次应恒等于场地数", len(pend))
+        r = await c.put(f"/api/tournaments/{tid}/matches/{pend[0]['id']}/score",
+                        json={"score_a": 11, "score_b": 5, "force_end": True}, headers=auth)
+        assert r.status_code == 200, (r.status_code, r.text)
+    rr = (await c.get(f"/api/tournaments/{tid}/rounds", headers=auth)).json()
+    pend = [m for r in rr for m in r["matches"] if m["status"] != "finished"]
+    print(f"   连打 4 场后：未打完 {len(pend)} 场（自动补位），已打完 "
+          f"{sum(1 for r in rr for m in r['matches'] if m['status'] == 'finished')} 场")
+    assert len(pend) == 2
+
 async def main_async():
     boss, players = await seed()
     token = create_access_token({"sub": str(boss.id)}, boss.token_version)
@@ -227,6 +250,7 @@ async def main_async():
         await phase_multi(c, auth, players[:12])
         await phase_legacy(c, auth, players)
         await phase_no_court(c, auth, players)
+        await phase_court_first(c, auth, players)
     print("\nE2E OK")
 
 
