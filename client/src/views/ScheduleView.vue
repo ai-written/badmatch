@@ -419,7 +419,14 @@ const nextUp = ref<any | null>(null)
 let nextUpOff = false
 const isMultiCourt = computed(() => (nextUp.value?.courts || 0) >= 2)
 /** 「优先场地」模式：没有完整赛程，打完一场自动排下一场（见后端 core/jit_schedule） */
-const isCourtFirst = computed(() => detail.value?.schedule_mode === 'court_first')
+/**
+ * 「优先场地」模式：没有完整赛程，打完一场自动排下一场（见后端 core/jit_schedule）。
+ * 除了看字段，还要确认**确实是多场地** —— 单场地永远按完整赛程跑（服务端也会回落），
+ * 只信字段的话，历史数据被误标时会在单场地赛事上挂出这条提示（踩过）。
+ */
+const isCourtFirst = computed(() =>
+  detail.value?.schedule_mode === 'court_first' && (detail.value?.courts?.length || 0) >= 2
+)
 /** 跳场提示：某一场被跳过了 / 或者两片场地都在打（都说明"现在该打哪一场"） */
 const nextUpHint = computed(() => {
   if (!isMultiCourt.value) return ''

@@ -310,24 +310,44 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
         await conn.execute(text("UPDATE tournaments SET plan_total_matches = total_matches"))
 
     # 排赛模式（多场地赛事用）：'court_first' 优先场地（默认，边打边排）/ 'balanced' 优先公平性。
-    # 已有的行一律不动（存量赛事继续按它们原来的方式跑），只把**列默认值**切到新默认；
-    # 新建赛事由 API 显式写入（见 tournaments._resolve_schedule_mode）。
+    #
+    # 注意 PostgreSQL 的语义：`ADD COLUMN ... NOT NULL DEFAULT x` 会把**已有的每一行**
+    # 都填成 x。所以这里必须先用 'balanced' 回填，再把**列默认值**改成新的 'court_first'
+    # （踩过：直接用 court_first 加列，上线后所有历史赛事都被标成"优先场地"，
+    #  单场地老赛事的分组页上于是挂出了"打完一场自动排下一场"的提示）。
     if await _table_exists(conn, "tournaments"):
         if not await _column_exists(conn, "tournaments", "schedule_mode"):
             logger.info("migration: adding tournaments.schedule_mode column")
             await conn.execute(
                 text(
                     "ALTER TABLE tournaments "
-                    "ADD COLUMN schedule_mode VARCHAR(16) NOT NULL DEFAULT 'court_first'"
+                    "ADD COLUMN schedule_mode VARCHAR(16) NOT NULL DEFAULT 'balanced'"
                 )
             )
-        else:
-            await conn.execute(
-                text(
-                    "ALTER TABLE tournaments "
-                    "ALTER COLUMN schedule_mode SET DEFAULT 'court_first'"
-                )
+        await conn.execute(
+            text(
+                "ALTER TABLE tournaments "
+                "ALTER COLUMN schedule_mode SET DEFAULT 'court_first'"
             )
+        )
+
+        # 一次性纠正上面那次错误回填留下的数据（幂等，靠数据本身的特征判断，不需要额外标记表）：
+        # 「优先场地」赛事一定是多场地，且**每轮只有 1 场**（见 core/jit_schedule：一轮一场）。
+        # 因此下面两类都不可能是优先场地赛事：
+        #   · 场地数 < 2（单场地本来就没得选，服务端也会强制回落 balanced）；
+        #   · 存在"一轮里 ≥2 场"的轮次（那是完整赛程排出来的样子）。
+        await conn.execute(
+            text(
+                "UPDATE tournaments t SET schedule_mode = 'balanced' "
+                "WHERE t.schedule_mode = 'court_first' AND ("
+                "  (SELECT count(*) FROM courts c WHERE c.tournament_id = t.id) < 2 "
+                "  OR EXISTS ("
+                "    SELECT 1 FROM rounds r WHERE r.tournament_id = t.id "
+                "    AND (SELECT count(*) FROM matches m WHERE m.round_id = r.id) >= 2"
+                "  )"
+                ")"
+            )
+        )
 
     # 自增序列对齐（幂等）：修一次就够，但每次启动都检查一遍，
     # 这样「用 dump 恢复过数据库」之后也不用记得手工执行 setval。

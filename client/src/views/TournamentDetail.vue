@@ -37,7 +37,7 @@
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
-          <div class="ig-item" v-if="tournament.schedule_mode === 'court_first'"><van-icon name="clock-o" /><span>优先场地（打完一场自动排下一场）</span></div>
+          <div class="ig-item" v-if="isCourtFirst"><van-icon name="clock-o" /><span>优先场地（打完一场自动排下一场）</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>
@@ -397,6 +397,15 @@ function openEdit() {
 const totalMatchesText = computed(() => {
   const n = tournament.value?.total_matches
   return n ? `共 ${n} 场` : '开赛时自动计算'
+})
+/**
+ * 「优先场地（边打边排）」赛事：多场地才有这个模式，单场地永远按完整赛程跑。
+ * 只信 schedule_mode 是不够的 —— 历史数据一旦被误标（迁移回填踩过），
+ * 单场地赛事上会多出一行"打完一场自动排下一场"，与实际行为不符。
+ */
+const isCourtFirst = computed(() => {
+  const t = tournament.value as any
+  return t?.schedule_mode === 'court_first' && (t?.courts?.length || 0) >= 2
 })
 
 const WEEKDAYS2 = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
