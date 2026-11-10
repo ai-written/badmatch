@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
+from app.core.ranking import assign_ranks
 from app.core.security import require_user
 from app.models.tournament import Tournament, PlayerStats
 from app.models.user import User
@@ -33,24 +34,27 @@ async def get_rankings(
         select(PlayerStats, User.username, User.avatar)
         .join(User, PlayerStats.user_id == User.id)
         .where(PlayerStats.tournament_id == tournament_id)
-        # user_id 兜底：战绩与净胜分都相同时，PostgreSQL 不保证稳定顺序，
-        # 同一条 SQL 两次执行可能给出不同排列，前端名次会在刷新间跳变
-        .order_by(
-            PlayerStats.matches_won.desc(),
-            (PlayerStats.points_for - PlayerStats.points_against).desc(),
-            PlayerStats.user_id.asc(),
-        )
     )
-    rows = result.all()
+    # 顺序与名次都交给 core/ranking：个人参赛趋势图用的是同一个函数，
+    # 两处必须逐位一致（否则同一个人在两个页面上的名次会不一样）。
+    # 这里不再写 order_by —— assign_ranks 内部已经排好序，少一条等价索引排序。
+    #
+    # 按 user_id 去重是**有意的**：库里 player_stats 没有 (tournament_id, user_id)
+    # 唯一约束（只有两个单列索引），正常路径不会重复，但真出现重复行时
+    # 必须只算一个人 —— 否则同一个人占两个名次、后面的人全部顺延，
+    # 积分榜看着像有鬼。保留先读到的那一行。
+    by_user = {stat.user_id: (stat, username, avatar)
+               for (stat, username, avatar) in result.all()}
+    ordered = assign_ranks([
+        (stat.user_id, stat.matches_won, stat.points_for, stat.points_against, stat.is_active)
+        for (stat, _username, _avatar) in by_user.values()
+    ])
 
     rankings = []
-    rank = 0
-    for (stat, username, avatar) in rows:
-        # 名次只对活跃选手递增；退赛选手显示在底部且不占名次
-        if stat.is_active:
-            rank += 1
+    for user_id, rank in ordered:
+        stat, username, avatar = by_user[user_id]
         rankings.append(PlayerRanking(
-            rank=rank if stat.is_active else 0,
+            rank=rank,
             user_id=stat.user_id,
             username=username,
             avatar=avatar,

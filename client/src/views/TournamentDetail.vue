@@ -130,17 +130,41 @@
             <van-image lazy-load round width="56" height="56" :src="playerDetail.avatar || defaultAvatar" />
             <h3>{{ playerDetail.username }}</h3>
           </div>
-          <van-cell-group inset v-if="playerStats.total_matches > 0">
-            <van-cell title="总场次" :value="String(playerStats.total_matches)" />
-            <van-cell title="胜场" :value="String(playerStats.total_wins)" />
-            <van-cell title="负场" :value="String(playerStats.total_matches - playerStats.total_wins)" />
-            <van-cell title="胜率" :value="`${playerStats.win_rate}%`">
-              <template #label>双打胜率，按参与场次统计</template>
-            </van-cell>
-            <van-cell title="参赛次数" :value="String(playerStats.tournaments_played)" />
-          </van-cell-group>
-          <van-empty v-else :description="statsFailed ? '战绩加载失败，请重试' : '暂无比赛记录'" />
-        </div>
+
+          <!-- 参赛排名趋势：点「参赛次数」切到这个视图（同一个弹窗内切换，
+               不套第二层 popup —— 手机上两层弹窗的滚动/遮罩很容易出问题） -->
+          <template v-if="statsView === 'history'">
+            <div class="history-bar">
+              <span class="history-back" @click="statsView = 'detail'">‹ 返回战绩</span>
+            </div>
+            <van-loading v-if="historyLoading" class="sheet-loading" />
+            <div v-else-if="historyFailed" class="history-failed" @click="loadHistory()">
+              加载失败，点这里重试
+            </div>
+            <RankHistoryChart v-else :items="historyItems" />
+          </template>
+
+          <template v-else>
+            <van-cell-group inset v-if="playerStats.total_matches > 0">
+              <van-cell title="总场次" :value="String(playerStats.total_matches)" />
+              <van-cell title="胜场" :value="String(playerStats.total_wins)" />
+              <van-cell title="负场" :value="String(playerStats.total_matches - playerStats.total_wins)" />
+              <van-cell title="胜率" :value="`${playerStats.win_rate}%`">
+                <template #label>双打胜率，按参与场次统计</template>
+              </van-cell>
+              <!-- 点了看「历史每一场的名次 / 该场人数」折线图 -->
+              <van-cell
+                title="参赛次数" :value="String(playerStats.tournaments_played)"
+                :is-link="playerStats.tournaments_played > 0"
+                :clickable="playerStats.tournaments_played > 0"
+                @click="openHistory"
+              >
+                <template v-if="playerStats.tournaments_played > 0" #label>点击看排名趋势</template>
+              </van-cell>
+            </van-cell-group>
+            <van-empty v-else :description="statsFailed ? '战绩加载失败，请重试' : '暂无比赛记录'" />
+          </template>
+       </div>
       </van-popup>
 
       <!-- 取消报名 / 赛中退赛记录：两者都是标记失效、不删记录，所以谁退出过查得到 -->
@@ -276,6 +300,7 @@ import { useGoBack } from '@/composables/useGoBack'
 import { copyText } from '@/utils/clipboard'
 import { renderSignupPoster, POSTER_FILE } from '@/utils/poster'
 import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
+import RankHistoryChart from '@/components/RankHistoryChart.vue'
 import { detectIsIOS, isWeChatUA } from '@/utils/shareEnv'
 import { showToast, showConfirmDialog, showLoadingToast, showFailToast } from 'vant'
 
@@ -435,13 +460,66 @@ async function viewPlayer(r: any) {
   showPlayerStats.value = true
   statsFailed.value = false
   playerStats.value = {}
+  // 每次重新打开都回到「战绩」页，并且丢掉上一个人的趋势数据 ——
+  // 否则点开乙会先看到甲的名次折线（比空图更糟：看着像乙的战绩）
+  statsView.value = 'detail'
+  historyItems.value = []
+  historyLoaded.value = false
+  historyLoading.value = false
+  historyFailed.value = false
   try {
     const res = await api.get(`/auth/stats/${r.user_id}`)
+    // 请求期间用户又点了别人的头像：这份响应已经过期，丢掉。
+    // 不丢的话，甲的"参赛次数 12"会显示在乙的名字下面。
+    if (playerDetail.value.user_id !== r.user_id) return
     playerStats.value = res.data
   } catch {
     // 不能把「拉取失败」显示成「暂无比赛记录」——那是两回事
+    if (playerDetail.value.user_id !== r.user_id) return
     statsFailed.value = true
   }
+}
+
+/* ---------------- 参赛排名趋势（点「参赛次数」） ----------------
+ * 后端按「他打过的每一场赛事」各给一个点（名次 + 该场在赛人数），
+ * 折线图纵轴是相对位置（第1名在顶），点位换算在 utils/rankHistory.ts。
+ * 数据第一次点才拉，同一个人本次弹窗内复用；失败可点重试。
+ */
+const statsView = ref<'detail' | 'history'>('detail')
+const historyItems = ref<any[]>([])
+const historyLoaded = ref(false)
+const historyLoading = ref(false)
+const historyFailed = ref(false)
+
+async function loadHistory(force = false) {
+  if (historyLoaded.value && !force) return
+  const uid = playerDetail.value.user_id
+  if (!uid) return
+  historyLoading.value = !historyItems.value.length
+  historyFailed.value = false
+  try {
+    const res = await api.get(`/auth/stats/${uid}/history`,
+      { skipLoading: true } as any)
+    // 请求期间用户又点开了别人：这份是上一个人的数据，必须丢掉。
+    // 否则 historyLoaded 会被置 true —— 再点开新的人时 loadHistory 直接 return，
+    // 新人的弹窗里就画着上一个人的折线（最坏的一类 bug：数据看着对，人不对）。
+    if (playerDetail.value.user_id !== uid) return
+    historyItems.value = res.data?.items || []
+    historyLoaded.value = true
+  } catch {
+    if (playerDetail.value.user_id !== uid) return
+    // 已有旧数据时不要切成失败态：旧图比"错误提示"有用
+    if (!historyItems.value.length) historyFailed.value = true
+  } finally {
+    // 同上：只由"当前这个人"的请求收尾，别把新请求的 loading 灭掉
+    if (playerDetail.value.user_id === uid) historyLoading.value = false
+  }
+}
+
+function openHistory() {
+  if (!(playerStats.value.tournaments_played > 0)) return
+  statsView.value = 'history'
+  loadHistory()
 }
 
 // ---- 房主/管理员把某人移出名单（报名中 = 代取消报名；进行中 = 代退赛）----
@@ -1101,6 +1179,12 @@ onUnmounted(() => {
 .transfer-player.selected { background: #e8f4ff; }
 .transfer-player span { font-size: 12px; color: #666; }
 .popup-player-head h3 { margin-top: 8px; }
+
+/* 参赛排名趋势：返回条 + 加载/失败态 */
+.history-bar { display: flex; align-items: center; padding: 0 2px 10px; }
+.history-back { font-size: 13px; color: #1989fa; cursor: pointer; padding: 2px 0; }
+.history-failed { padding: 40px 0; text-align: center; color: #969799; font-size: 13px; }
+.sheet-loading { display: flex; justify-content: center; padding: 40px 0; }
 
 .picker-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; font-size: 15px; }
 .picker-title { font-weight: 600; }

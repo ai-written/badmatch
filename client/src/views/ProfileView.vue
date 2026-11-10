@@ -62,7 +62,14 @@
         <van-cell title="总场次" :value="String(stats.total_matches)" />
         <van-cell title="胜场" :value="String(stats.total_wins)" />
         <van-cell title="胜率" :value="`${stats.win_rate}%`" label="双打胜率" />
-        <van-cell title="参赛次数" :value="String(stats.tournaments_played)" />
+        <van-cell
+          title="参赛次数" :value="String(stats.tournaments_played)"
+          :is-link="stats.tournaments_played > 0"
+          :clickable="stats.tournaments_played > 0"
+          @click="openHistory"
+        >
+          <template v-if="stats.tournaments_played > 0" #label>点击看排名趋势</template>
+        </van-cell>
       </van-cell-group>
 
       <van-cell-group inset style="margin-top:12px" v-if="auth.user && auth.user.role !== 'user'">
@@ -103,6 +110,21 @@
     <van-dialog v-model:show="showEditEmail" title="修改邮箱" show-cancel-button @confirm="saveEmail">
       <van-field v-model="editEmail" type="email" placeholder="邮箱（选填，留空可清除）" maxlength="255" style="margin:10px 0" />
     </van-dialog>
+
+    <!-- 我的参赛排名趋势（点「参赛次数」打开）：与赛事详情里点头像看到的是同一张图 -->
+    <van-popup v-model:show="showHistory" round position="bottom" class="vh-sheet vh-65" lock-scroll>
+      <div class="picker-toolbar">
+        <span @click="showHistory = false">关闭</span>
+        <span class="picker-title">我的参赛名次</span>
+      </div>
+      <div class="vh-sheet-body history-body">
+        <van-loading v-if="historyLoading" class="history-loading" />
+        <div v-else-if="historyFailed" class="history-failed" @click="loadHistory(true)">
+          加载失败，点这里重试
+        </div>
+        <RankHistoryChart v-else :items="historyItems" />
+      </div>
+    </van-popup>
   </div>
 </template>
 
@@ -114,6 +136,7 @@ import api from '@/api/client'
 import { showToast, showFailToast, showConfirmDialog } from 'vant'
 import { compressAvatar } from '@/utils/avatar'
 import { copyText } from '@/utils/clipboard'
+import RankHistoryChart from '@/components/RankHistoryChart.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -140,6 +163,46 @@ const showEditEmail = ref(false); const editEmail = ref('')
 
 async function fetchStats(skipLoading = false) {
   try { const res = await api.get('/auth/stats', { skipLoading } as any); Object.assign(stats, res.data) } catch {}
+}
+
+/* ---------------- 我的参赛名次趋势 ----------------
+ * 点「参赛次数」才拉（这个接口要扫他所有赛事的战绩，不必每次进个人页都拉）。
+ * 数据口径与赛事详情里点头像看别人完全一样，共享同一个组件。
+ */
+const showHistory = ref(false)
+const historyItems = ref<any[]>([])
+const historyLoaded = ref(false)
+const historyUid = ref<number | null>(null)
+const historyLoading = ref(false)
+const historyFailed = ref(false)
+
+async function loadHistory(force = false) {
+  const uid = auth.user?.id
+  if (!uid) return
+  // 缓存跟着**人**走：退出登录后换个账号进来，historyLoaded 还是 true，
+  // 若只判断这个标志就会把上一个账号的折线当成自己的
+  if (historyLoaded.value && historyUid.value === uid && !force) return
+  historyLoading.value = !historyItems.value.length
+  historyFailed.value = false
+  try {
+    const res = await api.get(`/auth/stats/${uid}/history`, { skipLoading: true } as any)
+    if (auth.user?.id !== uid) return
+    historyItems.value = res.data?.items || []
+    historyLoaded.value = true
+    historyUid.value = uid
+  } catch {
+    if (auth.user?.id !== uid) return
+    // 已有旧数据时不切失败态：旧图比错误提示有用
+    if (!historyItems.value.length) historyFailed.value = true
+  } finally {
+    if (auth.user?.id === uid) historyLoading.value = false
+  }
+}
+
+function openHistory() {
+  if (!(stats.tournaments_played > 0)) return
+  showHistory.value = true
+  loadHistory()
 }
 
 async function fetchUnread(skipLoading = false) {
@@ -275,6 +338,9 @@ async function onRefresh() {
   try {
     await Promise.all([fetchStats(true), fetchUnread(true), auth.fetchMe(true)])
     if (auth.user?.invite_code) inviteCode.value = auth.user.invite_code
+    // 下拉刷新是"我要最新数据"的手势：趋势图的缓存也一并作废，
+    // 否则「参赛次数」涨了、点开还是旧的折线（下次打开时重拉）
+    historyLoaded.value = false
   } finally {
     refreshing.value = false
   }
@@ -328,4 +394,14 @@ onMounted(async () => {
 .avatar-wrapper:hover .avatar-overlay { opacity: 1; }
 .profile-header h3 { margin-top: 10px; font-size: 18px; }
 .logout-btn { padding: 20px 16px; }
+
+/* 我的参赛名次趋势弹层 */
+.picker-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; font-size: 14px; color: #1989fa; flex-shrink: 0;
+}
+.picker-title { color: #323233; font-weight: 600; font-size: 15px; }
+.history-body { padding: 0 16px 16px; }
+.history-loading { display: flex; justify-content: center; padding: 40px 0; }
+.history-failed { padding: 40px 0; text-align: center; color: #969799; font-size: 13px; }
 </style>

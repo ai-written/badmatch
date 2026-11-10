@@ -25,6 +25,10 @@
  *  16 访问控制：未登录访问积分榜 → 登录页（并记住原目标）；登录后正常打开
  *  17 定时报名：创建页带开放时间、未开放时详情页锁定报名、过期后保存自动按立即开放
  *  18 管理面板：访问日志「排除自己」开关（带 exclude_self=true 重新查询、重置即复位）
+ *  19 赛事详情：房主/管理员把报名者移出名单（代取消 / 赛中退赛、文案说明后果）
+ *  20 积分榜：点胜/负数字看明细（口径 = 已结束场次、第N场与对阵表一致）
+ *  21 赛事详情：点「参赛次数」看跨赛事排名趋势折线图（懒加载、点数 = 参赛次数、
+ *     退赛点不连线、点圆点看那一场、返回战绩、超过 24 场默认折叠可展开）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -281,6 +285,7 @@ function scoreMock({ role = 'user', match }) {
   return (path) => {
     if (/auth\/me$/.test(path)) return { id: 1, username: '李祥', avatar: '', gender: 'M', role, invite_code: 'dd8f168e' }
     if (/\/matches\/\d+$/.test(path)) return match
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -391,6 +396,7 @@ async function scenarioLayout(page) {
     if (/\/rounds$/.test(path)) return rounds
     if (/\/rankings$/.test(path)) return { tournament_id: 2, tournament_title: 'T', rankings: [] }
     if (/\/registrations$/.test(path) || /\/cancellations$/.test(path)) return []
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/notifications/.test(path)) return { items: [], total: 0, has_more: false }
@@ -464,6 +470,7 @@ async function scenarioInviteLabel(page) {
   console.log('4) 我的页：邀请码那行的排版与省略号兜底')
   await page.enableMock((path) => {
     if (/auth\/me$/.test(path)) return { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'superadmin', invite_code: 'dd8f168e' }
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -1794,6 +1801,7 @@ async function scenarioScoreNoFlicker(page) {
                                       score_a: serverScore })
       return slowNextGet ? { ...snapshot, __delayMs: 1200 } : snapshot
     }
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -1857,6 +1865,7 @@ async function scenarioScoreOptimisticLock(page) {
                             score_a: server.score_a, score_b: server.score_b,
                             score_version: server.score_version })
     }
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -2173,6 +2182,7 @@ async function scenarioRemoveRegistration(page) {
       return { ok: true, message: '已移出报名名单' }
     }
     if (/\/tournaments\/2$/.test(path)) return detail()
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -2257,6 +2267,7 @@ async function scenarioRemoveRegistration(page) {
     if (/\/registrations$/.test(path)) return baseRegs().slice(0, 2)
     if (/withdraw\/\d+$/.test(path)) { withdrawPath = path; return { ok: true, message: '选手已退出' } }
     if (/\/tournaments\/2$/.test(path)) return { ...detail(), status: 'ongoing', cancelled_count: 0, started_match_count: 1 }
+    if (/auth\/stats\/\d+\/history/.test(path)) return { user_id: 1, tournaments_played: 0, items: [] }
     if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
     if (/unread-count/.test(path)) return { count: 0 }
     if (/has-users/.test(path)) return { exists: true }
@@ -2392,8 +2403,152 @@ async function scenarioRankingMatchDetail(page) {
   assert('0 场的数字点了不弹层', (await sheetOpen()) === false)
 }
 
+/** 场景 21：赛事详情点「参赛次数」看跨赛事排名趋势折线图
+ *
+ * 看点：
+ *   1. 懒加载：不点不请求；点开才打 /auth/stats/{id}/history
+ *   2. 点数 = 「参赛次数」那个数字（退赛场次也占一个点，否则会被当成丢数据）
+ *   3. 退赛的点不连线（否则会伪造出一段"掉到最后一名"的假趋势）
+ *   4. 点圆点能看那一场的名次/人数
+ *   5. 「返回战绩」能回到统计页（同一个弹窗内切换，不是新弹窗）
+ */
+async function scenarioRankHistory(page) {
+  console.log('21) 赛事详情：点参赛次数看排名趋势')
+  const stranger = { id: 9, username: '路人', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  const regs = [
+    { id: 11, user_id: 1, username: '房主', avatar: '', created_at: '2026-11-01T10:00:00', user_is_active: true },
+    { id: 12, user_id: 2, username: '张三', avatar: '', created_at: '2026-11-01T10:05:00', user_is_active: true },
+  ]
+  const detail = {
+    id: 2, creator_id: 1, title: '周五养生局', description: null, location: '奥体中心',
+    start_date: '2026-11-06T19:00:00', end_date: '2026-11-06T21:00:00',
+    max_participants: 8, status: 'open', courts: [], registered_count: 2,
+    cancelled_count: 0, pending_referee_count: 0, started_match_count: 0,
+    total_matches: null, points_to_win: 11, registration_open_at: null,
+    server_now: '2026-11-05T10:00:00', is_registered: true, is_on_site: false,
+    created_at: '2026-11-01T09:00:00',
+  }
+  // 张三的参赛史：第1场 5/8、第2场 2/8（最好）、第3场退赛（应沉底且断开折线）
+  const history = {
+    user_id: 2, tournaments_played: 3,
+    items: [
+      { tournament_id: 11, title: '10月第一周', start_date: '2026-10-04T19:00:00', status: 'finished',
+        rank: 5, total_players: 8, dropped_players: 0, matches_played: 7, matches_won: 3, is_active: true },
+      { tournament_id: 12, title: '10月第二周', start_date: '2026-10-11T19:00:00', status: 'finished',
+        rank: 2, total_players: 8, dropped_players: 1, matches_played: 7, matches_won: 6, is_active: true },
+      { tournament_id: 13, title: '10月第三周', start_date: '2026-10-18T19:00:00', status: 'finished',
+        rank: 0, total_players: 7, dropped_players: 1, matches_played: 2, matches_won: 0, is_active: false },
+    ],
+  }
+  const mockFor = (hist, tours) => (path) => {
+    if (/auth\/me$/.test(path)) return stranger
+    if (/\/registrations$/.test(path)) return regs
+    if (/\/tournaments\/2$/.test(path)) return detail
+    if (/auth\/stats\/2\/history/.test(path)) return hist
+    if (/auth\/stats\/2$/.test(path)) {
+      return { total_matches: 16, total_wins: 9, win_rate: 56.3, tournaments_played: tours }
+    }
+    if (/auth\/stats/.test(path)) return { total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  }
+  await page.enableMock(mockFor(history, 3))
+  await page.setToken()
+  await page.goto('/tournament/2', 2400)
+
+  const chipClick = (name) => page.ev(`(() => {
+    const c = [...document.querySelectorAll('.player-chip')].find(e => (e.textContent || '').includes(${JSON.stringify(name)}))
+    if (!c) return 'NOCHIP'
+    c.click(); return 'OK' })()`)
+  const statsCellClick = () => page.ev(`(() => {
+    const cell = [...document.querySelectorAll('.stats-popup .van-cell')]
+      .find(e => (e.textContent || '').includes('参赛次数'))
+    if (!cell) return 'NOCELL'
+    cell.click(); return 'OK' })()`)
+  const statsCellText = () => page.ev(`(() => {
+    const cell = [...document.querySelectorAll('.stats-popup .van-cell')]
+      .find(e => (e.textContent || '').includes('参赛次数'))
+    return ((cell && cell.textContent) || '').replace(/\\s+/g, ' ').trim() })()`)
+  const chartDots = () => page.ev(`document.querySelectorAll('.chart-svg .dot').length`)
+  const droppedDots = () => page.ev(`document.querySelectorAll('.chart-svg .dot.dropped').length`)
+  const polylines = () => page.ev(`document.querySelectorAll('.chart-svg path.line').length`)
+  const tipText = () => page.ev(`(document.querySelector('.chart-tip')?.textContent || '').replace(/\\s+/g, ' ').trim()`)
+  const historyReqs = () => page.requests.filter((r) => /\/auth\/stats\/2\/history$/.test(r.path))
+
+  // ---- 打开战绩弹窗：此时还没请求 history（懒加载）----
+  assert('点报名者头像看战绩', (await chipClick('张三')) === 'OK')
+  await sleep(900)
+  const cellText = await statsCellText()
+  assert('战绩里显示参赛次数 3', cellText.includes('参赛次数') && cellText.includes('3'), cellText)
+  assert('参赛次数带「点击看排名趋势」的提示', cellText.includes('点击看排名趋势'), cellText)
+  assert('还没点就不请求趋势接口（懒加载）', (await historyReqs()).length === 0,
+    JSON.stringify((await historyReqs()).map((r) => r.path)))
+
+  // ---- 点参赛次数 → 折线图 ----
+  assert('点参赛次数', (await statsCellClick()) === 'OK')
+  await sleep(900)
+  assert('第一次点才请求趋势接口', (await historyReqs()).length === 1,
+    JSON.stringify((await page.requests).map((r) => r.path)))
+  assert('折线图画出来了', (await page.ev(`!!document.querySelector('.chart-svg')`)) === true)
+  assert('点数 = 参赛次数（退赛场次也占一个点）', (await chartDots()) === 3, await chartDots())
+  assert('退赛那个点单独标出来', (await droppedDots()) === 1, await droppedDots())
+  assert('折线在退赛处断开（只剩前两个点连成一段）', (await polylines()) === 1, await polylines())
+
+  // ---- 点圆点看那一场 ----
+  await page.ev(`(() => {
+    const dots = document.querySelectorAll('.chart-svg .dot')
+    const g = dots[1] && dots[1].parentNode
+    if (!g) return 'NODOT'
+    g.dispatchEvent(new MouseEvent('click', { bubbles: true })); return 'OK' })()`)
+  await sleep(300)
+  const tip = await tipText()
+  assert('点第 2 个点：显示「第 2 名 / 共 8 人」', tip.includes('第 2 名 / 共 8 人'), tip)
+  assert('提示里带那一场的战绩', tip.includes('10月第二周') && tip.includes('6 胜 / 7 场'), tip)
+
+  // ---- 返回战绩 ----
+  await page.ev(`(() => {
+    const el = document.querySelector('.history-back')
+    if (!el) return 'NOBACK'
+    el.click(); return 'OK' })()`)
+  await sleep(400)
+  assert('返回后回到战绩页（趋势图移除）',
+    (await page.ev(`!!document.querySelector('.chart-svg')`)) === false)
+  assert('战绩页的参赛次数还在', (await statsCellText()).includes('参赛次数'))
+
+  // ---- 场次很多时：默认只画最近 24 场，能展开看全部 ----
+  // （100 个点挤在 320px 宽的图上，点间距 3px、圆点直径 9px，互相盖住还点不准）
+  const many = {
+    user_id: 2, tournaments_played: 30,
+    items: Array.from({ length: 30 }, (_, i) => ({
+      tournament_id: 100 + i, title: `第${i + 1}周`,
+      start_date: `2026-${String(1 + Math.floor(i / 4)).padStart(2, '0')}-${String(1 + (i % 4) * 7).padStart(2, '0')}T19:00:00`,
+      status: 'finished', rank: (i % 8) + 1, total_players: 8, dropped_players: 0,
+      matches_played: 7, matches_won: 7 - (i % 8) + 1, is_active: true,
+    })),
+  }
+  await page.enableMock(mockFor(many, 30))
+  await page.goto('/tournament/2', 2400)
+  await chipClick('张三')
+  await sleep(900)
+  await statsCellClick()
+  await sleep(900)
+  assert('超过 24 场：默认只画最近 24 个点', (await chartDots()) === 24, await chartDots())
+  const sub = await page.ev(`(document.querySelector('.chart-sub')?.textContent || '').trim()`)
+  assert('标题写明「共 30 场 · 显示最近 24 场」', sub === '共 30 场 · 显示最近 24 场', sub)
+  const moreBtn = () => page.ev(`(document.querySelector('.more-btn')?.textContent || '').trim()`)
+  assert('给出「查看全部 30 场」入口', (await moreBtn()) === '查看全部 30 场', await moreBtn())
+  await page.ev(`(() => { const b = document.querySelector('.more-btn'); if (!b) return 'NOBTN'; b.click(); return 'OK' })()`)
+  await sleep(500)
+  assert('展开后画出全部 30 个点', (await chartDots()) === 30, await chartDots())
+  assert('按钮变成「只看最近 24 场」', (await moreBtn()) === '只看最近 24 场', await moreBtn())
+  await page.ev(`(() => { const b = document.querySelector('.more-btn'); if (!b) return 'NOBTN'; b.click(); return 'OK' })()`)
+  await sleep(500)
+  assert('再点一次收回 24 个点', (await chartDots()) === 24, await chartDots())
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration, scenarioRankingMatchDetail]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration, scenarioRankingMatchDetail, scenarioRankHistory]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)

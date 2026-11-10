@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -103,3 +105,29 @@ class UserStats(BaseModel):
     total_wins: int = 0
     win_rate: float = 0.0
     tournaments_played: int = 0
+
+
+class TournamentRankPoint(BaseModel):
+    """「参赛排名趋势图」上的一个点 = 该用户在某一场赛事里的最终/当前名次。"""
+    tournament_id: int
+    title: str
+    # 横轴排序依据（按赛事开始时间先后）
+    start_date: datetime
+    status: str
+    # 0 = 无名次（这一场他退赛了）。与积分榜的 rank 口径完全一致
+    rank: int = 0
+    # 名次的分母：该场**在赛**选手人数。恒有 rank <= total_players，
+    # 所以前端可以直接拿它做归一化（rank-1)/(total_players-1)
+    total_players: int = 0
+    # 该场退赛人数（不计入 total_players，只用于提示"另有 N 人退赛"）
+    dropped_players: int = 0
+    matches_played: int = 0
+    matches_won: int = 0
+    is_active: bool = True
+
+
+class TournamentRankHistory(BaseModel):
+    """某位用户的完整参赛史（按时间正序），给折线图用。"""
+    user_id: int
+    tournaments_played: int = 0
+    items: list[TournamentRankPoint] = []
