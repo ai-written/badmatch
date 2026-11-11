@@ -277,7 +277,7 @@ onUnmounted(closeShare)
 </script>
 
 <style scoped>
-.rank-page { display: flex; flex-direction: column; background: #eef4fd; }
+.rank-page { display: flex; flex-direction: column; background: #fff; }
 .rank-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: var(--tabbar-reserve); }
@@ -296,13 +296,15 @@ onUnmounted(closeShare)
 
 /* ---- 白色浮层 ---- */
 .rank-sheet {
-  margin-top: -14px; border-radius: 20px 20px 0 0; min-height: 60vh;
-  background: linear-gradient(180deg, #f7fbff 0%, #eef4fd 100%);
-  padding: 12px;
+  position: relative;
+  margin-top: -28px; border-radius: 28px 28px 0 0; min-height: calc(100vh - 160px);
+  background: #fff; padding: 16px 12px 12px;
+  box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
+  border-top: 1.5px solid rgba(255, 255, 255, .8);
 }
 .rank-card {
   background: #fff; border-radius: 16px; padding: 6px 6px 4px;
-  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+  border: 1px solid #eef3fa; box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
 }
 
 /* 五列网格：排名 / 队员 / 比分 / 净胜 / 胜率（列宽固定，行与表头共用一套） */

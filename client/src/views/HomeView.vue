@@ -223,7 +223,7 @@ async function onRefresh() {
 </script>
 
 <style scoped>
-.home-page { display: flex; flex-direction: column; background: #eef4fd; }
+.home-page { display: flex; flex-direction: column; background: #fff; }
 .home-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 /* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
@@ -252,16 +252,22 @@ async function onRefresh() {
 
 /* ---- 内容浮层：压住头图底部圆角 ---- */
 .home-sheet {
-  margin-top: -14px; border-radius: 20px 20px 0 0;
-  background: linear-gradient(180deg, #f7fbff 0%, #eef4fd 100%);
-  padding: 12px 12px 0; min-height: 60vh;
+  position: relative;
+  /* 负 margin 把头图的波浪盖住一截，圆角够大才有"卡片浮起"的感觉 */
+  margin-top: -28px; border-radius: 28px 28px 0 0;
+  background: #fff;
+  padding: 16px 12px 0; min-height: calc(100vh - 160px);
+  /* 压在图上的那道边：一条极淡的亮边 + 一点向上的阴影，接缝才不会糊成一条直线 */
+  box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
+  border-top: 1.5px solid rgba(255, 255, 255, .8);
 }
 
 /* ---- 赛事卡 ---- */
 .t-card {
   display: flex; align-items: stretch; gap: 11px;
   background: #fff; border-radius: 16px; padding: 12px;
-  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+  border: 1px solid #eef3fa;
+  box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
   margin-bottom: 10px; cursor: pointer;
 }
 .t-card:active { background: #fafcff; }
