@@ -286,9 +286,9 @@ async function onRefresh() {
   box-shadow: 0 1px 3px rgba(17, 45, 90, .05);
   min-height: 76px;
 }
-.t-date.tile-0 { background-color: #f4f0fe; background-image: url(/tile/tile-purple.jpg?v=2); background-size: auto 128%; background-position: right -4px center; }
-.t-date.tile-1 { background-color: #fdf0e6; background-image: url(/tile/tile-orange.jpg?v=2); background-size: auto 128%; background-position: right -4px center; }
-.t-date.tile-2 { background-color: #e9f9f2; background-image: url(/tile/tile-mint.jpg?v=2); background-size: auto 128%; background-position: right -4px center; }
+.t-date.tile-0 { background-color: #faf9ff; background-image: url(/tile/tile-purple.jpg?v=4); background-size: cover; background-position: center; }
+.t-date.tile-1 { background-color: #fdefe4; background-image: url(/tile/tile-orange.jpg?v=4); background-size: cover; background-position: center; }
+.t-date.tile-2 { background-color: #f7fdf9; background-image: url(/tile/tile-mint.jpg?v=4); background-size: cover; background-position: center; }
 .t-date > * { position: relative; z-index: 1; }
 
 .t-date b {
