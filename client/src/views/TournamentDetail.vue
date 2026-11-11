@@ -35,7 +35,7 @@
 
       </AppHero>
 
-      <div class="detail-sheet">
+      <div class="ui-sheet ui-sheet--flush">
 
       <!-- 赛事信息白卡：放在渐变**下面**而不是压在上面 —— 图的底部是高光浅蓝，
            白字压上去对比度只有 2 左右，读起来很吃力 -->
@@ -1141,21 +1141,8 @@ onUnmounted(() => {
 
 /* ---- 头图内排版 ---- */
 
-.detail-sheet::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
-  margin-top: -14px; pointer-events: none;
-  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
-}
 .detail-nav { display: flex; align-items: center; justify-content: space-between; padding-top: 2px; }
 /* 头图之后的内容统一上提一截并给大圆角，和首页/积分榜同一个接缝处理 */
-.detail-sheet {
-  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #f4f9ff;
-  padding: 16px 0 0;
-  /* 只往上投影：box-shadow 带模糊会向下也漏出一截，内容短时就在浮层下缘
-     露出一条横向色带（看着像"列表底部多了个灰条"）。改用伪元素画上方渐变。 */
-  border-top: 1.5px solid rgba(255, 255, 255, .8);
-}
 .nav-back {
   background: none; border: 0; padding: 0; cursor: pointer;
   font-size: 13px; color: #fff; font-family: inherit;
@@ -1172,21 +1159,12 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, .22); border: 1px solid rgba(255, 255, 255, .35); color: #fff;
 }
 .d-st.s-finished { background: rgba(255, 255, 255, .16); }
-.d-meta { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
-.hero-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #fff; opacity: .96; }
 .hero-line span { min-width: 0; }
-.d-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.d-court {
-  flex-shrink: 0; font-size: 10.5px; font-weight: 700;
-  background: rgba(255, 255, 255, .22); border-radius: 6px; padding: 1px 6px;
-}
 .detail-desc {
   margin: 12px 12px 0; padding: 10px 12px; font-size: 12.5px; color: #5b626d;
   background: rgba(255, 255, 255, .8); border-radius: 12px; line-height: 1.55;
 }
 .reg-countdown { text-align: center; color: #ff976a; font-size: 14px; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
-.info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .info-head h2 { font-size: 18px; font-weight: 700; }
 .info-desc { color: #666; font-size: 13px; margin-bottom: 12px; }
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }

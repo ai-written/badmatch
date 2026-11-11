@@ -47,6 +47,10 @@
   background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
 }
 
+/* 浮层里如果每个块自己带左右外边距（如 .info-card / .scoreboard），
+   浮层就不再自己加左右内边距，否则两边会多出 12px */
+.ui-sheet--flush { padding-left: 0; padding-right: 0; }
+
 .ui-card {
   background: #fff;
   border-radius: 18px;

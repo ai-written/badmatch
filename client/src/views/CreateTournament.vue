@@ -8,7 +8,7 @@
       </div>
     </AppHero>
 
-    <div class="create-sheet">
+    <div class="ui-sheet ui-sheet--flush">
 
     <van-form @submit="onSubmit" class="create-form">
       <van-cell-group inset>
@@ -743,16 +743,6 @@ onMounted(async () => {
 }
 .mode-chip.on { color: #fff; background: #4a7ab0; border-color: #4a7ab0; }
 
-/* ---- 浮层：头图压上来（全站统一，详见 assets/ui.css） ---- */
-.create-sheet {
-  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #f4f9ff; padding-top: 16px;
-}
-.create-sheet::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
-  margin-top: -14px; pointer-events: none;
-  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
-}
 
 /* 根元素复用了 main.css 的 .page-container（灰底），这里改成与浮层同色，
    否则浮层下面会露出一条灰带 */

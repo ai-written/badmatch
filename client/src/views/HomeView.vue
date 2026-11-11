@@ -15,7 +15,7 @@
             </div>
           </AppHero>
 
-          <div class="home-sheet">
+          <div class="ui-sheet">
             <van-list
               v-model:loading="loading"
               :finished="finished"
@@ -251,26 +251,7 @@ async function onRefresh() {
 .brand-add:active { background: rgba(255, 255, 255, .3); }
 
 /* ---- 内容浮层：压住头图底部圆角 ---- */
-.home-sheet {
-  position: relative;
-  /* 负 margin 把头图的波浪盖住一截，圆角够大才有"卡片浮起"的感觉 */
-  margin-top: -28px; border-radius: 28px 28px 0 0;
-  /* 很浅的蓝白（不是纯白）：白卡要靠"底色微蓝 + 阴影"浮起来，
-     纯白底 + 描边会把层次压平，和设计稿差很远 */
-  background: #f4f9ff;
-  padding: 16px 12px 0;
-  /* 压在图上的那道边：一条极淡的亮边 + 一点向上的阴影，接缝才不会糊成一条直线 */
-  /* 只往上投影：box-shadow 带模糊会向下也漏出一截，内容短时就在浮层下缘
-     露出一条横向色带（看着像"列表底部多了个灰条"）。改用伪元素画上方渐变。 */
-  border-top: 1.5px solid rgba(255, 255, 255, .8);
-}
-
 /* ---- 赛事卡 ---- */
-.home-sheet::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
-  margin-top: -14px; pointer-events: none;
-  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
-}
 .t-card {
   display: flex; align-items: stretch; gap: 11px;
   background: #fff; border-radius: 18px; padding: 14px;

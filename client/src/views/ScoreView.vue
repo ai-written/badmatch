@@ -10,7 +10,7 @@
       </div>
     </AppHero>
 
-    <div class="score-sheet">
+    <div class="ui-sheet ui-sheet--flush">
 
     <van-loading v-if="!match && !loadFailed" class="loading" />
     <div v-else-if="!match && loadFailed" class="load-failed">
@@ -873,9 +873,11 @@ onUnmounted(() => {
 .load-failed p { margin: 0; }
 .load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px !important; }
 /* 导航栏中间：场次（耗时）。用等宽数字，避免计时跳秒时标题左右抖动 */
-.nav-title { font-variant-numeric: tabular-nums; }
+/* 标题在头图里（类名 .title）：超时变红与等宽数字都跟着改过来，
+   否则计时超过阈值时不再变红（改版时漏掉的） */
+.title { font-variant-numeric: tabular-nums; }
 /* 比赛超过最长时长（多半忘记结束）时用醒目色提示 */
-.nav-title.overdue { color: #ee0a24; }
+.title.overdue { color: #ee0a24; }
 /* 导航栏右侧的积分榜入口 */
 .nav-rank { font-size: 14px; color: #1989fa; }
 
@@ -950,14 +952,4 @@ onUnmounted(() => {
 .no-role { padding: 60px 20px; text-align: center; }
 .no-role p { color: #999; font-size: 14px; margin-top: 16px; }
 
-/* ---- 浮层：头图压上来（全站统一，详见 assets/ui.css） ---- */
-.score-sheet {
-  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #f4f9ff; padding-top: 16px;
-}
-.score-sheet::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
-  margin-top: -14px; pointer-events: none;
-  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
-}
 </style>

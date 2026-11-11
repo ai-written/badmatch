@@ -14,7 +14,7 @@
           <div class="hero-sub rank-kind">🏆 双打胜率</div>
         </AppHero>
 
-        <div class="rank-sheet">
+        <div class="ui-sheet">
           <van-loading v-if="!ranking" class="loading" />
           <template v-else>
             <div class="rank-card">
@@ -295,21 +295,6 @@ onUnmounted(closeShare)
 .rank-kind { font-size: 11.5px; margin-top: 6px; }
 
 /* ---- 白色浮层 ---- */
-.rank-sheet {
-  position: relative;
-  margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #f4f9ff;
-  padding: 16px 12px 12px;
-  /* 只往上投影：box-shadow 带模糊会向下也漏出一截，内容短时就在浮层下缘
-     露出一条横向色带（看着像"列表底部多了个灰条"）。改用伪元素画上方渐变。 */
-  border-top: 1.5px solid rgba(255, 255, 255, .8);
-}
-
-.rank-sheet::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
-  margin-top: -14px; pointer-events: none;
-  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
-}
 .rank-card {
   background: #fff; border-radius: 18px; padding: 8px 8px 6px;
   box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
