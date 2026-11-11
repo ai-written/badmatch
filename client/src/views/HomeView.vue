@@ -274,48 +274,36 @@ async function onRefresh() {
 .t-card:active { background: #fafcff; }
 
 /* 左：日期块（状态色下划线） */
-/* 日期做成一块浅蓝"色块"（设计稿里就是一块实体，光靠文字会显得左边空）。
-   块里那层"柔光"是两块模糊渐变叠出来的（不用图片）：
-   ::before 左下角一团白色柔光，::after 一道斜向光带，
-   再配一条底部内高光，看起来才有那种微微凸起的玻璃感。 */
+/* 日期做成一块"色块"：浅蓝紫底 + 一个**边界清晰**的白色大圆弧压在左上。
+   设计稿里右下角那抹浅蓝就是底色露出来的部分，交界是一条圆弧（不是模糊光效）。
+   圆的位置是照着放大 3 倍的设计稿量出来的：圆弧从右边缘约 45% 高处下来，
+   到底边约 35% 处收口。外面再套一圈白色柔光（box-shadow）当过渡。 */
 .t-date {
   position: relative; overflow: hidden;
   width: 78px; flex-shrink: 0;
-  background: linear-gradient(165deg, #f6faff 0%, #e9f1fd 100%);
-  border-radius: 15px; padding: 9px 0 10px;
+  background: linear-gradient(160deg, #eaf1fd 0%, #dde8fb 100%);
+  border-radius: 16px; padding: 9px 0 10px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  box-shadow: inset 0 -7px 12px rgba(255, 255, 255, .95), inset 0 1px 0 rgba(255, 255, 255, .9),
-              0 1px 3px rgba(17, 45, 90, .05);
+  box-shadow: 0 1px 3px rgba(17, 45, 90, .05), inset 0 1px 0 rgba(255, 255, 255, .9);
 }
+/* 白块用「硬边圆」画：圆心与半径写死 px，不随块高变化 —— 之前用百分比，
+   块的实际高度比估计的矮，圆按比例放大后把整块盖成了纯白。
+   硬边 = 设计稿里那条清晰的圆弧分界。 */
 .t-date::before {
-  /* 左上那团白：像一块被磨砂的白色圆角片盖在上半部 */
-  content: ""; position: absolute; left: -34%; top: -46%;
-  width: 156%; aspect-ratio: 1; border-radius: 50%;
-  background: radial-gradient(circle at 50% 50%,
-    rgba(255, 255, 255, .9) 0%, rgba(255, 255, 255, .68) 40%,
-    rgba(255, 255, 255, .26) 62%, rgba(255, 255, 255, 0) 78%);
-  filter: blur(6px);
-  pointer-events: none;
-}
-.t-date::after {
-  /* 右下角那抹浅蓝（斜向分界就是它和白块的交界） */
-  content: ""; position: absolute; right: -26%; bottom: -58%;
-  width: 126%; aspect-ratio: 1; border-radius: 50%;
-  background: radial-gradient(circle at 50% 50%,
-    rgba(206, 224, 252, .8) 0%, rgba(208, 226, 252, .42) 52%, rgba(208, 226, 252, 0) 76%);
-  filter: blur(8px);
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(circle 144px at -30px -65px,
+    #ffffff 0, #ffffff 143px, rgba(255, 255, 255, 0) 144px);
   pointer-events: none;
 }
 .t-date > * { position: relative; z-index: 1; }
 .t-date b { font-size: 15px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
 .t-date i { font-style: normal; font-size: 11.5px; color: #8a94a6; margin-top: 4px; }
+/* 状态色下划线：报名中蓝 / 进行中绿 / 已结束灰 */
 .t-bar { width: 20px; height: 3px; border-radius: 2px; margin-top: 7px; background: #1677e0; }
 .t-card.done .t-date b { color: #5b626d; }
 .t-card.done .t-bar { background: #cfd6e0; }
 .t-card.live .t-bar { background: #0aa054; }
 .t-card.soon .t-bar { background: #e8790b; }
-
-/* 色块与正文之间那条竖线 */
 .t-main { flex: 1; min-width: 0; padding-left: 12px; border-left: 1px solid #eef3fa; }
 .t-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .t-title {
