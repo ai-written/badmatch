@@ -420,8 +420,10 @@ async function scenarioLayout(page) {
   await page.ev(`localStorage.removeItem('schedule-filter:2'); true`)
 
   // 基线＝改动前的实测值，改布局时要么保持、要么同步改这里（改这里就要在 PR 里说明）
+  // 2026-11 UI 改版说明：「赛事详情」由 10 改成 0 —— 头部从 van-nav-bar + 白色 info-card
+  // 换成了渐变头（AppHero），内容直接贴着滚动容器顶开始。
   const baseline = [
-    ['首页', '/', 0], ['赛事详情', '/tournament/2', 10], ['对阵表', '/tournament/2/schedule', 12],
+    ['首页', '/', 0], ['赛事详情', '/tournament/2', 0], ['对阵表', '/tournament/2/schedule', 12],
     ['积分榜', '/tournament/2/rankings', 0], ['我的', '/profile', 0],
     ['站内消息', '/notifications', 0], ['管理面板', '/admin', 12],
   ]
@@ -1932,7 +1934,8 @@ async function scenarioAuthGuard(page) {
   await page.goto('/tournament/2/rankings', 2200)
   assert('登录后能正常打开积分榜',
     (await page.ev('location.pathname')) === '/tournament/2/rankings', await page.ev('location.pathname'))
-  const title = await page.ev(`(document.querySelector('.van-nav-bar__title')?.textContent || '').trim()`)
+  // 2026-11 UI 改版：头部换成渐变头（AppHero），标题不再是 .van-nav-bar__title
+  const title = await page.ev(`(document.querySelector('.nav-title')?.textContent || '').trim()`)
   assert('页面标题是「积分榜」', title === '积分榜', title)
 }
 
@@ -1996,7 +1999,8 @@ async function scenarioScheduledRegistration(page) {
 
   // ---- B) 未开放时：详情页锁住报名并显示倒计时 ----
   await page.goto('/tournament/2', 2400)
-  const tag = await page.ev(`(document.querySelector('.van-tag')?.textContent || '').trim()`)
+  // 2026-11 UI 改版：状态标签由 van-tag 换成头图里的胶囊（.d-st）
+  const tag = await page.ev(`(document.querySelector('.d-st')?.textContent || '').trim()`)
   assert('状态标签显示「即将开放」', tag === '即将开放', tag)
   const countdown = await page.ev(`(document.querySelector('.reg-countdown')?.textContent || '').trim()`)
   assert('显示「距报名开放还有 …」倒计时', countdown.startsWith('距报名开放还有'), countdown)

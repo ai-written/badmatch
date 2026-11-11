@@ -1,19 +1,5 @@
 <template>
   <div class="detail-page vh-page">
-    <van-nav-bar title="赛事详情" left-text="返回" left-arrow @click-left="goBack">
-      <template #right>
-        <!-- 分享海报：报名中用来说服球友报名，进行中用来把赛程/积分榜发出去。
-             删除入口：超管任意状态都能删，创建者/管理员只限报名中（与后端 assert_can_delete 一致）
-             编辑入口：房主/管理员/超管，且只限报名中（与后端 assert_can_edit 一致）——
-             开赛后赛程已按当时人数排好，改人数/名称不会让赛程跟着变 -->
-        <span class="nav-right">
-          <van-icon v-if="canSharePoster" name="share-o" size="19" @click="openPoster" />
-          <van-icon v-if="canEdit" name="edit" size="19" @click="openEdit" />
-          <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
-        </span>
-      </template>
-    </van-nav-bar>
-
     <div class="detail-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
@@ -25,11 +11,33 @@
       <van-button size="small" round plain type="primary" @click="goBack">返回</van-button>
     </div>
     <template v-else>
-      <div class="info-card">
-        <div class="info-head">
-          <h2>{{ tournament.title }}</h2>
-          <van-tag :type="statusType" size="medium" round>{{ tournament.status === 'open' ? (openLocked ? '即将开放' : '报名中') : tournament.status === 'ongoing' ? '进行中' : '已结束' }}</van-tag>
+      <!-- 头图：导航 + 赛事名 + 关键信息（原先是一张白色 info-card，信息一致，
+           只是搬到了渐变上，并把"已结束"这类状态做成半透明胶囊） -->
+      <AppHero :height="132">
+        <div class="detail-nav">
+          <button class="nav-back" @click="goBack">‹ 返回</button>
+          <span class="nav-title">赛事详情</span>
+          <!-- 分享海报：报名中用来说服球友报名，进行中用来把赛程/积分榜发出去。
+               删除入口：超管任意状态都能删，创建者/管理员只限报名中（与后端 assert_can_delete 一致）
+               编辑入口：房主/管理员/超管，且只限报名中（与后端 assert_can_edit 一致）——
+               开赛后赛程已按当时人数排好，改人数/名称不会让赛程跟着变 -->
+          <span class="nav-right">
+            <van-icon v-if="canSharePoster" name="share-o" size="19" @click="openPoster" />
+            <van-icon v-if="canEdit" name="edit" size="19" @click="openEdit" />
+            <van-icon v-if="canDelete" name="delete-o" size="20" @click="doDelete" />
+          </span>
         </div>
+
+        <div class="detail-title">
+          <span class="hero-title d-name">{{ tournament.title }}</span>
+          <span class="d-st" :class="`s-${tournament.status}`">{{ tournament.status === 'open' ? (openLocked ? '即将开放' : '报名中') : tournament.status === 'ongoing' ? '进行中' : '已结束' }}</span>
+        </div>
+
+      </AppHero>
+
+      <!-- 赛事信息白卡：放在渐变**下面**而不是压在上面 —— 图的底部是高光浅蓝，
+           白字压上去对比度只有 2 左右，读起来很吃力 -->
+      <div class="info-card">
         <p class="info-desc" v-if="tournament.description">{{ tournament.description }}</p>
         <div class="info-grid">
           <div class="ig-item"><van-icon name="location-o" /><span>{{ tournament.location || '待定' }}</span></div>
@@ -37,10 +45,12 @@
           <div class="ig-item"><van-icon name="clock-o" /><span>{{ fmtDateTime(tournament.start_date, tournament.end_date) }}</span></div>
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
-          <div class="ig-item" v-if="isCourtFirst"><van-icon name="clock-o" /><span>优先场地（打完一场自动排下一场）</span></div>
+          <div class="ig-item" v-if="isCourtFirst"><van-icon name="sync" /><span>边打边排</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>
+
+      <p class="detail-desc" v-if="tournament.description">{{ tournament.description }}</p>
 
       <div class="action-block" v-if="tournament.status === 'open'">
         <div v-if="openLocked" class="reg-countdown">距报名开放还有 {{ countdownText }}</div>
@@ -301,6 +311,7 @@ import { copyText } from '@/utils/clipboard'
 import { renderSignupPoster, POSTER_FILE } from '@/utils/poster'
 import ShareImageOverlay from '@/components/ShareImageOverlay.vue'
 import RankHistoryChart from '@/components/RankHistoryChart.vue'
+import AppHero from '@/components/AppHero.vue'
 import { detectIsIOS, isWeChatUA } from '@/utils/shareEnv'
 import { showToast, showConfirmDialog, showLoadingToast, showFailToast } from 'vant'
 
@@ -1100,10 +1111,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.detail-page { display: flex; flex-direction: column; background: #f5f6f8; }
+.detail-page { display: flex; flex-direction: column; background: #eef4fd; }
 .detail-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; }
+.pull-inner { padding-bottom: 60px; background: linear-gradient(180deg, #f7fbff 0%, #eef4fd 100%); }
 .stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .load-failed {
@@ -1112,7 +1123,49 @@ onUnmounted(() => {
 }
 .load-failed p { margin: 0; }
 .load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px !important; }
-.info-card { margin: 10px 12px; padding: 16px; background: #fff; border-radius: 10px; }
+/* ---- 赛事信息白卡（渐变下面） ---- */
+.info-card {
+  margin: 10px 12px; padding: 14px; background: #fff; border-radius: 16px;
+  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+}
+.info-desc { color: #5b626d; font-size: 12.5px; margin-bottom: 12px; line-height: 1.55; }
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; }
+.ig-item { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: #5b626d; min-width: 0; }
+.ig-item .van-icon { font-size: 13px; flex-shrink: 0; color: #8a94a6; }
+.ig-item span { overflow: hidden; text-overflow: ellipsis; }
+.info-grid .ig-item:first-child { grid-column: 1 / -1; }
+
+/* ---- 头图内排版 ---- */
+.detail-nav { display: flex; align-items: center; justify-content: space-between; padding-top: 2px; }
+.nav-back {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 13px; color: #fff; font-family: inherit;
+}
+.nav-title { font-size: 16px; font-weight: 700; letter-spacing: .3px; text-shadow: 0 1px 3px rgba(8, 44, 96, .26); }
+.detail-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; }
+.d-name {
+  font-size: 22px; font-weight: 800; letter-spacing: -.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.d-st {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 800; letter-spacing: .2px;
+  padding: 3px 9px; border-radius: 8px;
+  background: rgba(255, 255, 255, .22); border: 1px solid rgba(255, 255, 255, .35); color: #fff;
+}
+.d-st.s-finished { background: rgba(255, 255, 255, .16); }
+.d-meta { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.hero-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #fff; opacity: .96; }
+.hero-line span { min-width: 0; }
+.d-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d-court {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700;
+  background: rgba(255, 255, 255, .22); border-radius: 6px; padding: 1px 6px;
+}
+.detail-desc {
+  margin: 12px 12px 0; padding: 10px 12px; font-size: 12.5px; color: #5b626d;
+  background: rgba(255, 255, 255, .8); border-radius: 12px; line-height: 1.55;
+}
 .reg-countdown { text-align: center; color: #ff976a; font-size: 14px; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
 .info-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .info-head h2 { font-size: 18px; font-weight: 700; }
@@ -1144,7 +1197,16 @@ onUnmounted(() => {
 .empty-hint { font-size: 13px; color: #ccc; text-align: center; padding: 10px 0; }
 /* 追加比赛弹层里的说明：说清为什么只能按倍数追加，以及不会动已有比赛 */
 .add-hint { margin: 12px 16px; font-size: 12px; color: #969799; line-height: 1.6; }
-.nav-block { margin: 8px 12px; }
+/* 对阵表 / 积分榜两个入口：做成一张左右分栏的白卡（与首页卡片同一套圆角与阴影） */
+.nav-block {
+  margin: 10px 12px; border-radius: 16px; overflow: hidden;
+  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+}
+.nav-block :deep(.van-grid) { border-radius: 16px; overflow: hidden; }
+.nav-block :deep(.van-grid-item__content) { padding: 16px 8px; background: #fff; }
+.nav-block :deep(.van-grid-item__content::after) { border-color: #f1f5fb; }
+.nav-block :deep(.van-grid-item__icon) { color: #1677e0; font-size: 24px; }
+.nav-block :deep(.van-grid-item__text) { color: #46505f; font-weight: 600; margin-top: 6px; }
 /* 导航栏右侧可能同时有「分享海报」和「删除」两个图标，拉开间距免得点错 */
 .nav-right { display: inline-flex; align-items: center; gap: 14px; }
 .creator-block { padding: 10px 12px; }

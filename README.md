@@ -623,6 +623,24 @@ docker compose -f docker-compose.prod.yml logs client | grep 'blocked=1'   # 扫
 
 > 手打错的地址（未匹配任何路由）会兜底跳回首页；未登录时先进登录页，登录后落到首页。
 
+## 界面风格（2026-11 改版）
+
+首页 / 赛事详情 / 积分榜统一成「渐变头 + 悬浮白卡」：
+
+- 头图是 `client/public/hero/hero.webp`（1391×500，27 KB）+ `hero.jpg` 兜底（21 KB）。
+  图里**不含任何文字/图标**（原稿上的 logo、站名、加号都是抠掉补平的），
+  所以站名、加号按钮、统计全是真 DOM —— 可选中、可点、放大不糊。
+- 头图按**原始比例**铺满顶部、不做 `cover` 裁切：`cover` 会把左右裁掉，
+  羽毛球只剩半个。393 宽时图的自然高度约 141px，头图高度不低于它就整只球可见。
+- 用 `<picture>` 给 WebP + JPEG 两版：老 iOS（<14）的 WebView 不认 WebP，
+  而 CSS `background-image` 回落不掉，只有 `<img>` 才能。
+- 顶部叠一层很淡的深蓝（`hero-scrim`）：白字要压在图最亮的那段蓝上时才读得清，
+  光靠 text-shadow 不够。压暗只覆盖上半部分，下半部分美术保持鲜亮。
+- 组件在 `components/AppHero.vue`，换季换图只替换那两个素材文件，不用改代码。
+- 分区排序（首页）：进行中 → 报名中 → 已结束，同组按开赛时间排（未开始的升序、
+  已结束的降序）。只在**已加载的列表内**排序 —— 接口按 `created_at` 分页，
+  前端没法假装全局有序；要全局有序得给接口加 `sort` 参数。
+
 ## 移动端性能优化
 
 - **vendor 分包**：构建按 vue/vant/axios 拆分稳定 chunk，配合 `/assets/` 30 天 immutable 缓存，发版只重下业务代码

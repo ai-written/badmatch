@@ -1,56 +1,61 @@
 <template>
   <div class="rank-page vh-page">
-    <van-nav-bar title="积分榜" left-text="返回" left-arrow @click-left="goBack">
-      <template #right>
-        <van-icon name="share-o" size="20" class="share-btn" @click="openShare" />
-      </template>
-    </van-nav-bar>
-
     <div class="rank-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-    <van-loading v-if="!ranking" class="loading" />
-    <template v-else>
-      <div class="rank-head">
-        <h3>{{ ranking.tournament_title }}</h3>
-        <span class="sub">双打胜率</span>
-      </div>
-
-      <div class="rank-table">
-        <div
-          v-for="p in visibleRankings"
-          :key="p.user_id"
-          class="rank-row"
-          :class="{ active: p.user_id === auth.user?.id, dropped: !p.is_active }"
-        >
-          <span class="col-rank">
-            <template v-if="p.is_active && p.rank === 1">🥇</template>
-            <template v-else-if="p.is_active && p.rank === 2">🥈</template>
-            <template v-else-if="p.is_active && p.rank === 3">🥉</template>
-            <template v-else>{{ p.is_active ? p.rank : '-' }}</template>
-          </span>
-          <div class="col-player">
-            <van-image lazy-load round width="28" height="28" :src="p.avatar || defaultAvatar" />
-            <span class="p-name">{{ p.username }}</span>
+        <!-- 头图跟着内容滚：标题/副标题在渐变上，表格在下面的白色浮层里 -->
+        <AppHero :height="156">
+          <div class="rank-nav">
+            <button class="nav-back" @click="goBack">‹ 返回</button>
+            <span class="nav-title">积分榜</span>
+            <van-icon name="share-o" size="19" class="share-btn" @click="openShare" />
           </div>
-          <!-- 胜/负两个数字各自可点：看「我赢/输的那几场，和谁搭挡、对手是谁」。
-               0 场的那个数字不可点（点开只会是空列表） -->
-          <span class="col-wl">
-            <em
-              class="wl-win"
-              :class="{ tappable: canOpen(p) }"
-              @click.stop="openMatches(p, 'win')"
-            >{{ p.matches_won }}</em><span class="wl-dash">-</span><em
-              class="wl-lose"
-              :class="{ tappable: canOpen(p) }"
-              @click.stop="openMatches(p, 'lose')"
-            >{{ p.matches_lost }}</em>
-          </span>
-          <span class="col-diff" :class="p.point_diff >= 0 ? 'positive' : 'negative'">{{ p.point_diff > 0 ? '+' : '' }}{{ p.point_diff }}</span>
-          <span class="col-rate">{{ winRate(p) }}%</span>
+          <div class="hero-title rank-name">{{ ranking?.tournament_title || '积分榜' }}</div>
+          <div class="hero-sub rank-kind">🏆 双打胜率</div>
+        </AppHero>
+
+        <div class="rank-sheet">
+          <van-loading v-if="!ranking" class="loading" />
+          <template v-else>
+            <div class="rank-card">
+              <div class="rank-head">
+                <span>排名</span><span>队员</span><span>比分</span><span>净胜</span><span>胜率</span>
+              </div>
+              <div
+                v-for="p in visibleRankings"
+                :key="p.user_id"
+                class="rank-row"
+                :class="{ active: p.user_id === auth.user?.id, dropped: !p.is_active }"
+              >
+                <span class="col-rank">
+                  <template v-if="p.is_active && p.rank === 1">🥇</template>
+                  <template v-else-if="p.is_active && p.rank === 2">🥈</template>
+                  <template v-else-if="p.is_active && p.rank === 3">🥉</template>
+                  <template v-else>{{ p.is_active ? p.rank : '-' }}</template>
+                </span>
+                <div class="col-player">
+                  <van-image lazy-load round width="26" height="26" :src="p.avatar || defaultAvatar" />
+                  <span class="p-name">{{ p.username }}</span>
+                </div>
+                <!-- 胜/负两个数字各自可点：看「我赢/输的那几场，和谁搭挡、对手是谁」。
+                     0 场的那个数字不可点（点开只会是空列表） -->
+                <span class="col-wl">
+                  <em
+                    class="wl-win"
+                    :class="{ tappable: canOpen(p) }"
+                    @click.stop="openMatches(p, 'win')"
+                  >{{ p.matches_won }}</em><span class="wl-dash">-</span><em
+                    class="wl-lose"
+                    :class="{ tappable: canOpen(p) }"
+                    @click.stop="openMatches(p, 'lose')"
+                  >{{ p.matches_lost }}</em>
+                </span>
+                <span class="col-diff" :class="p.point_diff >= 0 ? 'positive' : 'negative'">{{ p.point_diff > 0 ? '+' : '' }}{{ p.point_diff }}</span>
+                <span class="col-rate">{{ winRate(p) }}%</span>
+              </div>
+            </div>
+          </template>
         </div>
-      </div>
-    </template>
       </div>
     </van-pull-refresh>
     </div>
@@ -107,6 +112,7 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
 import { buildRankDetail } from '@/utils/rankDetail'
+import AppHero from '@/components/AppHero.vue'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -271,43 +277,77 @@ onUnmounted(closeShare)
 </script>
 
 <style scoped>
-.rank-page { display: flex; flex-direction: column; background: #f0f2f5; }
+.rank-page { display: flex; flex-direction: column; background: #eef4fd; }
 .rank-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; }
-.loading { display: flex; justify-content: center; margin-top: 100px; }
-.rank-head { padding: 14px 16px 8px; }
-.rank-head h3 { font-size: 17px; font-weight: 700; }
-.sub { font-size: 12px; color: #999; }
+.pull-inner { padding-bottom: var(--tabbar-reserve); }
+.loading { display: flex; justify-content: center; margin-top: 80px; }
 
-.rank-table { margin: 0 12px; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.04); }
-.rank-row {
-  display: flex; align-items: center; padding: 12px 14px;
-  border-bottom: 1px solid #f5f5f5;
+/* ---- 头图里的导航与标题 ---- */
+.rank-nav { display: flex; align-items: center; justify-content: space-between; padding-top: 4px; }
+.nav-back {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 13px; color: #fff; font-family: inherit;
 }
-.rank-row:last-child { border-bottom: none; }
-.rank-row.active { background: #e8f5e9; }
-.rank-row.dropped { opacity: .45; background: #fafafa; }
+.nav-title { font-size: 16px; font-weight: 700; letter-spacing: .3px; text-shadow: 0 1px 3px rgba(8, 44, 96, .26); }
+.share-btn { color: #fff; padding: 2px; }
+.rank-name { font-size: 21px; font-weight: 800; letter-spacing: -.4px; margin-top: 14px; }
+.rank-kind { font-size: 11.5px; margin-top: 6px; }
 
-.col-rank { width: 22px; font-weight: 700; font-size: 15px; color: #333; text-align: center; flex-shrink: 0; }
-.col-player { flex: 1.5; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.p-name { font-size: 12px; color: #333; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-wl { flex: 1; text-align: center; font-size: 15px; color: #666; }
-.wl-win { font-style: normal; color: #e74c3c; font-weight: 600; }
+/* ---- 白色浮层 ---- */
+.rank-sheet {
+  margin-top: -14px; border-radius: 20px 20px 0 0; min-height: 60vh;
+  background: linear-gradient(180deg, #f7fbff 0%, #eef4fd 100%);
+  padding: 12px;
+}
+.rank-card {
+  background: #fff; border-radius: 16px; padding: 6px 6px 4px;
+  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+}
+
+/* 五列网格：排名 / 队员 / 比分 / 净胜 / 胜率（列宽固定，行与表头共用一套） */
+.rank-head,
+.rank-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 74px 54px 56px;
+  align-items: center;
+}
+.rank-head { font-size: 11px; color: #98a1ad; padding: 6px 6px 8px; }
+.rank-head span:nth-child(n + 3) { text-align: center; }
+
+.rank-row {
+  padding: 9px 6px; border-radius: 12px;
+  position: relative;
+}
+.rank-row + .rank-row::before {
+  content: ""; position: absolute; top: 0; left: 6px; right: 6px; height: 1px; background: #f1f5fb;
+}
+.rank-row.active { background: #eaf9f0; }
+.rank-row.active::before, .rank-row.active + .rank-row::before { background: transparent; }
+.rank-row.dropped { opacity: .5; }
+
+.col-rank {
+  width: 40px; font-weight: 800; font-size: 14px; color: #46505f; text-align: center;
+  flex-shrink: 0; font-variant-numeric: tabular-nums;
+}
+.col-player { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.p-name {
+  font-size: 12.5px; color: #23262b; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.col-wl { text-align: center; font-size: 13px; color: #666; font-variant-numeric: tabular-nums; }
+.wl-win { font-style: normal; color: #0aa054; font-weight: 800; }
 /* 负场保持中性色（不改原有观感），但两个数字都可以点 */
-.wl-lose { font-style: normal; font-weight: 600; color: #666; }
-.wl-dash { margin: 0 1px; }
+.wl-lose { font-style: normal; font-weight: 800; color: #7c8698; }
+.wl-dash { margin: 0 1px; color: #c6cfdd; }
 /* 可点的数字：**不加**静态下划线 —— 15px 的数字上压一条虚线下划线，看起来像多出来的
    短横（"2 -1" 会被看成 "2 --1"）。改用按下时的高亮做反馈，干净且不误导。 */
-.col-wl .tappable { cursor: pointer; padding: 0 2px; border-radius: 4px; }
+.col-wl .tappable { cursor: pointer; padding: 0 2px; border-radius: 5px; }
 .col-wl .tappable:active { background: rgba(0, 0, 0, .07); }
-.col-diff { flex: 1; text-align: center; font-size: 15px; font-weight: 600; }
-.positive { color: #07c160; }
-.negative { color: #e74c3c; }
-.col-rate { flex: 1; text-align: center; font-weight: 700; font-size: 17px; color: #333; }
-
-/* ---- 分享 ---- */
-.share-btn { color: #1989fa; padding: 4px 2px; }
+.col-diff { text-align: center; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.positive { color: #0aa054; }
+.negative { color: #e8483f; }
+.col-rate { text-align: center; font-weight: 800; font-size: 14px; color: #23262b; font-variant-numeric: tabular-nums; }
 
 /* ---- 点胜/负看明细 ---- */
 .picker-toolbar {

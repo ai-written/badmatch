@@ -1,64 +1,78 @@
 <template>
   <div class="home-page vh-page">
-    <!-- Header -->
-    <div class="top-header">
-      <div class="header-title">
-        <img src="/favicon.png" class="header-logo" />
-        <span>爱玩羽社</span>
-      </div>
-      <van-icon name="plus" size="22" class="add-btn" @click="$router.push('/create')" />
-    </div>
-
-    <!-- List -->
     <div class="home-scroll">
-    <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
-      <div class="pull-inner">
-      <van-list
-        v-model:loading="loading"
-        :finished="finished"
-        :error="loadError"
-        error-text="加载失败，点击重试"
-        finished-text="没有更多了"
-        @update:error="loadError = false"
-        @load="onLoad"
-      >
-        <div
-          v-for="t in list"
-          :key="t.id"
-          class="t-card"
-          @click="$router.push(`/tournament/${t.id}`)"
-        >
-          <div class="t-card-left">
-            <div class="t-card-title">{{ t.title }}</div>
-            <div class="t-card-meta">
-              <van-icon name="location-o" size="11" />
-              {{ t.location || '待定' }}
-              <template v-if="t.court_name">
-                <span class="t-card-court">场地号{{ t.court_name }}</span>
-              </template>
+      <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+        <div class="pull-inner">
+          <!-- 头图跟着内容一起滚（与设计稿一致）：下拉刷新手势覆盖整屏 -->
+          <AppHero :height="156">
+            <div class="brand">
+              <img src="/favicon.png" class="brand-logo" alt="" />
+              <div class="brand-txt">
+                <div class="hero-title">爱玩羽社</div>
+                <div class="hero-sub">以球会友 · 快乐运动</div>
+              </div>
+              <button class="brand-add" aria-label="创建赛事" @click="$router.push('/create')">＋</button>
             </div>
-            <div class="t-card-date">{{ fmtDateTime(t.start_date, t.end_date) }}</div>
-          </div>
-          <div class="t-card-right">
-            <van-tag :type="statusType(t.status)" size="medium" round>{{ statusLabel(t) }}</van-tag>
-            <div class="t-card-count">{{ t.registered_count }}/{{ t.max_participants }}</div>
+          </AppHero>
+
+          <div class="home-sheet">
+            <van-list
+              v-model:loading="loading"
+              :finished="finished"
+              :error="loadError"
+              error-text="加载失败，点击重试"
+              finished-text="没有更多了"
+              @update:error="loadError = false"
+              @load="onLoad"
+            >
+              <div
+                v-for="t in sortedList"
+                :key="t.id"
+                class="t-card"
+                :class="statusKey(t)"
+                @click="$router.push(`/tournament/${t.id}`)"
+              >
+                <!-- 左：日期块（日期只在这里出现一次，不再和时间行重复） -->
+                <div class="t-date">
+                  <b>{{ dayLabel(t.start_date) }}</b>
+                  <i>{{ weekLabel(t.start_date) }}</i>
+                  <span class="t-bar" />
+                </div>
+                <div class="t-main">
+                  <div class="t-row">
+                    <div class="t-title">{{ t.title }}</div>
+                    <span class="t-st">{{ statusLabel(t) }}</span>
+                  </div>
+                  <div class="t-meta">
+                    <van-icon name="location-o" size="12" />
+                    <span class="t-loc">{{ t.location || '待定' }}</span>
+                    <span v-if="t.court_name" class="t-court">{{ t.court_name }}</span>
+                  </div>
+                  <div class="t-meta time">
+                    <van-icon name="clock-o" size="12" />
+                    <span>{{ timeLabel(t) }}</span>
+                  </div>
+                </div>
+                <div class="t-count">{{ countLabel(t) }}</div>
+              </div>
+
+              <!-- 首屏就失败时给一个明确的失败态：不要把空列表说成「没有更多了」 -->
+              <div v-if="list.length === 0 && firstLoadFailed" class="home-error">
+                <van-icon name="warning-o" size="20" />
+                <span>加载失败，请下拉重试</span>
+              </div>
+            </van-list>
           </div>
         </div>
-        <!-- 首屏就失败时给一个明确的失败态：不要把空列表说成「没有更多了」 -->
-        <div v-if="list.length === 0 && firstLoadFailed" class="home-error">
-          <van-icon name="warning-o" size="20" />
-          <span>加载失败，请下拉重试</span>
-        </div>
-      </van-list>
-    </div>
-    </van-pull-refresh>
+      </van-pull-refresh>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useTournamentStore } from '@/stores/tournament'
+import AppHero from '@/components/AppHero.vue'
 
 const store = useTournamentStore()
 // 解构 store 的 state 会丢响应式，因此列表用本地 ref 镜像；
@@ -76,7 +90,39 @@ const firstLoadFailed = ref(false)
 // 是否已经发起过首次加载（同步标记，见 onLoad 的说明）
 let firstLoadDone = false
 
-function statusType(s: string) { return s === 'open' ? 'primary' : s === 'ongoing' ? 'success' : 'default' }
+/* ---------------- 排序：进行中 → 报名中 → 已结束 ----------------
+ * 为什么前端排：首页原先按 created_at 倒序，打开就是一片历史记录，最该看的
+ * "下一场能不能报名"被压到下面（截图里一屏 7 条全是已结束）。
+ *
+ * 口径：
+ * - 进行中排最前；报名中按**开赛时间升序**（最近要打的那场在最上面）；
+ * - 已结束按**开赛时间降序**（刚打完的在前，越翻越旧）。
+ * - 只在**已加载的列表内**排序：接口是分页的（按 created_at 分页），前端没法
+ *   假装全局有序。俱乐部一周一场，首屏 20 条通常就覆盖了，够用；
+ *   真要全局有序得给接口加 sort 参数（后端改动，另说）。
+ * - 同一天多场时用 id 兜底，避免刷新后顺序抖动。
+ */
+const GROUP = { ongoing: 0, open: 1, finished: 2 } as const
+function groupOf(t: any) { return GROUP[t.status as keyof typeof GROUP] ?? 3 }
+const sortedList = computed(() => {
+  const arr = [...list.value]
+  arr.sort((a: any, b: any) => {
+    const g = groupOf(a) - groupOf(b)
+    if (g !== 0) return g
+    const da = String(a.start_date || '')
+    const db = String(b.start_date || '')
+    if (da !== db) return a.status === 'finished' ? (da < db ? 1 : -1) : (da < db ? -1 : 1)
+    return a.id - b.id
+  })
+  return arr
+})
+
+function statusKey(s: any) {
+  // 已结束=中性灰；进行中=绿；报名中/未开始=品牌蓝（未开始再用橙色区分）
+  if (s.status === 'finished') return 'done'
+  if (s.status === 'ongoing') return 'live'
+  return isRegLocked(s) ? 'soon' : 'open'
+}
 // 列表上的「未开始」要随时间自己翻转：只在渲染时算一次的话，开放时刻到了之后卡片会
 // 一直停在「未开始」，直到用户下拉刷新。每 30s 触发一次重算（纯本地比较，不发请求）。
 // 注意：列表接口不返回 server_now，这里用的是手机时钟（偏差通常几秒，无感）；
@@ -87,15 +133,39 @@ function isRegLocked(t: any) { return !!t.registration_open_at && new Date(t.reg
 function statusLabel(t: any) { return t.status === 'open' ? (isRegLocked(t) ? '未开始' : '报名中') : t.status === 'ongoing' ? '进行中' : '已结束' }
 onMounted(() => { tickTimer = setInterval(() => { nowTick.value = Date.now() }, 30000) })
 onUnmounted(() => { if (tickTimer) clearInterval(tickTimer) })
+
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-function fmtDateTime(start: string, end: string) {
-  if (!start || !end) return ''
-  const d = new Date(start)
-  const y = d.getFullYear()
-  const m = d.getMonth() + 1
-  const day = d.getDate()
-  const w = WEEKDAYS[d.getDay()]
-  return `${y}年${m}月${day}日(${w}) ${start.slice(11, 16)}~${end.slice(11, 16)}`
+function parse(v: string) { return v ? new Date(v) : null }
+/** 日期块的「11月6日」 */
+function dayLabel(start: string) {
+  const d = parse(start)
+  return d && !isNaN(d.getTime()) ? `${d.getMonth() + 1}月${d.getDate()}日` : ''
+}
+/** 日期块的「周五」 */
+function weekLabel(start: string) {
+  const d = parse(start)
+  return d && !isNaN(d.getTime()) ? WEEKDAYS[d.getDay()] : ''
+}
+/**
+ * 时间行：只写时段，不再重复日期（标题里通常已含 "11月6日"）。
+ * 报名中的再补一句剩余名额——这是用户真正关心的决策信息。
+ */
+function timeLabel(t: any) {
+  const a = String(t.start_date || '').slice(11, 16)
+  const b = String(t.end_date || '').slice(11, 16)
+  if (!a) return ''
+  const span = b ? `${a}–${b}` : a
+  if (t.status === 'open' && !isRegLocked(t)) {
+    const left = Math.max(0, (t.max_participants || 0) - (t.registered_count || 0))
+    return left > 0 ? `${span} · 剩 ${left} 席` : `${span} · 已满`
+  }
+  return span
+}
+/** 右侧人数：报名中/进行中给 "6/8 人"，已结束给 "8 人"（分母对已结束没意义） */
+function countLabel(t: any) {
+  const n = t.registered_count || 0
+  if (t.status === 'finished') return `${n} 人`
+  return `${n}/${t.max_participants || 0} 人`
 }
 
 async function onLoad() {
@@ -153,32 +223,99 @@ async function onRefresh() {
 </script>
 
 <style scoped>
-.home-page { display: flex; flex-direction: column; background: #f5f6f8; }
+.home-page { display: flex; flex-direction: column; background: #eef4fd; }
 .home-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 /* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
 .pull-inner { padding-bottom: var(--tabbar-reserve); }
 
-.header-logo { width: 20px; height: 20px; border-radius: 4px; }
-.top-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px 6px; background: #1989fa;
+/* ---- 头图内容 ---- */
+.brand { display: flex; align-items: center; gap: 11px; padding-top: 6px; }
+.brand-logo {
+  width: 40px; height: 40px; border-radius: 14px; flex-shrink: 0;
+  border: 1.5px solid rgba(255, 255, 255, .8);
+  box-shadow: 0 3px 8px rgba(9, 52, 110, .22);
+  background: #fff;
 }
-.header-title { display: flex; align-items: center; gap: 6px; color: #fff; font-size: 16px; font-weight: 600; }
-.add-btn { color: #fff; }
+.brand-txt { flex: 1; min-width: 0; }
+.hero-title { font-size: 19px; font-weight: 800; letter-spacing: .3px; }
+.hero-sub { font-size: 11px; opacity: .95; margin-top: 4px; letter-spacing: .8px; }
+.brand-add {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  border: 1.5px solid rgba(255, 255, 255, .75);
+  background: rgba(255, 255, 255, .16);
+  color: #fff; font-size: 19px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 0;
+}
+.brand-add:active { background: rgba(255, 255, 255, .3); }
 
-.t-card {
-  display: flex; align-items: center; justify-content: space-between;
-  margin: 8px 12px; padding: 14px; background: #fff; border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+/* ---- 内容浮层：压住头图底部圆角 ---- */
+.home-sheet {
+  margin-top: -14px; border-radius: 20px 20px 0 0;
+  background: linear-gradient(180deg, #f7fbff 0%, #eef4fd 100%);
+  padding: 12px 12px 0; min-height: 60vh;
 }
-.t-card-left { flex: 1; min-width: 0; }
-.t-card-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.t-card-meta { font-size: 12px; color: #999; display: flex; align-items: center; gap: 3px; margin-bottom: 2px; }
-.t-card-date { font-size: 11px; color: #bbb; }
-.t-card-court { font-size: 11px; color: #1989fa; background: #e8f4ff; padding: 0 4px; border-radius: 3px; margin-left: 6px; }
-.t-card-right { text-align: center; flex-shrink: 0; margin-left: 10px; }
-.t-card-count { font-size: 13px; color: #666; margin-top: 4px; }
+
+/* ---- 赛事卡 ---- */
+.t-card {
+  display: flex; align-items: stretch; gap: 11px;
+  background: #fff; border-radius: 16px; padding: 12px;
+  box-shadow: 0 3px 10px rgba(17, 45, 90, .06);
+  margin-bottom: 10px; cursor: pointer;
+}
+.t-card:active { background: #fafcff; }
+
+/* 左：日期块（状态色下划线） */
+.t-date {
+  width: 74px; flex-shrink: 0; padding-right: 9px;
+  border-right: 1px solid #eef2f8;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.t-date b { font-size: 14px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
+.t-date i { font-style: normal; font-size: 11px; color: #8a94a6; margin-top: 3px; }
+.t-bar { width: 22px; height: 3px; border-radius: 2px; margin-top: 8px; background: #1677e0; }
+.t-card.done .t-date b { color: #5b626d; }
+.t-card.done .t-bar { background: #cfd6e0; }
+.t-card.live .t-bar { background: #0aa054; }
+.t-card.soon .t-bar { background: #e8790b; }
+
+.t-main { flex: 1; min-width: 0; }
+.t-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.t-title {
+  font-size: 15px; font-weight: 700; letter-spacing: -.2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.t-card.done .t-title { color: #5b626d; font-weight: 600; }
+.t-st {
+  font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 7px;
+  flex-shrink: 0; letter-spacing: .2px;
+  background: #e8f3ff; color: #1677e0;
+}
+.t-card.done .t-st { background: #f2f4f7; color: #98a1ad; }
+.t-card.live .t-st { background: #eaf9f0; color: #0aa054; }
+.t-card.soon .t-st { background: #fff2e4; color: #e8790b; }
+
+.t-meta {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: #7c8698; margin-top: 6px;
+  min-width: 0;
+}
+.t-meta.time { font-variant-numeric: tabular-nums; }
+.t-loc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-court {
+  font-size: 10.5px; font-weight: 600; color: #1677e0; background: #eaf4ff;
+  border-radius: 6px; padding: 1px 6px; flex-shrink: 0;
+}
+.t-card.done .t-court { color: #8a94a6; background: #f2f4f7; }
+
+.t-count {
+  flex-shrink: 0; align-self: center;
+  font-size: 13px; font-weight: 800; color: #46505f;
+  font-variant-numeric: tabular-nums; padding-left: 2px;
+}
+.t-card.done .t-count { color: #98a1ad; }
+
 .home-error {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   padding: 60px 0; color: #969799; font-size: 13px;
