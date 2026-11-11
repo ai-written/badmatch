@@ -39,10 +39,7 @@
                   <span class="t-bar" />
                 </div>
                 <div class="t-main">
-                  <div class="t-row">
-                    <div class="t-title">{{ t.title }}</div>
-                    <span class="t-st">{{ statusLabel(t) }}</span>
-                  </div>
+                  <div class="t-title">{{ t.title }}</div>
                   <div class="t-meta">
                     <van-icon name="location-o" size="12" />
                     <span class="t-loc">{{ t.location || '待定' }}</span>
@@ -53,7 +50,10 @@
                     <span>{{ timeLabel(t) }}</span>
                   </div>
                 </div>
-                <div class="t-count">{{ countLabel(t) }}</div>
+                <div class="t-side">
+                  <span class="t-st">{{ statusLabel(t) }}</span>
+                  <span class="t-count">{{ countLabel(t) }}</span>
+                </div>
               </div>
 
               <!-- 首屏就失败时给一个明确的失败态：不要把空列表说成「没有更多了」 -->
@@ -223,7 +223,7 @@ async function onRefresh() {
 </script>
 
 <style scoped>
-.home-page { display: flex; flex-direction: column; background: #fff; }
+.home-page { display: flex; flex-direction: column; background: #f6faff; }
 .home-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 /* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
@@ -255,8 +255,10 @@ async function onRefresh() {
   position: relative;
   /* 负 margin 把头图的波浪盖住一截，圆角够大才有"卡片浮起"的感觉 */
   margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #fff;
-  padding: 16px 12px 0; min-height: calc(100vh - 160px);
+  /* 很浅的蓝白（不是纯白）：白卡要靠"底色微蓝 + 阴影"浮起来，
+     纯白底 + 描边会把层次压平，和设计稿差很远 */
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f7fe 100%);
+  padding: 16px 12px 0; min-height: calc(100vh - 150px);
   /* 压在图上的那道边：一条极淡的亮边 + 一点向上的阴影，接缝才不会糊成一条直线 */
   box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
   border-top: 1.5px solid rgba(255, 255, 255, .8);
@@ -265,31 +267,32 @@ async function onRefresh() {
 /* ---- 赛事卡 ---- */
 .t-card {
   display: flex; align-items: stretch; gap: 11px;
-  background: #fff; border-radius: 16px; padding: 12px;
-  border: 1px solid #eef3fa;
-  box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
-  margin-bottom: 10px; cursor: pointer;
+  background: #fff; border-radius: 18px; padding: 14px;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+  margin-bottom: 12px; cursor: pointer;
 }
 .t-card:active { background: #fafcff; }
 
 /* 左：日期块（状态色下划线） */
+/* 日期做成一块浅蓝"色块"（设计稿里就是一块实体，光靠文字会显得左边空） */
 .t-date {
-  width: 74px; flex-shrink: 0; padding-right: 9px;
-  border-right: 1px solid #eef2f8;
-  display: flex; flex-direction: column; justify-content: center;
+  width: 78px; flex-shrink: 0;
+  background: #f1f7ff; border-radius: 14px; padding: 9px 0 10px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
 }
-.t-date b { font-size: 14px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
-.t-date i { font-style: normal; font-size: 11px; color: #8a94a6; margin-top: 3px; }
-.t-bar { width: 22px; height: 3px; border-radius: 2px; margin-top: 8px; background: #1677e0; }
+.t-date b { font-size: 15px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
+.t-date i { font-style: normal; font-size: 11.5px; color: #8a94a6; margin-top: 4px; }
+.t-bar { width: 20px; height: 3px; border-radius: 2px; margin-top: 7px; background: #1677e0; }
 .t-card.done .t-date b { color: #5b626d; }
 .t-card.done .t-bar { background: #cfd6e0; }
 .t-card.live .t-bar { background: #0aa054; }
 .t-card.soon .t-bar { background: #e8790b; }
 
-.t-main { flex: 1; min-width: 0; }
+/* 色块与正文之间那条竖线 */
+.t-main { flex: 1; min-width: 0; padding-left: 12px; border-left: 1px solid #eef3fa; }
 .t-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .t-title {
-  font-size: 15px; font-weight: 700; letter-spacing: -.2px;
+  font-size: 16.5px; font-weight: 700; letter-spacing: -.2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .t-card.done .t-title { color: #5b626d; font-weight: 600; }
@@ -304,7 +307,7 @@ async function onRefresh() {
 
 .t-meta {
   display: flex; align-items: center; gap: 5px;
-  font-size: 12px; color: #7c8698; margin-top: 6px;
+  font-size: 12.5px; color: #7c8698; margin-top: 7px;
   min-width: 0;
 }
 .t-meta.time { font-variant-numeric: tabular-nums; }
@@ -315,10 +318,15 @@ async function onRefresh() {
 }
 .t-card.done .t-court { color: #8a94a6; background: #f2f4f7; }
 
+/* 右侧一列：状态胶囊在上、人数在下（和设计稿一致）。
+   之前把胶囊塞进标题那一行，长标题被挤成"多场地测试 · 12人2…" */
+.t-side {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  flex-shrink: 0; padding-left: 4px;
+}
 .t-count {
-  flex-shrink: 0; align-self: center;
-  font-size: 13px; font-weight: 800; color: #46505f;
-  font-variant-numeric: tabular-nums; padding-left: 2px;
+  font-size: 14px; font-weight: 800; color: #46505f;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .t-card.done .t-count { color: #98a1ad; }
 

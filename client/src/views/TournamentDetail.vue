@@ -1115,10 +1115,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.detail-page { display: flex; flex-direction: column; background: #fff; }
+.detail-page { display: flex; flex-direction: column; background: #f6faff; }
 .detail-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; background: #fff; }
+.pull-inner { padding-bottom: 60px; background: #f6faff; }
 .stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .load-failed {
@@ -1129,12 +1129,12 @@ onUnmounted(() => {
 .load-failed-sub { font-size: 12px; color: #c8c9cc; margin-bottom: 8px !important; }
 /* ---- 赛事信息白卡（渐变下面） ---- */
 .info-card {
-  margin: 0 12px 10px; padding: 14px; background: #fff; border-radius: 16px;
-  border: 1px solid #eef3fa; box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
+  margin: 0 12px 12px; padding: 15px; background: #fff; border-radius: 18px;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
 }
 .info-desc { color: #5b626d; font-size: 12.5px; margin-bottom: 12px; line-height: 1.55; }
-.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; }
-.ig-item { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: #5b626d; min-width: 0; }
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px 12px; }
+.ig-item { display: flex; align-items: center; gap: 5px; font-size: 13px; color: #5b626d; min-width: 0; }
 .ig-item .van-icon { font-size: 13px; flex-shrink: 0; color: #8a94a6; }
 .ig-item span { overflow: hidden; text-overflow: ellipsis; }
 .info-grid .ig-item:first-child { grid-column: 1 / -1; }
@@ -1144,7 +1144,8 @@ onUnmounted(() => {
 /* 头图之后的内容统一上提一截并给大圆角，和首页/积分榜同一个接缝处理 */
 .detail-sheet {
   position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: #fff; padding: 16px 0 0; min-height: calc(100vh - 160px);
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f7fe 100%);
+  padding: 16px 0 0; min-height: calc(100vh - 150px);
   box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
   border-top: 1.5px solid rgba(255, 255, 255, .8);
 }
@@ -1186,8 +1187,8 @@ onUnmounted(() => {
 .ig-item .van-icon { font-size: 13px; flex-shrink: 0; }
 .action-block { padding: 10px 12px; }
 .player-section {
-  margin: 0 12px 10px; padding: 14px; background: #fff; border-radius: 16px;
-  border: 1px solid #eef3fa; box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
+  margin: 0 12px 12px; padding: 15px; background: #fff; border-radius: 18px;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
 }
 .player-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .ph-title { font-size: 15px; font-weight: 600; }
@@ -1213,8 +1214,8 @@ onUnmounted(() => {
 .add-hint { margin: 12px 16px; font-size: 12px; color: #969799; line-height: 1.6; }
 /* 对阵表 / 积分榜两个入口：做成一张左右分栏的白卡（与首页卡片同一套圆角与阴影） */
 .nav-block {
-  margin: 0 12px 10px; border-radius: 16px; overflow: hidden;
-  border: 1px solid #eef3fa; box-shadow: 0 2px 8px rgba(17, 45, 90, .045);
+  margin: 0 12px 12px; border-radius: 18px; overflow: hidden;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
 }
 .nav-block :deep(.van-grid) { border-radius: 16px; overflow: hidden; }
 .nav-block :deep(.van-grid-item__content) { padding: 16px 8px; background: #fff; }
