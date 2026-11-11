@@ -1115,10 +1115,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.detail-page { display: flex; flex-direction: column; background: #f6faff; }
+.detail-page { display: flex; flex-direction: column; background: #f4f9ff; }
 .detail-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
-.pull-inner { padding-bottom: 60px; background: #f6faff; }
+.pull-inner { padding-bottom: 60px; background: #f4f9ff; }
 .stats-popup { overflow: hidden !important; }
 .loading { display: flex; justify-content: center; margin-top: 100px; }
 .load-failed {
@@ -1140,13 +1140,20 @@ onUnmounted(() => {
 .info-grid .ig-item:first-child { grid-column: 1 / -1; }
 
 /* ---- 头图内排版 ---- */
+
+.detail-sheet::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
+  margin-top: -14px; pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
+}
 .detail-nav { display: flex; align-items: center; justify-content: space-between; padding-top: 2px; }
 /* 头图之后的内容统一上提一截并给大圆角，和首页/积分榜同一个接缝处理 */
 .detail-sheet {
   position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
-  background: linear-gradient(180deg, #f8fbff 0%, #f2f7fe 100%);
-  padding: 16px 0 0; min-height: calc(100vh - 150px);
-  box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
+  background: #f4f9ff;
+  padding: 16px 0 0;
+  /* 只往上投影：box-shadow 带模糊会向下也漏出一截，内容短时就在浮层下缘
+     露出一条横向色带（看着像"列表底部多了个灰条"）。改用伪元素画上方渐变。 */
   border-top: 1.5px solid rgba(255, 255, 255, .8);
 }
 .nav-back {

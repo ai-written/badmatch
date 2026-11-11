@@ -277,7 +277,7 @@ onUnmounted(closeShare)
 </script>
 
 <style scoped>
-.rank-page { display: flex; flex-direction: column; background: #f6faff; }
+.rank-page { display: flex; flex-direction: column; background: #f4f9ff; }
 .rank-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: var(--tabbar-reserve); }
@@ -297,11 +297,18 @@ onUnmounted(closeShare)
 /* ---- 白色浮层 ---- */
 .rank-sheet {
   position: relative;
-  margin-top: -28px; border-radius: 28px 28px 0 0; min-height: calc(100vh - 150px);
-  background: linear-gradient(180deg, #f8fbff 0%, #f2f7fe 100%);
+  margin-top: -28px; border-radius: 28px 28px 0 0;
+  background: #f4f9ff;
   padding: 16px 12px 12px;
-  box-shadow: 0 -10px 24px rgba(9, 52, 110, .12);
+  /* 只往上投影：box-shadow 带模糊会向下也漏出一截，内容短时就在浮层下缘
+     露出一条横向色带（看着像"列表底部多了个灰条"）。改用伪元素画上方渐变。 */
   border-top: 1.5px solid rgba(255, 255, 255, .8);
+}
+
+.rank-sheet::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
+  margin-top: -14px; pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
 }
 .rank-card {
   background: #fff; border-radius: 18px; padding: 8px 8px 6px;
