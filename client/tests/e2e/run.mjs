@@ -29,6 +29,8 @@
  *  20 积分榜：点胜/负数字看明细（口径 = 已结束场次、第N场与对阵表一致）
  *  21 赛事详情：点「参赛次数」看跨赛事排名趋势折线图（懒加载、点数 = 参赛次数、
  *     退赛点不连线、点圆点看那一场、返回战绩、超过 24 场默认折叠可展开）
+ *  23 站内消息：已读 / 全部已读 / 点击跳转
+ *  24 我的页：点参赛次数看排名趋势（与详情页那条入口同一组件、另一条取数路径）
  *
  * 说明：接口全部走 Fetch 域 mock（不依赖后端、不写库），所以随时可跑；
  * 后端权限/数据一致性仍靠真接口用例（见 README 的"验证"一节）。
@@ -2554,8 +2556,184 @@ async function scenarioRankHistory(page) {
   assert('再点一次收回 24 个点', (await chartDots()) === 24, await chartDots())
 }
 
+/** 场景 23：站内消息的已读流
+ *
+ * 看点（这条链路以前没有功能级测试，只测过布局基线）：
+ *   1. 未读数来自服务端**全表**统计（不是列表里有没有未读项），头部据此显示
+ *   2. 点消息 → 只发 1 次 /read，未读点消失、头部计数减 1
+ *   3. 已读的消息再点**不再发 /read**（省一次请求，也避免误标）
+ *   4. 「全部已读」→ 1 次 /read-all，计数归零、按钮消失
+ *   5. 带 tournament_id 的消息点击后跳转到该赛事
+ */
+async function scenarioNotificationRead(page) {
+  console.log('23) 站内消息：已读 / 全部已读 / 点击跳转')
+  const me = { id: 1, username: '李祥', avatar: '', gender: 'M', role: 'user', invite_code: '' }
+  const mk = (id, msg, read, tid) => ({
+    id, message: msg, type: 'schedule_changed', is_read: read,
+    tournament_id: tid, created_at: '2026-11-06T21:10:00',
+  })
+  const items = [
+    mk(201, '「11月13日养生局」的赛程已更新，点击查看新的对阵安排。', false, 2),
+    mk(202, '你被指派为第 4 场（2 号场）的裁判，比赛即将开始。', false, null),
+    mk(203, '「11月6日养生局」已结束，积分榜可以看了。', true, 2),
+  ]
+  let unread = 2
+
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/\/notifications\/\d+\/read$/.test(path)) {
+      const id = Number(path.split('/').slice(-2)[0])
+      const n = items.find((x) => x.id === id)
+      if (n && !n.is_read) { n.is_read = true; unread -= 1 }
+      return { ok: true }
+    }
+    if (/\/notifications\/read-all$/.test(path)) {
+      items.forEach((x) => { x.is_read = true }); unread = 0
+      return { ok: true }
+    }
+    if (/\/notifications$/.test(path)) return { items, unread_count: unread, has_more: false }
+    if (/unread-count/.test(path)) return { count: unread }
+    if (/\/registrations$/.test(path)) return []
+    if (/\/tournaments\/2$/.test(path)) {
+      return { id: 2, creator_id: 1, title: '11月13日养生局', location: 'L', status: 'open',
+        max_participants: 8, courts: [], registered_count: 0, cancelled_count: 0,
+        total_matches: null, points_to_win: 11, server_now: '2026-11-06T10:00:00',
+        is_registered: false, created_at: '2026-11-01T09:00:00' }
+    }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/notifications', 2200)
+
+  const cards = () => page.ev(`document.querySelectorAll('.msg').length`)
+  const unreadDots = () => page.ev(`document.querySelectorAll('.msg.unread .dot').length`)
+  const headSub = () => page.ev(`(document.querySelector('.hero-sub')?.textContent || '').trim()`)
+  const readAllBtn = () => page.ev(`!!document.querySelector('.read-all')`)
+  const readPosts = () => page.requests.filter((r) => r.method === 'POST' && /\/read$/.test(r.path))
+  const readAllPosts = () => page.requests.filter((r) => r.method === 'POST' && /read-all$/.test(r.path))
+  const clickMsg = (i) => page.ev(`(() => {
+    const el = document.querySelectorAll('.msg')[${i}]
+    if (!el) return 'NOMSG'
+    el.click(); return 'OK' })()`)
+
+  assert('3 条消息都渲染出来', (await cards()) === 3, await cards())
+  assert('两条未读有未读标记', (await unreadDots()) === 2, await unreadDots())
+  assert('头部显示「2 条未读」', (await headSub()) === '2 条未读', await headSub())
+  assert('有「全部已读」入口', (await readAllBtn()) === true)
+
+  // ---- 点一条未读：发 1 次 /read、标记消失、计数减 1、跳到该赛事 ----
+  page.requests = []
+  assert('点第一条未读消息', (await clickMsg(0)) === 'OK')
+  await sleep(900)
+  const posts1 = readPosts()
+  assert('恰好 1 个 /read 请求', posts1.length === 1, JSON.stringify(posts1.map((p) => p.path)))
+  assert('打给的是被点的那条（id=201）', /\/notifications\/201\/read$/.test(posts1[0]?.path || ''), posts1[0]?.path)
+  assert('点击后跳到对应赛事', (await page.ev('location.pathname')) === '/tournament/2', await page.ev('location.pathname'))
+
+  // ---- 回到消息页：已读的那条再点不再发 /read ----
+  await page.goto('/notifications', 2000)
+  assert('未读标记剩 1 个', (await unreadDots()) === 1, await unreadDots())
+  assert('头部变成「1 条未读」', (await headSub()) === '1 条未读', await headSub())
+  page.requests = []
+  assert('点已读的那条（第 3 条）', (await clickMsg(2)) === 'OK')
+  await sleep(700)
+  assert('已读消息不再发 /read 请求', readPosts().length === 0, JSON.stringify(readPosts().map((p) => p.path)))
+
+  // ---- 全部已读 ----
+  await page.goto('/notifications', 2000)
+  page.requests = []
+  await page.ev(`document.querySelector('.read-all').click(); true`)
+  await sleep(700)
+  assert('恰好 1 个 /read-all 请求', readAllPosts().length === 1, readAllPosts().length)
+  assert('未读标记全部消失', (await unreadDots()) === 0, await unreadDots())
+  assert('头部显示「暂无未读」', (await headSub()) === '暂无未读', await headSub())
+  assert('「全部已读」入口消失', (await readAllBtn()) === false)
+}
+
+/** 场景 24：我的页「参赛次数 → 排名趋势」弹层
+ *
+ * 这条入口是改版时新做的（和赛事详情里的入口共用组件，但取数走的是另一条路径：
+ * /auth/stats/{自己的 id}/history），以前只有详情页那条有测试。
+ * 看点：懒加载、点数与「参赛次数」一致、超过 24 场默认折叠、点圆点看那一场、关闭。
+ */
+async function scenarioProfileRankHistory(page) {
+  console.log('24) 我的页：点参赛次数看排名趋势')
+  const me = { id: 1, username: '张三', avatar: '', gender: 'M', role: 'user', invite_code: 'dd8f168e',
+    email: '', created_at: '2026-10-01T09:00:00' }
+  const RANKS = [6, 5, 8, 4, 3, 7, 2, 4, 1, 5]
+  const history = {
+    user_id: 1, tournaments_played: 30,
+    items: Array.from({ length: 30 }, (_, i) => ({
+      tournament_id: 100 + i,
+      title: `第${i + 1}周`,
+      start_date: `2026-${String(1 + Math.floor(i / 8)).padStart(2, '0')}-${String(1 + (i % 8) * 3).padStart(2, '0')}T19:00:00`,
+      status: 'finished', rank: RANKS[i % RANKS.length], total_players: 8,
+      dropped_players: 0, matches_played: 7, matches_won: 5, is_active: true,
+    })),
+  }
+  await page.enableMock((path) => {
+    if (/auth\/me$/.test(path)) return me
+    if (/auth\/stats\/1\/history/.test(path)) return history
+    if (/auth\/stats/.test(path)) return { total_matches: 98, total_wins: 61, win_rate: 62.2, tournaments_played: 30 }
+    if (/unread-count/.test(path)) return { count: 0 }
+    if (/has-users/.test(path)) return { exists: true }
+    return {}
+  })
+  await page.setToken()
+  await page.goto('/profile', 2400)
+
+  const cellText = () => page.ev(`(() => {
+    const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes('参赛次数'))
+    return ((cell && cell.textContent) || '').replace(/\s+/g, ' ').trim() })()`)
+  const clickCell = () => page.ev(`(() => {
+    const cell = [...document.querySelectorAll('.van-cell')].find(c => (c.textContent || '').includes('参赛次数'))
+    if (!cell) return 'NOCELL'
+    cell.click(); return 'OK' })()`)
+  const historyReqs = () => page.requests.filter((r) => /auth\/stats\/1\/history$/.test(r.path))
+  const dots = () => page.ev(`document.querySelectorAll('.chart-svg .dot').length`)
+  const moreBtn = () => page.ev(`(document.querySelector('.more-btn')?.textContent || '').trim()`)
+  const chartSub = () => page.ev(`(document.querySelector('.chart-sub')?.textContent || '').trim()`)
+
+  const t0 = await cellText()
+  assert('我的页显示参赛次数 30', t0.includes('参赛次数') && t0.includes('30'), t0)
+  assert('还没点就不请求趋势接口（懒加载）', (await historyReqs()).length === 0)
+
+  assert('点「参赛次数」', (await clickCell()) === 'OK')
+  await sleep(900)
+  assert('第一次点才请求 history', (await historyReqs()).length === 1,
+    JSON.stringify((await page.requests).map((p) => p.path)))
+  assert('折线图画出来了', (await page.ev(`!!document.querySelector('.chart-svg')`)) === true)
+  assert('超过 24 场默认只画 24 个点', (await dots()) === 24, await dots())
+  assert('副标题写明「共 30 场 · 显示最近 24 场」', (await chartSub()) === '共 30 场 · 显示最近 24 场', await chartSub())
+  assert('给出「查看全部 30 场」入口', (await moreBtn()) === '查看全部 30 场', await moreBtn())
+
+  await page.ev(`document.querySelector('.more-btn').click(); true`)
+  await sleep(500)
+  assert('展开后画出全部 30 个点', (await dots()) === 30, await dots())
+
+  // 点最后一个圆点看那一场
+  await page.ev(`(() => {
+    const ds = document.querySelectorAll('.chart-svg .dot')
+    const g = ds[ds.length - 1] && ds[ds.length - 1].parentNode
+    if (!g) return 'NODOT'
+    g.dispatchEvent(new MouseEvent('click', { bubbles: true })); return 'OK' })()`)
+  await sleep(400)
+  const tip = await page.ev(`(document.querySelector('.chart-tip')?.textContent || '').replace(/\s+/g, ' ').trim()`)
+  assert('点圆点显示那一场的名次', /第 \d+ 名 \/ 共 8 人/.test(tip), tip)
+
+  // 关闭弹层
+  await page.ev(`document.querySelector('.picker-toolbar span')?.click(); true`)
+  await sleep(500)
+  const popupVisible = await page.ev(`(() => {
+    const body = document.querySelector('.history-body')
+    const popup = body && body.closest('.van-popup')
+    return !!popup && getComputedStyle(popup).display !== 'none' })()`)
+  assert('关闭后弹层消失', popupVisible === false)
+}
+
 // ---------------------------------------------------------------- 运行
-const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration, scenarioRankingMatchDetail, scenarioRankHistory]
+const scenarios = [scenarioRefereeScoring, scenarioFixFlow, scenarioMatchRefereeCanFix, scenarioLayout, scenarioInviteLabel, scenarioScheduleFilter, scenarioFilterWithFinished, scenarioScheduleOnlyMode, scenarioScheduleRefereeRow, scenarioAddMatches, scenarioAdminUserActions, scenarioEditTournament, scenarioCreateStillWorks, scenarioAssignRefereesAll, scenarioScoreNoFlicker, scenarioScoreOptimisticLock, scenarioAuthGuard, scenarioScheduledRegistration, scenarioAccessLogExcludeSelf, scenarioRemoveRegistration, scenarioRankingMatchDetail, scenarioRankHistory, scenarioNotificationRead, scenarioProfileRankHistory]
 
 async function main() {
   console.log(`前端 e2e 回归 → ${APP}（headless=${!HEADED}）`)
