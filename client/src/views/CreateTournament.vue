@@ -753,4 +753,8 @@ onMounted(async () => {
   margin-top: -14px; pointer-events: none;
   background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
 }
+
+/* 根元素复用了 main.css 的 .page-container（灰底），这里改成与浮层同色，
+   否则浮层下面会露出一条灰带 */
+.page-container { background: #f4f9ff; }
 </style>

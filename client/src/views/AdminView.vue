@@ -547,14 +547,21 @@ useResumeRefresh(() => fetchUsers(true))
 .pull-inner { padding-bottom: 60px; }
 .user-avatar { margin-right: 10px; flex-shrink: 0; }
 /* 每个用户一块；状态标签与「…」都靠右，行高一致，不再有折行的按钮簇 */
-.user-group { margin-bottom: 4px; }
+.user-group {
+  margin: 0 12px 12px; border-radius: 18px; overflow: hidden; background: #fff;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+}
 /* 副标题固定一行：名字很长时用省略号收尾，不要折成两行把列表撑散 */
 .user-group :deep(.van-cell__label) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 「…」入口：Vant 默认只给 4px 左间距，和状态标签几乎贴在一起 —— 拉开到 12px，
    两行之间也留出视觉呼吸（标签本身在 value 列右对齐，间距加在图标侧） */
 .user-more { color: #c8c9cc; font-size: 18px; margin-left: 12px; }
 .audit-filter { margin-bottom: 8px; }
-.audit-count { padding: 4px 16px 8px; color: #969799; font-size: 12px; }
+.audit-count { padding: 0 20px 8px; color: #98a1ad; font-size: 12px; }
+.audit-scroll :deep(.van-cell-group--inset) {
+  margin: 0 12px 12px; border-radius: 18px; overflow: hidden;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+}
 .audit-scroll { padding-top: 0; }
 .audit-detail { padding: 4px 16px 16px; font-size: 13px; color: #323233; }
 .audit-detail p { margin: 6px 0; word-break: break-all; }
@@ -567,5 +574,5 @@ useResumeRefresh(() => fetchUsers(true))
   padding-top: 8px; box-shadow: none;
 }
 .admin-scroll { background: #f4f9ff; }
-.admin-scroll .pull-inner { padding-top: 8px; }
+.admin-scroll .pull-inner { padding-top: 4px; }
 </style>

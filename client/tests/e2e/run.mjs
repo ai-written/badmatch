@@ -427,8 +427,8 @@ async function scenarioLayout(page) {
     ['首页', '/', 0], ['赛事详情', '/tournament/2', 0], ['对阵表', '/tournament/2/schedule', 120],
     ['积分榜', '/tournament/2/rankings', 0], ['我的', '/profile', 0],
     // 2026-11 UI 改版：对阵表 / 管理面板的头部改成渐变头（在 pull-inner 之外），
-    // 首个内容自然落到头图下方 120 / 20px（原先是 12 —— 有 van-nav-bar 时的固定内边距）
-    ['站内消息', '/notifications', 0], ['管理面板', '/admin', 20],
+    // 首个内容自然落到头图下方 120 / 16px（原先是 12 —— 有 van-nav-bar 时的固定内边距）
+    ['站内消息', '/notifications', 0], ['管理面板', '/admin', 16],
   ]
   const probe = `(() => {
     const pr = document.querySelector('.van-pull-refresh')

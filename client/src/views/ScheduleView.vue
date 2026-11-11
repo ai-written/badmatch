@@ -1009,12 +1009,12 @@ onMounted(() => {
 
 
 .match-card {
-  background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
-  box-shadow: 0 2px 8px rgba(0,0,0,.04); position: relative;
+  background: #fff; border-radius: 18px; padding: 12px 14px; margin-bottom: 10px;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07); position: relative;
   /* transition 必须在基类上：若只写在 .target 上，类移除后新的计算值里
      已经没有 transition，高亮会瞬间复位而不是淡出 */
   transition: box-shadow .5s ease-out;
-}
+ }
 
 /* 首次进入时高亮落点比赛：明显描边保持 2.5s，移除后由基类的 transition 平滑淡出。
    必须排在 :active 之后：两者特异性相同，靠顺序决定优先级。 */

@@ -857,7 +857,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.score-root { background: #f4f9ff; background: #f0f2f5; padding-bottom: 40px; }
+.score-root { background: #f4f9ff; padding-bottom: 40px; }
 .readonly-banner {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   margin: 10px 12px 0; padding: 10px 12px;
@@ -879,7 +879,10 @@ onUnmounted(() => {
 /* 导航栏右侧的积分榜入口 */
 .nav-rank { font-size: 14px; color: #1989fa; }
 
-.scoreboard { display: flex; align-items: center; padding: 16px 8px; background: #fff; margin: 10px 12px; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.scoreboard {
+  display: flex; align-items: center; padding: 18px 8px; background: #fff;
+  margin: 12px; border-radius: 18px; box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+}
 .sb-team { flex: 1; display: flex; justify-content: center; gap: 4px; cursor: pointer; }
 .sb-player { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 12px; color: #666; }
 .sb-team.win .sb-player span { color: #07c160; font-weight: 600; }
@@ -893,14 +896,18 @@ onUnmounted(() => {
 .sb-info { font-size: 11px; color: #999; display: flex; flex-direction: column; gap: 2px; }
 .swap-hint { margin-top: 4px; font-size: 10px; color: #ccc; }
 
-.controls { padding: 20px 20px 40px; }
+.controls { padding: 4px 12px 32px; }
 
-.wheel-board { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 18px 12px; background: #fff; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.wheel-board {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 12px 12px 20px; padding: 18px 12px; background: #fff;
+  border-radius: 18px; box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+}
 .wheel-side { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-.wheel-btn { width: 42px; height: 42px; border-radius: 50%; border: none; font-size: 24px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform .1s, opacity .1s; color: #fff; }
+.wheel-btn { width: 46px; height: 46px; border-radius: 50%; border: none; font-size: 24px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform .1s, opacity .1s; color: #fff; }
 .wheel-btn:active { transform: scale(.92); }
-.wheel-btn.plus { background: #ff9800; box-shadow: 0 2px 8px rgba(255,152,0,.3); }
-.wheel-btn.minus { background: #eee; color: #666; }
+.wheel-btn.plus { background: linear-gradient(150deg, #ffb54d, #f79009); box-shadow: 0 5px 12px rgba(247, 144, 9, .32); }
+.wheel-btn.minus { background: #f2f5fa; color: #9aa4b4; }
 .wheel-btn:disabled { opacity: .3; }
 .wheel { width: 88px; height: 128px; position: relative; overflow: hidden; touch-action: none; user-select: none; }
 .wheel.dragging { background: rgba(25,137,250,.08); box-shadow: inset 0 0 0 3px rgba(25,137,250,.12); }
