@@ -274,12 +274,39 @@ async function onRefresh() {
 .t-card:active { background: #fafcff; }
 
 /* 左：日期块（状态色下划线） */
-/* 日期做成一块浅蓝"色块"（设计稿里就是一块实体，光靠文字会显得左边空） */
+/* 日期做成一块浅蓝"色块"（设计稿里就是一块实体，光靠文字会显得左边空）。
+   块里那层"柔光"是两块模糊渐变叠出来的（不用图片）：
+   ::before 左下角一团白色柔光，::after 一道斜向光带，
+   再配一条底部内高光，看起来才有那种微微凸起的玻璃感。 */
 .t-date {
+  position: relative; overflow: hidden;
   width: 78px; flex-shrink: 0;
-  background: #f1f7ff; border-radius: 14px; padding: 9px 0 10px;
+  background: linear-gradient(165deg, #f6faff 0%, #e9f1fd 100%);
+  border-radius: 15px; padding: 9px 0 10px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
+  box-shadow: inset 0 -7px 12px rgba(255, 255, 255, .95), inset 0 1px 0 rgba(255, 255, 255, .9),
+              0 1px 3px rgba(17, 45, 90, .05);
 }
+.t-date::before {
+  /* 左上那团白：像一块被磨砂的白色圆角片盖在上半部 */
+  content: ""; position: absolute; left: -34%; top: -46%;
+  width: 156%; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%,
+    rgba(255, 255, 255, .9) 0%, rgba(255, 255, 255, .68) 40%,
+    rgba(255, 255, 255, .26) 62%, rgba(255, 255, 255, 0) 78%);
+  filter: blur(6px);
+  pointer-events: none;
+}
+.t-date::after {
+  /* 右下角那抹浅蓝（斜向分界就是它和白块的交界） */
+  content: ""; position: absolute; right: -26%; bottom: -58%;
+  width: 126%; aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%,
+    rgba(206, 224, 252, .8) 0%, rgba(208, 226, 252, .42) 52%, rgba(208, 226, 252, 0) 76%);
+  filter: blur(8px);
+  pointer-events: none;
+}
+.t-date > * { position: relative; z-index: 1; }
 .t-date b { font-size: 15px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
 .t-date i { font-style: normal; font-size: 11.5px; color: #8a94a6; margin-top: 4px; }
 .t-bar { width: 20px; height: 3px; border-radius: 2px; margin-top: 7px; background: #1677e0; }
