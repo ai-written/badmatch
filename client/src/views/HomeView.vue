@@ -26,14 +26,14 @@
               @load="onLoad"
             >
               <div
-                v-for="t in sortedList"
+                v-for="(t, i) in sortedList"
                 :key="t.id"
                 class="t-card"
                 :class="statusKey(t)"
                 @click="$router.push(`/tournament/${t.id}`)"
               >
                 <!-- 左：日期块（日期只在这里出现一次，不再和时间行重复） -->
-                <div class="t-date">
+                <div class="t-date" :class="`tile-${i % 3}`">
                   <b>{{ dayLabel(t.start_date) }}</b>
                   <i>{{ weekLabel(t.start_date) }}</i>
                   <span class="t-bar" />
@@ -273,31 +273,32 @@ async function onRefresh() {
 }
 .t-card:active { background: #fafcff; }
 
-/* 左：日期块（状态色下划线） */
-/* 日期做成一块"色块"：浅蓝紫底 + 一个**边界清晰**的白色大圆弧压在左上。
-   设计稿里右下角那抹浅蓝就是底色露出来的部分，交界是一条圆弧（不是模糊光效）。
-   圆的位置是照着放大 3 倍的设计稿量出来的：圆弧从右边缘约 45% 高处下来，
-   到底边约 35% 处收口。外面再套一圈白色柔光（box-shadow）当过渡。 */
+/* 左：日期块 = 设计稿里的羽毛球贴片（紫/橙/薄荷三色轮换，带圆角透明边）+ 代码渲染的日期。
+   贴片是从设计稿大图裁的（client/public/tile/tile-*.webp，263px ≈ 3.2x@82），
+   图里没有文字 —— 日期/星期都是真 DOM，可选中、可改、放大不糊。
+   构图：贴片锚在右下角、略微出框，左上留干净区域放文字（贴片本身的羽毛球也在右下部）。 */
 .t-date {
   position: relative; overflow: hidden;
-  width: 78px; flex-shrink: 0;
-  background: linear-gradient(160deg, #eaf1fd 0%, #dde8fb 100%);
-  border-radius: 16px; padding: 9px 0 10px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  box-shadow: 0 1px 3px rgba(17, 45, 90, .05), inset 0 1px 0 rgba(255, 255, 255, .9);
+  width: 104px; flex-shrink: 0;
+  border-radius: 16px; padding: 9px 8px 10px;
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+  background-repeat: no-repeat;
+  box-shadow: 0 1px 3px rgba(17, 45, 90, .05);
+  min-height: 76px;
 }
-/* 白块用「硬边圆」画：圆心与半径写死 px，不随块高变化 —— 之前用百分比，
-   块的实际高度比估计的矮，圆按比例放大后把整块盖成了纯白。
-   硬边 = 设计稿里那条清晰的圆弧分界。 */
-.t-date::before {
-  content: ""; position: absolute; inset: 0;
-  background: radial-gradient(circle 144px at -30px -65px,
-    #ffffff 0, #ffffff 143px, rgba(255, 255, 255, 0) 144px);
-  pointer-events: none;
-}
+.t-date.tile-0 { background-color: #f4f0fe; background-image: url(/tile/tile-purple.webp); background-size: auto 122%; background-position: right -6px center; }
+.t-date.tile-1 { background-color: #fdf0e6; background-image: url(/tile/tile-orange.webp); background-size: auto 122%; background-position: right -6px center; }
+.t-date.tile-2 { background-color: #e9f9f2; background-image: url(/tile/tile-mint.webp); background-size: auto 122%; background-position: right -6px center; }
 .t-date > * { position: relative; z-index: 1; }
-.t-date b { font-size: 15px; font-weight: 800; white-space: nowrap; letter-spacing: -.2px; }
-.t-date i { font-style: normal; font-size: 11.5px; color: #8a94a6; margin-top: 4px; }
+
+.t-date b {
+  font-size: 14px; font-weight: 800; white-space: nowrap; letter-spacing: -.3px;
+  text-shadow: 0 0 6px rgba(255, 255, 255, .95), 0 1px 2px rgba(255, 255, 255, .95);
+}
+.t-date i {
+  font-style: normal; font-size: 11px; color: #57606f; margin-top: 3px;
+  text-shadow: 0 0 6px rgba(255, 255, 255, .95);
+}
 /* 状态色下划线：报名中蓝 / 进行中绿 / 已结束灰 */
 .t-bar { width: 20px; height: 3px; border-radius: 2px; margin-top: 7px; background: #1677e0; }
 .t-card.done .t-date b { color: #5b626d; }
