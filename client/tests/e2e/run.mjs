@@ -247,7 +247,8 @@ function matchOptionsFor(n) {
 const fieldByLabel = (label) => `[...document.querySelectorAll('.van-field')]
   .find(c => (c.querySelector('.van-field__label')?.textContent || '').trim() === ${JSON.stringify(label)})`
 const toastText = (page) => page.ev(`(document.querySelector('.van-toast__text')?.textContent || '').trim()`)
-const navTitleOf = (page) => page.ev(`(document.querySelector('.van-nav-bar__title')?.textContent || '').trim()`)
+// 2026-11 UI 改版：部分页面的标题从 van-nav-bar 挪到了渐变头里（.ui-hero-nav .title）
+const navTitleOf = (page) => page.ev(`((document.querySelector('.van-nav-bar__title') || document.querySelector('.ui-hero-nav .title'))?.textContent || '').trim()`)
 const hasFieldOf = (page, label) => page.ev(`[...document.querySelectorAll('.van-field__label')]
   .some(e => (e.textContent || '').trim() === ${JSON.stringify(label)})`)
 /** 读值：日期/时间段是只读字段，Vant 渲染成 div，取 textContent */
@@ -423,9 +424,11 @@ async function scenarioLayout(page) {
   // 2026-11 UI 改版说明：「赛事详情」由 10 改成 0 —— 头部从 van-nav-bar + 白色 info-card
   // 换成了渐变头（AppHero），内容直接贴着滚动容器顶开始。
   const baseline = [
-    ['首页', '/', 0], ['赛事详情', '/tournament/2', 0], ['对阵表', '/tournament/2/schedule', 12],
+    ['首页', '/', 0], ['赛事详情', '/tournament/2', 0], ['对阵表', '/tournament/2/schedule', 120],
     ['积分榜', '/tournament/2/rankings', 0], ['我的', '/profile', 0],
-    ['站内消息', '/notifications', 0], ['管理面板', '/admin', 12],
+    // 2026-11 UI 改版：对阵表 / 管理面板的头部改成渐变头（在 pull-inner 之外），
+    // 首个内容自然落到头图下方 120 / 20px（原先是 12 —— 有 van-nav-bar 时的固定内边距）
+    ['站内消息', '/notifications', 0], ['管理面板', '/admin', 20],
   ]
   const probe = `(() => {
     const pr = document.querySelector('.van-pull-refresh')

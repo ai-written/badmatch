@@ -1,14 +1,16 @@
 <template>
   <div class="score-root vh-page-scroll">
-    <van-nav-bar left-text="返回" left-arrow @click-left="goBack">
-      <!-- 中间：场次 + 耗时；右侧：积分榜入口 -->
-      <template #title>
-        <span class="nav-title" :class="{ overdue: timerOverdue }">{{ matchNum }}<template v-if="timerText">（{{ timerText }}）</template></span>
-      </template>
-      <template #right>
-        <span class="nav-rank" @click.stop="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
-      </template>
-    </van-nav-bar>
+    <AppHero :height="126">
+      <div class="ui-hero-nav">
+        <button class="back" @click="goBack">‹ 返回</button>
+        <span class="title" :class="{ overdue: timerOverdue }">{{ matchNum }}<template v-if="timerText">（{{ timerText }}）</template></span>
+        <span class="acts">
+          <span class="nav-rank" @click.stop="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
+        </span>
+      </div>
+    </AppHero>
+
+    <div class="score-sheet">
 
     <van-loading v-if="!match && !loadFailed" class="loading" />
     <div v-else-if="!match && loadFailed" class="load-failed">
@@ -168,6 +170,7 @@
         <p>暂无裁判权限</p>
       </div>
     </template>
+    </div>
   </div>
 </template>
 
@@ -180,6 +183,7 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { serverElapsedSeconds, displayElapsedSeconds, timerDisplay, ONGOING_DISPLAY_LIMIT_SECONDS } from '@/utils/timer'
 import { useGoBack } from '@/composables/useGoBack'
+import AppHero from '@/components/AppHero.vue'
 import { keepLocalScore, planScoreRetry } from '@/utils/scoreSync'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
@@ -853,7 +857,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.score-root { background: #f0f2f5; padding-bottom: 40px; }
+.score-root { background: #f4f9ff; background: #f0f2f5; padding-bottom: 40px; }
 .readonly-banner {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   margin: 10px 12px 0; padding: 10px 12px;
@@ -938,4 +942,15 @@ onUnmounted(() => {
 
 .no-role { padding: 60px 20px; text-align: center; }
 .no-role p { color: #999; font-size: 14px; margin-top: 16px; }
+
+/* ---- 浮层：头图压上来（全站统一，详见 assets/ui.css） ---- */
+.score-sheet {
+  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
+  background: #f4f9ff; padding-top: 16px;
+}
+.score-sheet::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
+  margin-top: -14px; pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
+}
 </style>

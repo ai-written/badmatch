@@ -1,0 +1,104 @@
+/* ============================================================================
+   全站统一样式（2026-11 UI 改版）：渐变头 + 白色浮层 + 白卡
+
+   为什么单独一份全局样式：这套版式要在 9 个页面用，写在各自的 scoped style 里
+   会变成 9 份几乎相同的复制品（改一处要改九处，迟早走样）。这里只放"结构性"
+   的类，页面自己的细节仍写在各自组件里。
+
+   用法：
+     <div class="ui-page">
+       <div class="ui-scroll">
+         <van-pull-refresh class="pull-fill">
+           <div class="pull-inner">
+             <AppHero :height="132"> ...导航与标题... </AppHero>
+             <div class="ui-sheet">
+               <div class="ui-card"> ... </div>
+             </div>
+           </div>
+         </van-pull-refresh>
+       </div>
+     </div>
+
+   几条固定的数值（都和头图 AppHero 配套）：
+   - 浮层上提 28px、圆角 28px，压住头图的波浪；
+   - 浮层上方那道阴影用 ::before 画（只向上），不能用 box-shadow ——
+     box-shadow 的模糊会向下漏出一条灰带（内容少时特别明显）。
+   - 页面与浮层同色 #f4f9ff：浮层变矮时，两者的交界看不出来。
+   ========================================================================== */
+.ui-page { display: flex; flex-direction: column; background: #f4f9ff; }
+.ui-scroll { flex: 1; overflow-y: auto; }
+
+.ui-sheet {
+  position: relative;
+  margin-top: -28px;
+  border-radius: 28px 28px 0 0;
+  background: #f4f9ff;
+  padding: 16px 12px 0;
+}
+.ui-sheet::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 14px;
+  margin-top: -14px;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
+}
+
+.ui-card {
+  background: #fff;
+  border-radius: 18px;
+  padding: 14px;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07);
+  margin-bottom: 12px;
+}
+.ui-card:last-child { margin-bottom: 0; }
+
+/* 头图里的导航行：返回 / 标题 / 右侧动作 */
+.ui-hero-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 2px;
+  color: #fff;
+}
+.ui-hero-nav .back {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  color: #fff;
+}
+.ui-hero-nav .title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  text-shadow: 0 1px 3px rgba(8, 44, 96, .26);
+}
+.ui-hero-nav .acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  color: #fff;
+  font-size: 13px;
+}
+
+/* 浮层里的小节标题 */
+.ui-sec-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 9px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #23262b;
+}
+.ui-sec-title .n { font-size: 12px; font-weight: 600; color: #8a94a6; }
+.ui-sec-title .a { font-size: 12px; font-weight: 600; color: #1677e0; cursor: pointer; }
+
+/* 数字统一等宽，避免跳动 */
+.ui-num { font-variant-numeric: tabular-nums; }

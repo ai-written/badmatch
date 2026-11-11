@@ -1,13 +1,16 @@
 <template>
   <div class="schedule-page vh-page">
-    <van-nav-bar title="对阵表" left-text="返回" left-arrow @click-left="goBack">
-      <template #right>
-        <span class="nav-link" @click="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
-      </template>
-    </van-nav-bar>
-
     <div class="schedule-scroll">
     <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
+      <AppHero :height="132">
+        <div class="ui-hero-nav">
+          <button class="back" @click="goBack">‹ 返回</button>
+          <span class="title">对阵表</span>
+          <span class="acts">
+            <span class="nav-link" @click="$router.push(`/tournament/${route.params.id}/rankings`)">积分榜</span>
+          </span>
+        </div>
+      </AppHero>
       <div class="pull-inner">
     <div v-if="rounds.length === 0 && loadFailed" class="empty-block">
       <div class="load-failed">
@@ -242,6 +245,7 @@ import api from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { useGoBack } from '@/composables/useGoBack'
+import AppHero from '@/components/AppHero.vue'
 import {
   withGlobalIndex, hiddenFinishedIds, renderRounds, filterRounds, playersInRounds,
   normalizeFilter, isFilterActive, focusMatchId, focusScrollTop,
@@ -864,17 +868,28 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.schedule-page { display: flex; flex-direction: column; background: #f0f2f5; }
+.schedule-page { display: flex; flex-direction: column; background: #f4f9ff; }
 /* position: relative 让本容器成为卡片的 offsetParent，
    这样卡片的 offsetTop 才稳定等于「相对列表内容顶部」的偏移（自动定位依赖它） */
 /* 这 12px 是 main.css 里 .van-pull-refresh 那套「padding + 负 margin」的落点：
    刷新容器的盒子会整体上移，滚动容器得留出同样的空间，否则上移的那截会被滚动容器
    自己裁掉。12px 同时覆盖了首条高亮上方所需的 11px（描边 2px + 光晕 14-3）。 */
-.schedule-scroll { flex: 1; overflow-y: auto; position: relative; padding-top: 12px; }
+.schedule-scroll { flex: 1; overflow-y: auto; position: relative; }
 .pull-fill { min-height: 100%; }
 /* 顶部余量由 main.css 的 .van-pull-refresh（裁剪框）+ 上面那个滚动容器的 padding 负责，
    内容本身不动 —— 详见 main.css 里的说明 */
-.pull-inner { padding-bottom: 60px; }
+.pull-inner { padding-bottom: 60px;  }
+
+/* ---- 浮层：头图压上来（全站统一，详见 assets/ui.css） ---- */
+.pull-inner {
+  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
+  background: #f4f9ff; padding-top: 16px;
+}
+.pull-inner::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
+  margin-top: -14px; pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
+}
 .empty-block { padding-top: 80px; }
 .load-failed {
   display: flex; flex-direction: column; align-items: center; gap: 6px;

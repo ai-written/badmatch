@@ -1,6 +1,12 @@
 <template>
   <div class="admin-page vh-page">
-    <van-nav-bar title="管理面板" left-text="返回" left-arrow @click-left="goBack" />
+    <AppHero :height="120">
+      <div class="ui-hero-nav">
+        <button class="back" @click="goBack">‹ 返回</button>
+        <span class="title">管理面板</span>
+        <span class="acts" />
+      </div>
+    </AppHero>
 
     <van-tabs v-model:active="adminTab" color="#1989fa" class="admin-tabs" :show-header="isSuper">
       <van-tab title="用户管理">
@@ -138,6 +144,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useGoBack } from '@/composables/useGoBack'
+import AppHero from '@/components/AppHero.vue'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import api from '@/api/client'
 import { showToast, showConfirmDialog } from 'vant'
@@ -529,7 +536,7 @@ useResumeRefresh(() => fetchUsers(true))
 </script>
 
 <style scoped>
-.admin-page { display: flex; flex-direction: column; background: #f5f6f8; }
+.admin-page { display: flex; flex-direction: column; background: #f4f9ff; }
 .admin-tabs { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .admin-tabs :deep(.van-tabs__content) { flex: 1; overflow: hidden; }
 .admin-tabs :deep(.van-tab__panel) { height: 100%; }
@@ -552,4 +559,13 @@ useResumeRefresh(() => fetchUsers(true))
 .audit-detail { padding: 4px 16px 16px; font-size: 13px; color: #323233; }
 .audit-detail p { margin: 6px 0; word-break: break-all; }
 .audit-json { background: #f7f8fa; border-radius: 6px; padding: 8px; margin: 6px 0 0; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+
+/* 头图下面是 van-tabs，tab 内容自己滚动；给内容留出与其它页一致的边距 */
+.admin-tabs { margin-top: -18px; }
+.admin-tabs :deep(.van-tabs__wrap) {
+  border-radius: 20px 20px 0 0; background: #f4f9ff;
+  padding-top: 8px; box-shadow: none;
+}
+.admin-scroll { background: #f4f9ff; }
+.admin-scroll .pull-inner { padding-top: 8px; }
 </style>

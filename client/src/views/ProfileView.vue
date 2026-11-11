@@ -41,15 +41,26 @@
       <div class="profile-scroll">
       <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
       <div class="pull-inner">
-      <div class="profile-header">
-        <div class="avatar-wrapper" @click="triggerUpload">
-          <van-image lazy-load round width="72" height="72" :src="auth.user.avatar || defaultAvatar" />
-          <div class="avatar-overlay"><van-icon name="photograph" size="20" color="#fff" /></div>
+      <AppHero :height="200">
+        <div class="me">
+          <div class="avatar-wrapper" @click="triggerUpload">
+            <van-image lazy-load round width="56" height="56" :src="auth.user.avatar || defaultAvatar" />
+            <div class="avatar-overlay"><van-icon name="photograph" size="18" color="#fff" /></div>
+          </div>
+          <div class="me-txt">
+            <div class="hero-title me-name">{{ auth.user.username }}</div>
+            <div class="hero-sub me-sub">爱玩羽社 · 已加入 {{ joinedDays }} 天</div>
+          </div>
         </div>
-        <h3>{{ auth.user.username }}</h3>
+        <div class="me-stats">
+          <div><em class="ui-num">{{ stats.total_matches }}</em><span>总场次</span></div>
+          <div><em class="ui-num">{{ stats.win_rate }}%</em><span>胜率</span></div>
+          <div><em class="ui-num">{{ stats.tournaments_played }}</em><span>参赛次数</span></div>
+        </div>
         <input ref="fileInput" type="file" accept="image/*" style="display:none" @change="onFileChange" />
-      </div>
+      </AppHero>
 
+      <div class="ui-sheet">
       <van-cell-group inset>
         <van-cell title="用户名" is-link :value="auth.user.username" @click="newUsername = auth.user?.username || ''; showEditName = true" />
         <van-cell title="邮箱" is-link :value="auth.user?.email || '未设置'" @click="editEmail = auth.user?.email || ''; showEditEmail = true" />
@@ -85,6 +96,7 @@
 
       <div class="logout-btn">
         <van-button plain type="danger" block @click="auth.logout()">退出登录</van-button>
+      </div>
       </div>
       </div>
       </van-pull-refresh>
@@ -137,6 +149,7 @@ import { showToast, showFailToast, showConfirmDialog } from 'vant'
 import { compressAvatar } from '@/utils/avatar'
 import { copyText } from '@/utils/clipboard'
 import RankHistoryChart from '@/components/RankHistoryChart.vue'
+import AppHero from '@/components/AppHero.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -150,6 +163,14 @@ const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 const loginForm = reactive({ username: '', password: '' })
 const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '', init_code: '', email: '' })
 const stats = reactive({ total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 })
+/** 加入天数（用 /auth/me 的 created_at；取不到就显示"—"） */
+const joinedDays = computed(() => {
+  const raw = (auth.user as any)?.created_at
+  if (!raw) return '—'
+  const t = new Date(raw).getTime()
+  if (!t || isNaN(t)) return '—'
+  return Math.max(1, Math.floor((Date.now() - t) / 86400000))
+})
 
 const inviteCode = ref('')
 const canInvite = computed(() => !!auth.user && (auth.user.role === 'admin' || auth.user.role === 'superadmin'))
@@ -373,18 +394,38 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.profile-page { display: flex; flex-direction: column; background: #f5f6f8; }
+.profile-page { display: flex; flex-direction: column; }
 .profile-scroll { flex: 1; overflow-y: auto; }
 .pull-fill { min-height: 100%; }
 /* 底部固定 tabbar 的占位：含系统安全区与浏览器工具栏（--tabbar-reserve 见 main.css） */
 .pull-inner { padding-bottom: var(--tabbar-reserve); }
+.pull-inner :deep(.van-cell-group--inset) {
+  margin: 0 0 12px; border-radius: 18px; overflow: hidden;
+  box-shadow: 0 4px 14px rgba(17, 45, 90, .07); background: #fff;
+}
 .form-scroll { flex: 1; overflow-y: auto; padding-bottom: var(--tabbar-reserve); }
 .auth-tabs { margin-top: 0; }
 .auth-form { margin-top: 16px; }
 .form-submit { margin: 16px; }
 .forgot-link { text-align: center; font-size: 13px; color: #1989fa; padding: 4px 0 20px; }
-.profile-header { display: flex; flex-direction: column; align-items: center; padding: 30px 0 20px; }
-.avatar-wrapper { position: relative; cursor: pointer; }
+/* ---- 头图：头像 + 名字 + 三格战绩 ---- */
+.me { display: flex; align-items: center; gap: 13px; padding-top: 10px; }
+.me-txt { flex: 1; min-width: 0; }
+.me-name { font-size: 19px; font-weight: 800; letter-spacing: .2px; }
+.me-sub { font-size: 11.5px; margin-top: 5px; }
+.me-stats { display: flex; gap: 9px; margin-top: 16px; }
+.me-stats > div {
+  flex: 1; background: rgba(255, 255, 255, .16);
+  border: 1px solid rgba(255, 255, 255, .22); border-radius: 13px;
+  padding: 8px 10px; text-align: center;
+}
+.me-stats em { font-style: normal; font-size: 18px; font-weight: 800; }
+.me-stats span { display: block; font-size: 10.5px; opacity: .9; margin-top: 2px; }
+.avatar-wrapper {
+  position: relative; cursor: pointer; flex-shrink: 0;
+  border-radius: 50%; border: 2px solid rgba(255, 255, 255, .8);
+  overflow: hidden; box-shadow: 0 3px 10px rgba(9, 52, 110, .22);
+}
 /* 头像块级化：.van-image 默认是 inline-block，行框会在图片下方留出基线间隙（实测 4px），
    于是外层容器比头像高 4px；而遮罩是 inset:0 + border-radius:50%，就跟着变成
    72×76 的椭圆 —— 圆形下缘那 4px 没有头像覆盖，看起来就是一条空白。

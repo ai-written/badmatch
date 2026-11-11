@@ -1,38 +1,50 @@
 <template>
-  <div class="notify-page vh-page">
-    <van-nav-bar title="站内消息" left-text="返回" left-arrow @click-left="goBack">
-      <template #right>
-        <span v-if="showReadAll" class="read-all" @click="markAllRead">全部已读</span>
-      </template>
-    </van-nav-bar>
-
-    <div class="notify-scroll">
+  <div class="notify-page ui-page vh-page">
+    <div class="notify-scroll ui-scroll">
       <van-pull-refresh v-model="refreshing" @refresh="onRefresh" class="pull-fill">
         <div class="pull-inner">
-          <van-cell-group inset v-if="notifications.length">
-            <van-cell
-              v-for="n in notifications"
-              :key="n.id"
-              clickable
-              :title="n.message"
-              :label="formatTime(n.created_at)"
-              @click="openNotification(n)"
-            >
-              <template #icon>
-                <span class="dot" :class="{ read: n.is_read }"></span>
-              </template>
-            </van-cell>
-            <div v-if="hasMore" class="more-hint">
-              仅显示最近 100 条{{ unreadCount > 0 ? `，另有未读 ${unreadCount} 条` : '' }}
+          <AppHero :height="132">
+            <div class="ui-hero-nav">
+              <button class="back" @click="goBack">‹ 返回</button>
+              <span class="title">站内消息</span>
+              <span class="acts">
+                <span v-if="showReadAll" class="read-all" @click="markAllRead">全部已读</span>
+              </span>
             </div>
-          </van-cell-group>
-          <!-- 失败态与「暂无消息」必须区分：接口报错时不能说没有消息 -->
-          <div v-else-if="loadFailed" class="notify-failed">
-            <van-icon name="warning-o" size="22" />
-            <span>消息加载失败</span>
-            <van-button size="small" round plain type="primary" @click="fetchList()">重试</van-button>
+            <div class="hero-sub">{{ unreadCount > 0 ? `${unreadCount} 条未读` : '暂无未读' }}</div>
+          </AppHero>
+
+          <div class="ui-sheet">
+            <template v-if="notifications.length">
+              <div
+                v-for="n in notifications"
+                :key="n.id"
+                class="ui-card msg"
+                :class="{ unread: !n.is_read }"
+                @click="openNotification(n)"
+              >
+                <div class="msg-ic"><van-icon name="volume-o" size="17" /></div>
+                <div class="msg-bd">
+                  <div class="msg-title">
+                    <span class="msg-text">{{ n.message }}</span>
+                    <span v-if="!n.is_read" class="dot"></span>
+                  </div>
+                  <div class="msg-time ui-num">{{ formatTime(n.created_at) }}</div>
+                </div>
+                <van-icon name="arrow" class="msg-go" size="14" />
+              </div>
+              <div v-if="hasMore" class="more-hint">
+                仅显示最近 100 条{{ unreadCount > 0 ? `，另有未读 ${unreadCount} 条` : '' }}
+              </div>
+            </template>
+            <!-- 失败态与「暂无消息」必须区分：接口报错时不能说没有消息 -->
+            <div v-else-if="loadFailed" class="notify-failed">
+              <van-icon name="warning-o" size="22" />
+              <span>消息加载失败</span>
+              <van-button size="small" round plain type="primary" @click="fetchList()">重试</van-button>
+            </div>
+            <van-empty v-else description="暂无消息" />
           </div>
-          <van-empty v-else description="暂无消息" />
         </div>
       </van-pull-refresh>
     </div>
@@ -46,6 +58,7 @@ import api from '@/api/client'
 import { useGoBack } from '@/composables/useGoBack'
 import { useResumeRefresh } from '@/composables/useResumeRefresh'
 import { showToast } from 'vant'
+import AppHero from '@/components/AppHero.vue'
 
 const router = useRouter()
 const { goBack } = useGoBack()
@@ -116,16 +129,39 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.notify-page { display: flex; flex-direction: column; background: #f5f6f8; }
-.notify-scroll { flex: 1; overflow-y: auto; }
+.notify-page { display: flex; flex-direction: column; }
 .pull-fill { min-height: 100%; }
 .pull-inner { padding-bottom: 60px; }
-.read-all { color: #1989fa; font-size: 14px; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ee0a24; margin-right: 10px; flex-shrink: 0; }
-.dot.read { background: #dcdee0; }
-.more-hint { text-align: center; color: #969799; font-size: 12px; padding: 10px 0; }
+.read-all { color: #fff; }
+.hero-sub {
+  font-size: 11.5px; margin-top: 6px; opacity: .95;
+  text-shadow: 0 1px 3px rgba(8, 44, 96, .26);
+}
+
+/* 一条消息：图标 + 正文 + 右箭头，未读左侧有强调色边 */
+.msg { display: flex; align-items: flex-start; gap: 11px; padding: 13px 14px; cursor: pointer; }
+.msg.unread { box-shadow: 0 4px 14px rgba(17, 45, 90, .07), inset 3px 0 0 #1677e0; }
+.msg-ic {
+  width: 34px; height: 34px; border-radius: 12px; flex-shrink: 0;
+  background: #eaf3ff; color: #1677e0;
+  display: flex; align-items: center; justify-content: center;
+}
+.msg-bd { flex: 1; min-width: 0; }
+.msg-title { display: flex; align-items: flex-start; gap: 6px; }
+.msg-text {
+  font-size: 13.5px; color: #23262b; line-height: 1.5; font-weight: 600;
+  word-break: break-word;
+}
+.dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #ee0a24;
+  flex-shrink: 0; margin-top: 6px;
+}
+.msg-time { font-size: 11px; color: #98a1ad; margin-top: 5px; }
+.msg-go { color: #c6cfdd; margin-top: 8px; flex-shrink: 0; }
+
+.more-hint { text-align: center; color: #98a1ad; font-size: 12px; padding: 4px 0 14px; }
 .notify-failed {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 80px 0; color: #969799; font-size: 13px;
+  padding: 60px 0; color: #969799; font-size: 13px;
 }
 </style>

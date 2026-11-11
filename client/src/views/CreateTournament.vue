@@ -1,6 +1,14 @@
 <template>
   <div class="page-container vh-page-scroll">
-    <van-nav-bar :title="isEdit ? '编辑赛事' : '创建赛事'" left-text="取消" left-arrow @click-left="goBack" />
+    <AppHero :height="120">
+      <div class="ui-hero-nav">
+        <button class="back" @click="goBack">‹ 取消</button>
+        <span class="title">{{ isEdit ? '编辑赛事' : '创建赛事' }}</span>
+        <span class="acts" />
+      </div>
+    </AppHero>
+
+    <div class="create-sheet">
 
     <van-form @submit="onSubmit" class="create-form">
       <van-cell-group inset>
@@ -200,6 +208,7 @@
         <van-empty v-if="selectableUsers.length === 0" description="暂无用户" />
       </div>
     </van-popup>
+    </div>
   </div>
 </template>
 
@@ -209,6 +218,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api/client'
 import { useGoBack } from '@/composables/useGoBack'
+import AppHero from '@/components/AppHero.vue'
 import { showToast } from 'vant'
 
 const route = useRoute()
@@ -732,4 +742,15 @@ onMounted(async () => {
   font-size: 13px; color: #5b6b7f; background: #f2f5f9; border: 1px solid #e3eaf3;
 }
 .mode-chip.on { color: #fff; background: #4a7ab0; border-color: #4a7ab0; }
+
+/* ---- 浮层：头图压上来（全站统一，详见 assets/ui.css） ---- */
+.create-sheet {
+  position: relative; margin-top: -28px; border-radius: 28px 28px 0 0;
+  background: #f4f9ff; padding-top: 16px;
+}
+.create-sheet::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 14px;
+  margin-top: -14px; pointer-events: none;
+  background: linear-gradient(to top, rgba(9, 52, 110, .10), rgba(9, 52, 110, 0));
+}
 </style>

@@ -13,6 +13,8 @@ import 'vant/es/action-sheet/style'
 import 'vant/es/calendar/style'
 import 'vant/es/lazyload/style'
 import './assets/main.css'
+// 全站统一版式（渐变头 + 浮层 + 白卡）的共享类，见文件头说明
+import './assets/ui.css'
 
 // 先把「真实可见高度」同步到 CSS 变量，再挂载。
 // 顺序反过来的话（mount 之后才同步）首帧一定按 100vh 排版，在地址栏展开的浏览器上
