@@ -32,6 +32,20 @@ class CourtCreate(BaseModel):
     sort_order: int = 0
     time_slots: list[TimeSlotCreate] = []
 
+    @field_validator("name")
+    @classmethod
+    def _name_must_not_be_blank(cls, v: str) -> str:
+        """场地名不能是空白。
+
+        空白场地名会留下"有场地行、但没有名字"的赛事：界面上的场地号少一片，
+        而排在那片场地上的比赛解析不出名字 —— 赛程卡片上就变成"隔一场才显示
+        一个场地号"，看着像 bug（线上被问过）。这里直接挡住。
+        """
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("场地名不能为空")
+        return v
+
 
 class CourtOut(BaseModel):
     id: int

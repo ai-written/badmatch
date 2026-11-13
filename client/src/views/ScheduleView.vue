@@ -141,11 +141,11 @@
                    后面直接接「该上场 / 等谁」——**在列表上就能看出能不能打**，
                    不用点进记分页试一次才知道。 -->
               <span
-                v-if="m.court_label"
+                v-if="courtLabelOf(m)"
                 class="match-court"
                 :class="{ 'is-next': isNextUp(m), 'is-wait': !!blockedText(m) }"
               >
-                {{ m.court_label }}<template v-if="isNextUp(m)"> · 该上场</template><template v-else-if="blockedText(m)"> · 等{{ blockedText(m) }}</template>
+                {{ courtLabelOf(m) }}<template v-if="isNextUp(m)"> · 该上场</template><template v-else-if="blockedText(m)"> · 等{{ blockedText(m) }}</template>
               </span>
             </div>
 
@@ -468,6 +468,22 @@ const skippedWaiters = computed(() => {
 function isNextUp(m: any): boolean {
   return isMultiCourt.value && nextUpIds.value.has(m.id)
 }
+/**
+ * 卡片上「这场在哪片场地」要显示什么（空字符串 = 不显示）。
+ *
+ * 只显示给**多场地**赛事：单场地赛事里这条信息恒为同一片场地，每一场都挂一个
+ * "21号"除了吵没有信息量，而且一旦数据里有个别场次解析不到场地名，就会变成
+ * "隔一场才有一个 21 号"，看着像 bug（线上真被问过）。
+ *
+ * 多场地赛事里如果某一场的 court_id 解析不出名字（场地被删过、或场地名是空的），
+ * 显示「场地待定」—— 至少能看出"这场还没定场地"，而不是一片空白。
+ */
+const courtRowCount = computed(() => (detail.value?.courts || []).length)
+function courtLabelOf(m: any): string {
+  if (courtRowCount.value < 2) return ''
+  return m.court_label || '场地待定'
+}
+
 /** 列表上只标「当前窗口」里被卡住的那一两场 —— 给全部 pending 都标橙会吵得看不清 */
 function blockedText(m: any): string {
   if (!isMultiCourt.value) return ''

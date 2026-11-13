@@ -448,9 +448,16 @@ async function scenarioLayout(page) {
   })()`
   for (const [name, path, expected] of baseline) {
     await page.goto(path, 2200)
-    // 带 tab / 多个接口的页面渲染慢一拍，探测重试几次再去断言（避免假失败）
+    // 带 tab / 多个接口的页面渲染慢一拍：先等**页面骨架出现**（.van-pull-refresh）再量，
+    // 探测器返回 null 时继续等。之前只重试 6 次（约 5s），机器忙的时候详情页/积分榜
+    // 还没渲染完就断言，报出两条"实际 undefined"的假失败（不是布局真的变了）。
+    const ready = `(() => !!document.querySelector('.van-pull-refresh'))()`
+    for (let i = 0; i < 30; i++) {
+      if (await page.ev(ready)) break
+      await sleep(500)
+    }
     let r = null
-    for (let i = 0; i < 6 && !r; i++) {
+    for (let i = 0; i < 10 && !r; i++) {
       r = await page.ev(probe)
       if (!r) await sleep(800)
     }
