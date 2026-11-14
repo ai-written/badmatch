@@ -16,6 +16,10 @@ engine_api._round_engine_plan）：
 
 注意用词：两套都是**没有回溯**的贪心，走不通时靠打乱候选顺序重试
 （见各自的 attempts）；"回溯改善"是早期文档留下的说法。
+
+**混双**（`mixed_doubles=True`，见下面「混双模式」一节）：两套构造都支持，候选空间从
+"任意 4 个人 + 3 种分队"换成"2 男 2 女 + 2 种分队（一男一女 vs 一男一女）"，
+目标场次/每人场次的口径完全不变。`core/jit.py`（优先场地）走同一个候选枚举器。
 """
 import math
 import random
@@ -80,7 +84,7 @@ def _quality_attempts(num_players: int) -> int:
     return 1
 
 
-def _quality(schedule) -> tuple:
+def _quality(schedule, partner_slots=None) -> tuple:
     """赛程质量，按优先级逐项比较（越小越好）：
 
     1. 完全相同的对局数 —— 玩家一眼就能看出来的重复，最优先
@@ -89,28 +93,47 @@ def _quality(schedule) -> tuple:
     4. 对手次数极差 —— 场内公平的硬指标。光看第 3 项看不出"某对碰 4 次、另一对只碰 1 次"：
        28 对全都碰过时 Σ(v-1) 恒等于 56-28=28，与分布无关；本项把**没碰过的对按 0 算**，
        所以"从没遇到过"也会被计入（实测带上它之后，8 人 14 场回到"每对恰好相遇 2 次"）。
+    5. 每人『搭档次数』极差（只在传了 partner_slots 时才有这一项 = 只在混双启用）：
+       第 2 项只保证**全局**重复次数贴下限，管不到"谁跟谁配得太集中"——
+       实测 12 人 36 场混双，全局重复已经是理论下限 36，但某些人的搭档次数是
+       (3,2,2,2,2,1) 而另一些人 (2,2,2,2,2,2)；同一批 40 次候选里其实存在
+       完全均匀（每人 2,2,2,2,2,2）的那一份，只是原来的比较字段挑不出来。
+       普通双打不传这个参数：那条路径已经冻结，多一项判据会改变既有挑选结果。
     """
     matches = Counter()
     partners = Counter()
     opponents = Counter()
     players: set = set()
+    per_player_partners = defaultdict(Counter) if partner_slots else None
     for (a, b), (c, d), *_ in schedule:
         t1, t2 = _pair_key(a, b), _pair_key(c, d)
         matches[_match_key(t1, t2)] += 1
         partners[t1] += 1
         partners[t2] += 1
         players.update((a, b, c, d))
+        if per_player_partners is not None:
+            for team in (t1, t2):
+                per_player_partners[team[0]][team[1]] += 1
+                per_player_partners[team[1]][team[0]] += 1
         for u in t1:
             for v in t2:
                 opponents[_pair_key(u, v)] += 1
     ordered = sorted(players)
     counts = [opponents.get(_pair_key(x, y), 0)
               for i, x in enumerate(ordered) for y in ordered[i + 1:]]
+    partner_spread = 0
+    if per_player_partners is not None:
+        for p in ordered:
+            per_counts = list(per_player_partners[p].values())
+            # 没配过的人按 0 算（与上面第 4 项同一口径），否则"从没跟某人搭档过"会被漏掉
+            per_counts += [0] * max(0, partner_slots - len(per_counts))
+            partner_spread = max(partner_spread, max(per_counts) - min(per_counts))
     return (
         sum(v - 1 for v in matches.values()),
         sum(v - 1 for v in partners.values()),
         sum(v - 1 for v in opponents.values()),
         (max(counts) - min(counts)) if counts else 0,
+        partner_spread,
     )
 
 
@@ -140,6 +163,121 @@ def _match_key(t1, t2) -> tuple:
     「完全相同的对局」惩罚漏判（_quality 用的就是这个规范形式，两边必须一致）。
     """
     return (t1, t2) if t1 <= t2 else (t2, t1)
+
+
+# ============================================================================
+# 混双模式（每场搭档必须一男一女，对手同样一男一女）
+# ============================================================================
+#
+# 开关条件（`mixed_doubles_available`）：**男女人数相等**、**每人都设置了性别**、
+# 且男女各至少 2 人。不满足就不让开（前端的「开始比赛」据此决定要不要弹那个选择框）：
+#   · 人数不等 → 必然有人每轮轮空，或者被迫打一场非混双的对局；
+#   · 有人性别未设置（User.gender 可空）→ 既不能算男也不能算女，排进去等于凭空造
+#     一场不成立的对局。
+#
+# 合法总场次**不需要新口径**：混双每场同样消耗 4 个名额（2 男 2 女），男女各 N/2 人，
+# 于是「每人场次相等」的步长 = (N/2)/gcd(2, N/2)，与 `fairness_step(N) = N/gcd(4, N)`
+# **恒等**（N=2k：k 奇数时两边都是 k，k 偶数时两边都是 k/2）。所以 fairness_step /
+# nearest_valid_total / floor_valid_total 一律照旧 —— 别给混双另立一套场次口径，
+# 否则会出现「界面让选、提交却被拒」。
+#
+# 混双真正的代价在搭档池：可用搭档只有 男×女 = N²/4 种（普通双打是 C(N,2)），
+# 场次一多就必然重复（见 `_partner_floor`）。这是组合数学，不是排程质量问题。
+
+MALE = "M"
+FEMALE = "F"
+
+
+def mixed_doubles_counts_ok(men: int, women: int, total: int) -> bool:
+    """按人数判定能不能开混双（纯计数版）。
+
+    详情页只知道「男 N/2 人、女 N/2 人、合计 N 人」，没有选手 id，所以判定逻辑抽成
+    计数版，供 `mixed_doubles_available` 与前端用的详情字段共用同一个口径。
+    """
+    if total <= 0 or men + women != total:
+        return False          # 有人性别未设置（None / 空 / 其他值）
+    return men == women and men >= 2
+
+
+def mixed_doubles_available(genders) -> bool:
+    """这份名单能不能开混双。genders: {player_id: "M" | "F" | None}。"""
+    if not genders:
+        return False
+    men = sum(1 for g in genders.values() if g == MALE)
+    women = sum(1 for g in genders.values() if g == FEMALE)
+    return mixed_doubles_counts_ok(men, women, len(genders))
+
+
+def _mixed_pair_splits(two_men, two_women):
+    """两队各「一男一女」的**全部**分法：只有 2 种（普通双打是 3 种）。
+
+    第三种（男男 vs 女女）在混双里非法，所以这里单独枚举，而不是先算 3 种再过滤。
+    """
+    m1, m2 = two_men
+    f1, f2 = two_women
+    return (
+        (_pair_key(m1, f1), _pair_key(m2, f2)),
+        (_pair_key(m1, f2), _pair_key(m2, f1)),
+    )
+
+
+def _candidate_lineups(eligible, genders, mixed_doubles):
+    """枚举「这一场」的候选：(4 个人, 该 4 人的若干种分队)。
+
+    普通双打 = C(eligible, 4) × 3 种分队；混双 = C(男,2) × C(女,2) × 2 种分队。
+    **枚举顺序刻意与改动前逐场贪心完全一致**（先按组合、再按分队）：打分并列时取先
+    枚举到的那一组，换了顺序同一份名单就会排出另一份赛程（"可复现"的约定会破）。
+
+    jit（优先场地模式）用的也是它 —— 两边的候选空间才不会各说各话。
+    注意：逐场贪心与轮级切场的**普通双打**分支没有走这里（它们各自内联枚举，见
+    _greedy_build / _round_option_score 里"为什么不用通用枚举器"的性能说明）。
+    """
+    if not mixed_doubles:
+        for combo in combinations(eligible, 4):
+            yield combo, _splits(*combo)
+        return
+    men = [p for p in eligible if genders.get(p) == MALE]
+    women = [p for p in eligible if genders.get(p) == FEMALE]
+    for two_men in combinations(men, 2):
+        for two_women in combinations(women, 2):
+            yield (*two_men, *two_women), _mixed_pair_splits(two_men, two_women)
+
+
+def _lineup_score(t1, t2, base, partner_count, opponent_count, match_count) -> int:
+    """一"场"的得分（越大越好）= base（场次/轮空节奏）+ 三项重复惩罚的负数。
+
+    逐场贪心、轮级切场、JIT 三处共用它，权重才不会各写一遍（曾经 jit 那份就是
+    抄来的，抄漏一个方向就会"库里搭档键反向时惩罚失效"）。
+    `base` 由调用方算（它和"哪 4 个人"有关、和怎么分队无关）。
+    """
+    partner_rep = (partner_count.get(t1, 0) + partner_count.get(t1[::-1], 0)
+                   + partner_count.get(t2, 0) + partner_count.get(t2[::-1], 0))
+    opp_rep = 0
+    for u in t1:
+        for v in t2:
+            opp_rep += opponent_count.get(_pair_key(u, v), 0)
+    return (base
+            - PARTNER_PENALTY * partner_rep
+            - DUPLICATE_PENALTY * match_count.get(_match_key(t1, t2), 0)
+            - OPPONENT_PENALTY * opp_rep)
+
+
+def _partner_floor(total_matches: int, num_players: int, mixed_doubles: bool = False) -> int:
+    """搭档重复的理论下限（"多排几次挑最好"的提前收工条件用它）。
+
+    一共要发 2M 个搭档名额，而**不同**的搭档组合只有那么多，超出的部分必然重复：
+      · 普通双打：C(N,2) 种；
+      · 混双：只有 男×女 = (N/2)² 种 —— 8 人 14 场时池子只有 16，28 个名额里有 12 个
+        必然重复（普通双打同一个档位是 0）。所以混双永远排不出"搭档全不重复"的赛程，
+        把下限当成 0 会让提前收工条件永远不成立、白跑满 attempts。
+    """
+    slots = 2 * total_matches
+    if mixed_doubles:
+        half = num_players // 2
+        distinct = half * half
+    else:
+        distinct = num_players * (num_players - 1) // 2
+    return max(0, slots - distinct)
 
 
 def fairness_step(num_players: int) -> int:
@@ -182,7 +320,8 @@ def _history_collision(schedule, partner_history, opponent_history, match_histor
 
 
 def generate_schedule(players, total_matches, partner_history=None,
-                      opponent_history=None, match_history=None):
+                      opponent_history=None, match_history=None,
+                      mixed_doubles=False, genders=None):
     """排一份（新增的）赛程。
 
     partner_history / opponent_history / match_history 是**已有比赛**里的重复统计，
@@ -200,9 +339,18 @@ def generate_schedule(players, total_matches, partner_history=None,
     "场内同样均衡"的候选赛程里挑一份最不撞历史的 —— 于是"每个人对手都公平"与
     "跨赛事避重"能一起拿到；详见函数体的注释与 _history_collision。
     它们也不改变目标场次：每人还是打 target 场。
+
+    mixed_doubles + genders：混双模式（每场搭档一男一女、对手也一男一女）。
+    条件不满足（男女人数不等 / 有人没设置性别）直接抛 ValueError —— 调用方
+    （engine_api）会在更早的地方拦一次并给出可读的提示，这里只是最后一道防线。
+    普通双打不传这两个参数，行为与改动前完全一致。
     """
     N = len(players)
     target = (4 * total_matches) // N
+
+    if mixed_doubles and not mixed_doubles_available(
+            {p: (genders or {}).get(p) for p in players}):
+        raise ValueError("混双模式要求男女人数相等，且每名选手都已设置性别")
 
     if partner_history is None:
         partner_history = defaultdict(int)
@@ -219,9 +367,12 @@ def generate_schedule(players, total_matches, partner_history=None,
     # 历史只用来在若干份同样均衡的候选里挑"最不跟最近几场撞"的那一份。
     # 唯一例外：只排得起一份的规模（N > 48，见 _quality_attempts）没有挑选余地，
     # 那一档仍把历史交给贪心，免得跨赛事避重在大规模上整个失效。
-    partner_floor = max(0, 2 * total_matches - N * (N - 1) // 2)
+    partner_floor = _partner_floor(total_matches, N, mixed_doubles)
     quality_attempts = _quality_attempts(N)
     history_in_greedy = quality_attempts == 1
+    # 混双：每人能有的搭档只有异性那 N/2 个人，第 5 项判据按这个数补 0 求极差
+    # （普通双打传 None = 不加第 5 项，挑选结果与改动前完全一致）
+    partner_slots = N // 2 if mixed_doubles else None
     # 场内均衡的目标：8 人及以下把"对手次数极差 0"当目标（8 人 14 场实测 100% 做得到，
     # 多试几份而已，单份成本毫秒级）；9 人以上结构上往往做不到 0（12 人 33 场不带任何历史时
     # 的最好成绩就是 2~3），再拿 0 当收工条件就永远收不了工、白跑满份数（实测 1.5 秒）。
@@ -236,23 +387,27 @@ def generate_schedule(players, total_matches, partner_history=None,
             if history_in_greedy:
                 schedule = _greedy_build(players, total_matches, target,
                                          dict(partner_history), rng,
-                                         opponent_history, match_history)
+                                         opponent_history, match_history,
+                                         mixed_doubles=mixed_doubles, genders=genders)
             else:
-                schedule = _greedy_build(players, total_matches, target, {}, rng, None, None)
+                schedule = _greedy_build(players, total_matches, target, {}, rng, None, None,
+                                         mixed_doubles=mixed_doubles, genders=genders)
         except ValueError as e:
             # 死路：必须继续换序重试，不受 quality_attempts 限制
             last_error = e
             continue
-        quality = _quality(schedule)
+        quality = _quality(schedule, partner_slots)
         collision = _history_collision(schedule, partner_history,
                                        opponent_history, match_history)
         key = (quality, collision)
         if best_key is None or key < best_key:
             best, best_key = schedule, key
-        # 提前收工：场内已经达标（没有相同对局 + 搭档重复到理论下限 + 对手次数够均衡）
-        # **而且完全不撞历史**
+        # 提前收工：场内已经达标（没有相同对局 + 搭档重复到理论下限 + 对手次数够均衡
+        # + 每人的搭档次数也够均匀）**而且完全不撞历史**。
+        # 第 5 项（quality[4]）在普通双打里恒为 0，条件等价于改动前的写法。
         if (quality[0] == 0 and quality[1] <= partner_floor
-                and quality[3] <= spread_goal and collision == 0):
+                and quality[3] <= spread_goal and quality[4] <= 1
+                and collision == 0):
             break
         if attempt + 1 >= quality_attempts:
             break
@@ -284,7 +439,8 @@ def shuffle_sides(schedule, rng=None):
 
 
 def _greedy_build(players, total_matches, target, partner_history, rng=None,
-                  opponent_history=None, match_history=None):
+                  opponent_history=None, match_history=None,
+                  mixed_doubles=False, genders=None):
     played = {p: 0 for p in players}
     # partner_history 的键来自库里的 RoundPairing（方向不保证），
     # 所以查询时两个方向都查一次，兼容历史数据
@@ -307,41 +463,76 @@ def _greedy_build(players, total_matches, target, partner_history, rng=None,
             raise ValueError(
                 f"排程走入死路：第 {len(schedule) + 1} 场时只剩 {len(eligible)} 人可上场"
             )
+        if mixed_doubles:
+            # 混双还要求"男女各至少 2 人"：只剩 3 男 1 女这种局面虽然人数够，但凑不出
+            # 一场一男一女搭档的比赛。判在这里是为了让报错说清原因（而不是到了下面
+            # 空循环、best_group 仍是 None 才崩）。
+            live_men = sum(1 for p in eligible if genders.get(p) == MALE)
+            live_women = sum(1 for p in eligible if genders.get(p) == FEMALE)
+            if live_men < 2 or live_women < 2:
+                raise ValueError(
+                    f"排程走入死路：第 {len(schedule) + 1} 场时只剩 {live_men} 男 "
+                    f"{live_women} 女可上场（混双每场要 2 男 2 女）"
+                )
 
         best_score = float("-inf")
         best_group = None
 
-        for combo in combinations(eligible, 4):
-            played_sum = played[combo[0]] + played[combo[1]] + played[combo[2]] + played[combo[3]]
-            cool_sum = cool_down[combo[0]] + cool_down[combo[1]] + cool_down[combo[2]] + cool_down[combo[3]]
-            # 精确剪枝：score = base - 各项惩罚，故 score <= base。
-            # base 已经低于当前最好成绩时，这一组连同它的 3 种分组都不可能被选中
-            # （选中要求 score > best，或 score == best 时掷随机数 —— 两者都需要 base >= best），
-            # 直接跳过。它只省掉展开，不改变任何选择结果（含随机并列打破）。
-            # 收益随人数放大：8 人时只有 15% 可跳过，32 人 64 场可跳过 96%（单次 6.4s → 0.55s）。
-            base = -played_sum + cool_sum
-            if base < best_score:
-                continue
-            for t1, t2 in _splits(*combo):
-                # 搭档历史两个方向都查（库里的键方向不固定）
-                partner_rep = (
-                    partner_count[t1] + partner_count[t1[::-1]]
-                    + partner_count[t2] + partner_count[t2[::-1]]
-                )
-                opp_rep = 0
-                for u in t1:
-                    for v in t2:
-                        opp_rep += opponent_count[_pair_key(u, v)]
-                score = (
-                    - PARTNER_PENALTY * partner_rep
-                    - DUPLICATE_PENALTY * match_count[_match_key(t1, t2)]
-                    - OPPONENT_PENALTY * opp_rep
-                    + base
-                )
-                # 同分时随机选一个（仅重试时），避免固定路径反复撞同一个死路
-                if score > best_score or (rng is not None and score == best_score and rng.random() < 0.5):
-                    best_score = score
-                    best_group = (t1, t2)
+        # 普通双打和混双分成两个循环，**不是为了少写一行，是为了速度**：
+        # 这层候选是 C(N,4)×3（32 人 96 场时一份赛程要展开上千万次），而其中约 96% 会被
+        # 下面的精确剪枝直接跳过 —— 剪枝路径上任何额外开销（生成器、sum()、一次函数调用）
+        # 都会被放大成倍数差。实测把这层统一改成"通用枚举器 + _lineup_score"后：
+        # 普通双打 24 人 96 场 3.3s → 8.5s、32 人 96 场 3.1s → 11.7s。
+        # 所以普通双打（**冻结路径**）保持改动前的写法，混双走通用分支。
+        if mixed_doubles:
+            for combo, splits in _candidate_lineups(eligible, genders, True):
+                # base 直接按下标取（与下面普通双打那条同口径的写法）：这层要展开
+                # C(男,2)×C(女,2) 次，generator 的 sum() 在这里是纯开销
+                m1, m2, f1, f2 = combo
+                base = -(played[m1] + played[m2] + played[f1] + played[f2]) + (
+                    cool_down[m1] + cool_down[m2] + cool_down[f1] + cool_down[f2])
+                # 同上：base 已低于当前最好成绩 → 这一组连同它的 2 种分队都不可能被选中
+                if base < best_score:
+                    continue
+                for t1, t2 in splits:
+                    score = _lineup_score(t1, t2, base, partner_count,
+                                          opponent_count, match_count)
+                    if score > best_score or (
+                            rng is not None and score == best_score and rng.random() < 0.5):
+                        best_score = score
+                        best_group = (t1, t2)
+        else:
+            for combo in combinations(eligible, 4):
+                played_sum = played[combo[0]] + played[combo[1]] + played[combo[2]] + played[combo[3]]
+                cool_sum = cool_down[combo[0]] + cool_down[combo[1]] + cool_down[combo[2]] + cool_down[combo[3]]
+                # 精确剪枝：score = base - 各项惩罚，故 score <= base。
+                # base 已经低于当前最好成绩时，这一组连同它的 3 种分组都不可能被选中
+                # （选中要求 score > best，或 score == best 时掷随机数 —— 两者都需要 base >= best），
+                # 直接跳过。它只省掉展开，不改变任何选择结果（含随机并列打破）。
+                # 收益随人数放大：8 人时只有 15% 可跳过，32 人 64 场可跳过 96%（单次 6.4s → 0.55s）。
+                base = -played_sum + cool_sum
+                if base < best_score:
+                    continue
+                for t1, t2 in _splits(*combo):
+                    # 搭档历史两个方向都查（库里的键方向不固定）
+                    partner_rep = (
+                        partner_count[t1] + partner_count[t1[::-1]]
+                        + partner_count[t2] + partner_count[t2[::-1]]
+                    )
+                    opp_rep = 0
+                    for u in t1:
+                        for v in t2:
+                            opp_rep += opponent_count[_pair_key(u, v)]
+                    score = (
+                        - PARTNER_PENALTY * partner_rep
+                        - DUPLICATE_PENALTY * match_count[_match_key(t1, t2)]
+                        - OPPONENT_PENALTY * opp_rep
+                        + base
+                    )
+                    # 同分时随机选一个（仅重试时），避免固定路径反复撞同一个死路
+                    if score > best_score or (rng is not None and score == best_score and rng.random() < 0.5):
+                        best_score = score
+                        best_group = (t1, t2)
 
         (pa, pb), (pc, pd) = best_group
         schedule.append(((pa, pb), (pc, pd), None, None))
@@ -552,11 +743,23 @@ def _as_ids(pair, on):
     return _pair_key(on[pair[0]], on[pair[1]])
 
 
+def _score_games(games, partner_count, opponent_count, match_count) -> int:
+    """给"这一轮里的这几场"打分（越大越好）：逐场分数相加（权重只有一份，见 _lineup_score）。"""
+    return sum(_lineup_score(t1, t2, 0, partner_count, opponent_count, match_count)
+               for t1, t2 in games)
+
+
 def _round_option_score(option, on, partner_count, opponent_count, match_count):
     """给"这一轮怎么切"的一个候选方案打分（越大越好）。
 
     权重与逐场贪心完全一致（搭档 3 / 对局 20 / 对手 2），口径也一致：
     搭档两个方向都查（库里历史数据的键方向不保证），对手按 _pair_key 归一。
+
+    这里是**普通双打（冻结路径）**的实现在此内联，不走 `_score_games`/`_lineup_score`：
+    12 人 36 场要打 22 万次分（40 次尝试 × 18 轮 × 315 种），中间多套一层列表推导 +
+    生成器 + 函数调用实测就慢 38%（482ms → 666ms）。混双那条新路径没有这段历史包袱，
+    直接复用 `_score_games`，权重仍只有 `PARTNER_PENALTY`/`DUPLICATE_PENALTY`/
+    `OPPONENT_PENALTY` 三个常量这一处来源 —— 改权重时这两处都要看同一组常量。
     """
     score = 0
     for pair1, pair2 in option:
@@ -571,13 +774,88 @@ def _round_option_score(option, on, partner_count, opponent_count, match_count):
     return score
 
 
-def _pick_round(on, want_matches, partner_count, opponent_count, match_count, rng=None):
+def _pick_mixed_round(on, want_matches, partner_count, opponent_count, match_count,
+                      genders, rng=None):
+    """混双版"把这一轮的 4P 个人切成 P 场"：每场都是「一男一女 vs 一男一女」。
+
+    P=1 全枚举 2 种、P=2 全枚举 72 种（4 男 4 女：分组 18 种 × 每场 2 种分队 × 2），
+    ≥3 场逐场贪心 —— 分工与普通双打一致，只是候选空间从"4 人 + 3 种分队"换成
+    "2 男 + 2 女 + 2 种分队"。
+    """
+    men = [p for p in on if genders.get(p) == MALE]
+    women = [p for p in on if genders.get(p) == FEMALE]
+    if len(men) != 2 * want_matches or len(women) != 2 * want_matches:
+        raise ValueError(
+            f"排程走入死路：混双每轮要 {2 * want_matches} 男 {2 * want_matches} 女，"
+            f"实际上了 {len(men)} 男 {len(women)} 女"
+        )
+
+    if want_matches <= 2:
+        if want_matches == 1:
+            options = [(_mixed_pair_splits(tuple(men), tuple(women))[i],)
+                       for i in (0, 1)]
+        else:
+            options = []
+            # 固定"男队第一个人在 A 场"，避免 (A,B) 与 (B,A) 同一分组被算两次
+            first = men[0]
+            for partner in men[1:]:
+                rest_men = [m for m in men if m != first and m != partner]
+                for two_women in combinations(women, 2):
+                    rest_women = [w for w in women if w not in two_women]
+                    for game_a in _mixed_pair_splits((first, partner), two_women):
+                        for game_b in _mixed_pair_splits(tuple(rest_men), tuple(rest_women)):
+                            options.append((game_a, game_b))
+        best, best_score = None, None
+        for games in options:
+            s = _score_games(games, partner_count, opponent_count, match_count)
+            if best_score is None or s > best_score or (
+                    rng is not None and s == best_score and rng.random() < 0.5):
+                best, best_score = games, s
+        return list(best)
+
+    # ≥3 场：逐场贪心 + 本轮临时计数（同一轮里不会把同一对搭档切两次）
+    rest_men, rest_women = list(men), list(women)
+    games = []
+    local_partner = defaultdict(int, partner_count)
+    local_opponent = defaultdict(int, opponent_count)
+    local_match = defaultdict(int, match_count)
+    for _ in range(want_matches):
+        best, best_score = None, None
+        for _combo, splits in _candidate_lineups(rest_men + rest_women, genders, True):
+            for t1, t2 in splits:
+                s = _lineup_score(t1, t2, 0, local_partner, local_opponent, local_match)
+                if best_score is None or s > best_score:
+                    best, best_score = (t1, t2), s
+        t1, t2 = best
+        games.append((t1, t2))
+        local_partner[t1] += 1
+        local_partner[t1[::-1]] += 1
+        local_partner[t2] += 1
+        local_partner[t2[::-1]] += 1
+        local_match[_match_key(t1, t2)] += 1
+        for u in t1:
+            for v in t2:
+                local_opponent[_pair_key(u, v)] += 1
+        used = set(t1) | set(t2)
+        rest_men = [p for p in rest_men if p not in used]
+        rest_women = [p for p in rest_women if p not in used]
+    return games
+
+
+def _pick_round(on, want_matches, partner_count, opponent_count, match_count, rng=None,
+                mixed_doubles=False, genders=None):
     """把这一轮的 `4 * want_matches` 个人切成 `want_matches` 场，取打分最好的切法。
 
     want_matches == 2 时全枚举 315 种（最优）；≥3 场全枚举是十几万种，
     改成"一场一场地贪心"—— 每挑完一场就把这 4 个人移出候选池，再挑下一场。
+
+    mixed_doubles：每场必须一男一女搭档（见 _pick_mixed_round），人选由调用方按性别挑好。
     """
     on = tuple(on)
+    if mixed_doubles:
+        return _pick_mixed_round(on, want_matches, partner_count, opponent_count,
+                                 match_count, genders, rng)
+
     if want_matches == 1:
         best, best_score = None, None
         for split in _three_splits((0, 1, 2, 3)):
@@ -627,7 +905,7 @@ def _pick_round(on, want_matches, partner_count, opponent_count, match_count, rn
     return games
 
 
-def _select_round_players(players, played, target, want, partner_count, rng=None):
+def _select_round_players(players, played, target, want, partner_count, rng=None, against=()):
     """挑这一轮上场的 `want` 个人。
 
     配额优先：剩余场次多的人先上（这是"每人场次相等"的保证 —— 和逐场贪心的
@@ -636,16 +914,20 @@ def _select_round_players(players, played, target, want, partner_count, rng=None
 
     注意**不能**用"谁歇得久"来排同档：那样会让同一批人反复凑在一起
     （16 人 2 场地实测退化成两组交替，搭档重复从 0 变 8 次）。
+
+    against：已经选好、将要跟这批人**配对**的选手（混双专用：先选男，再按"跟这些男
+    搭档过几次"给女的排序）。普通双打留空即可。
     """
     remaining = {p: target - played[p] for p in players}
     live = [p for p in players if remaining[p] > 0]
     picked = []
+    partner_targets = tuple(against)
     while len(picked) < want and live:
         top = max(remaining[p] for p in live)
         level = [p for p in live if remaining[p] == top]
         level.sort(key=lambda p: (
             sum(partner_count[_pair_key(p, q)] + partner_count[_pair_key(q, p)]
-                for q in picked),
+                for q in (*picked, *partner_targets)),
             rng.random() if rng is not None else 0,
         ))
         take = level[:want - len(picked)]
@@ -654,8 +936,27 @@ def _select_round_players(players, played, target, want, partner_count, rng=None
     return picked
 
 
+def _select_mixed_round_players(players, played, target, want_matches, genders,
+                                partner_count, rng=None):
+    """混双：每轮上场的男、女人数必须相等（各 `2 * 场数` 人）。
+
+    先按配额选男，再按「跟这些男已经搭档过几次」给女的排序 —— 混双的搭档多样性
+    全落在"哪个男配了哪个女"上，同性别之间的搭档次数是无关项（所以男的那一步
+    没有 against，只按配额 + 随机）。
+    """
+    per_gender = 2 * want_matches
+    men = [p for p in players if genders.get(p) == MALE]
+    women = [p for p in players if genders.get(p) == FEMALE]
+    picked_men = _select_round_players(men, played, target, per_gender,
+                                       partner_count, rng)
+    picked_women = _select_round_players(women, played, target, per_gender,
+                                         partner_count, rng, against=tuple(picked_men))
+    return picked_men + picked_women
+
+
 def _build_rounds_greedy(players, total_matches, target, per_round,
-                         partner_count, opponent_count, match_count, rng=None):
+                         partner_count, opponent_count, match_count, rng=None,
+                         mixed_doubles=False, genders=None):
     """一轮一轮地排：定人 → 切场 → 记账。走不通就抛 ValueError 交给上层换序重试。"""
     played = {p: 0 for p in players}
     schedule = []
@@ -663,16 +964,28 @@ def _build_rounds_greedy(players, total_matches, target, per_round,
     while left > 0:
         live_count = sum(1 for p in players if played[p] < target)
         want_matches = min(per_round, left, live_count // 4)
+        if mixed_doubles:
+            # 混双每场要 2 男 2 女：每轮能开几场同时被"男女各自还没打满的人数"卡住
+            live_men = sum(1 for p in players
+                           if genders.get(p) == MALE and played[p] < target)
+            live_women = sum(1 for p in players
+                             if genders.get(p) == FEMALE and played[p] < target)
+            want_matches = min(want_matches, live_men // 2, live_women // 2)
         if want_matches < 1:
             raise ValueError(
                 f"排程走入死路：还剩 {left} 场时只有 {live_count} 人还没打满"
             )
         want = 4 * want_matches
-        on = _select_round_players(players, played, target, want, partner_count, rng)
+        if mixed_doubles:
+            on = _select_mixed_round_players(players, played, target, want_matches,
+                                             genders, partner_count, rng)
+        else:
+            on = _select_round_players(players, played, target, want, partner_count, rng)
         if len(on) != want:
             raise ValueError(f"排程走入死路：本轮需要 {want} 人，只选出 {len(on)} 人")
         games = _pick_round(on, want_matches, partner_count, opponent_count,
-                            match_count, rng)
+                            match_count, rng,
+                            mixed_doubles=mixed_doubles, genders=genders)
         if len(games) != want_matches:
             raise ValueError("排程走入死路：本轮切不出足够的场次")
         for t1, t2 in games:
@@ -718,7 +1031,8 @@ def _round_attempts(num_players: int) -> int:
 
 def generate_round_schedule(players, total_matches, per_round=2,
                             partner_history=None, opponent_history=None,
-                            match_history=None):
+                            match_history=None,
+                            mixed_doubles=False, genders=None):
     """排一份（新增的）赛程，**按轮为最小单位**。多场地专用。
 
     与 generate_schedule 的对外约定完全一致：返回扁平的
@@ -734,12 +1048,19 @@ def generate_round_schedule(players, total_matches, per_round=2,
     partner/opponent/match_history 用法与老引擎一致：默认**不参与打分**，
     只用来在若干份"场内同样均衡"的候选里挑一份最不撞历史的（唯一例外是
     attempts == 1 的大规模档位，那时没有挑选余地，历史直接参与打分）。
+
+    mixed_doubles + genders：混双（每场搭档一男一女、对手也一男一女）。此时每轮上场的
+    男、女人数相等（各 `2 * 每轮场数` 人），同一轮里"一男一女搭档"在构造上成立。
+    条件不满足直接抛 ValueError（真正的拦截在 engine_api，那里能给可读提示）。
     """
     N = len(players)
     if per_round < 1:
         raise ValueError("每轮场数至少 1 场")
     if not total_matches:
         raise ValueError("总场次必须大于 0")
+    if mixed_doubles and not mixed_doubles_available(
+            {p: (genders or {}).get(p) for p in players}):
+        raise ValueError("混双模式要求男女人数相等，且每名选手都已设置性别")
     target = (4 * total_matches) // N
     if target * N != 4 * total_matches:
         raise ValueError(
@@ -752,7 +1073,9 @@ def generate_round_schedule(players, total_matches, per_round=2,
 
     attempts = _round_attempts(N)
     history_in_greedy = attempts == 1
-    partner_floor = max(0, 2 * total_matches - N * (N - 1) // 2)
+    partner_floor = _partner_floor(total_matches, N, mixed_doubles)
+    # 混双：每人能有的搭档只有异性那 N/2 个人（第 5 项判据用；普通双打传 None）
+    partner_slots = N // 2 if mixed_doubles else None
     # 与老引擎同一口径：≤8 人把"对手次数极差 0"当目标，9 人以上结构上往往做不到 0
     spread_goal = 0 if N <= 8 else 2
 
@@ -769,18 +1092,20 @@ def generate_round_schedule(players, total_matches, per_round=2,
             pc, oc, mc = defaultdict(int), defaultdict(int), defaultdict(int)
         try:
             schedule = _build_rounds_greedy(players, total_matches, target, per_round,
-                                            pc, oc, mc, rng)
+                                            pc, oc, mc, rng,
+                                            mixed_doubles=mixed_doubles, genders=genders)
         except ValueError as e:
             last_error = e
             continue
-        quality = _quality(schedule)
+        quality = _quality(schedule, partner_slots)
         collision = _history_collision(schedule, partner_history,
                                        opponent_history, match_history)
         key = (quality, collision)
         if best_key is None or key < best_key:
             best, best_key = schedule, key
         if (quality[0] == 0 and quality[1] <= partner_floor
-                and quality[3] <= spread_goal and collision == 0):
+                and quality[3] <= spread_goal and quality[4] <= 1
+                and collision == 0):
             break
 
     if best is None:

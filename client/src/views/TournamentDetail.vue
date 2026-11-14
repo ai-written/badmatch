@@ -48,6 +48,8 @@
           <div class="ig-item"><van-icon name="friends-o" /><span>{{ tournament.registered_count }}/{{ tournament.max_participants }} 人</span></div>
           <div class="ig-item"><van-icon name="orders-o" /><span>{{ totalMatchesText }}</span></div>
           <div class="ig-item" v-if="isCourtFirst"><van-icon name="sync" /><span>边打边排</span></div>
+          <!-- 混双（每场一男一女搭档）：开赛时房主选择开启，榜单/对阵表都不变，这里给个标记 -->
+          <div class="ig-item" v-if="tournament.mixed_doubles"><van-icon name="friends" /><span>混双</span></div>
           <div class="ig-item"><van-icon name="medal-o" /><span>{{ tournament.points_to_win || 11 }} 分制</span></div>
         </div>
       </div>
@@ -350,6 +352,9 @@ const canTransfer = computed(() => otherActivePlayers.value.length > 0)
 const selectedNewCreator = ref(0)
 const matchOptions = ref<{ total: number; per_person: number }[]>([])
 const matchTotal = ref(0)
+// 这次开赛是否走混双（在「开始比赛」那一步由 chooseMixedDoubles 定下来）：
+// 人数未满时先弹混双选择、再弹场次选择，所以状态要跨这两步保留
+const mixedForStart = ref(false)
 // 追加比赛：可选项由服务端算（约束是「每人新增场次相同」，见后端 extra-match-options）
 const showAddMatches = ref(false)
 const addOptions = ref<{
@@ -992,9 +997,38 @@ async function doAssignReferees() {
   })
 }
 
+/** 开赛时问一句「要不要开混双」，返回值就是这次开赛用的 mixed_doubles。
+
+ *  只有服务端说"现在可以开"（mixed_doubles_available：男女人数相等 + 每人都设置了性别 +
+ *  男女各≥2）才弹这个框；条件不满足就**完全不弹**，直接按普通双打开赛（= 改动前的行为）。
+ *  两条出路都是明确的按钮（确认=混双 / 取消=普通双打），点了遮罩不会关掉弹窗，
+ *  免得"手滑点外面"被当成选了普通双打却毫无自觉。
+ */
+async function chooseMixedDoubles() {
+  if (!tournament.value?.mixed_doubles_available) return false
+  const men = tournament.value?.male_count ?? 0
+  const women = tournament.value?.female_count ?? 0
+  try {
+    await showConfirmDialog({
+      title: '开启混双模式？',
+      message: `当前报名 ${men} 男 ${women} 女，人数相等，可以开混双：每对搭档必须一男一女，`
+        + '对手也一男一女。不开就是普通双打（不分性别）。',
+      confirmButtonText: '开启混双',
+      cancelButtonText: '普通双打',
+      closeOnClickOverlay: false,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function doStartWithTotal() {
   await withSubmitting(async () => {
-    const res = await api.post(`/tournaments/${route.params.id}/start`, { total_matches: Number(matchTotal.value) })
+    const res = await api.post(`/tournaments/${route.params.id}/start`, {
+      total_matches: Number(matchTotal.value),
+      mixed_doubles: mixedForStart.value,
+    })
     const actual = res.data?.total_matches ?? res.data?.matches
     // 服务端在个别组合下排不出请求的场次（贪婪排程的边界），会退到可行的最小场次，
     // 此时要告知用户实际场次，避免与自己的选择不符却毫无提示
@@ -1010,6 +1044,8 @@ async function doStartWithTotal() {
 async function doStart() {
   const count = tournament.value?.registered_count || 0
   const max = tournament.value?.max_participants || 0
+  // 先问混双（条件不满足时这一步直接返回 false，什么都不弹）
+  mixedForStart.value = await chooseMixedDoubles()
   if (count < max) {
     // 人数未满：让创建者先选总场次（服务端只对显式传入的场次做校验）
     await fetchMatchOptionsForStart()
@@ -1021,7 +1057,9 @@ async function doStart() {
     return
   }
   await withSubmitting(async () => {
-    const res = await api.post(`/tournaments/${route.params.id}/start`)
+    const res = await api.post(`/tournaments/${route.params.id}/start`, {
+      mixed_doubles: mixedForStart.value,
+    })
     const actual = res.data?.total_matches ?? res.data?.matches
     if (actual != null && Number(actual) !== Number(tournament.value?.total_matches ?? actual)) {
       showToast(`所选场次无法排出，已按 ${actual} 场开赛`)

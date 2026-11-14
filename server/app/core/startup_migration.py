@@ -349,6 +349,18 @@ async def run_startup_migrations(conn: AsyncConnection) -> None:
             )
         )
 
+    # 混双模式标记（见 models/tournament.py）：老赛事一律 false —— 混双是开赛时由房主
+    # 现选的，历史赛事不可能"曾经开过混双"，回填 false 才是对的。
+    if await _table_exists(conn, "tournaments"):
+        if not await _column_exists(conn, "tournaments", "mixed_doubles"):
+            logger.info("migration: adding tournaments.mixed_doubles column")
+            await conn.execute(
+                text(
+                    "ALTER TABLE tournaments "
+                    "ADD COLUMN mixed_doubles BOOLEAN NOT NULL DEFAULT false"
+                )
+            )
+
     # 自增序列对齐（幂等）：修一次就够，但每次启动都检查一遍，
     # 这样「用 dump 恢复过数据库」之后也不用记得手工执行 setval。
     await _ensure_fk_indexes(conn)

@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.core.security import require_user
 from app.core.audit import audit, get_client_ip
 from app.core.websocket import manager
-from app.core.jit_schedule import jit_fill
+from app.core.jit_schedule import jit_fill, player_genders
 from app.models.user import User
 from app.models.tournament import Tournament, TournamentStatus, Registration, PlayerStats, Court
 from app.models.round import Round, RoundStatus, RoundPairing, Match, MatchStatus, Notification
@@ -24,6 +24,7 @@ from app.engine.scheduler import (
     generate_schedule, generate_round_schedule, compute_match_count, compute_rounds,
     shuffle_sides, fairness_step, nearest_valid_total, floor_valid_total,
     matches_per_round, use_round_engine, PLAYERS_PER_COURT, courts_allowed,
+    mixed_doubles_available,
     _pair_key, _match_key,
 )
 
@@ -47,6 +48,10 @@ RECENT_EVENT_HISTORY = 3
 
 class StartRequest(BaseModel):
     total_matches: int | None = None
+    # 混双模式（可选）：每场搭档必须一男一女、对手也一男一女。
+    # 只有「男女人数相等 + 每人都设置了性别」才允许传 true，否则 400（见 start_tournament）。
+    # 不传 = 普通双打，与改动前完全一致。
+    mixed_doubles: bool | None = None
 
 router = APIRouter(prefix="/api/tournaments/{tournament_id}", tags=["engine"])
 
@@ -114,6 +119,27 @@ async def start_tournament(
 
     if len(player_ids) < 4:
         raise HTTPException(status_code=400, detail="至少需要 4 人参赛")
+
+    # 混双（可选，开赛这一刻由房主决定）：每场搭档必须一男一女、对手也一男一女。
+    # 只有「男女人数相等、且每名选手都设置了性别」才允许开启 —— 前端的「开始比赛」
+    # 也按同一个结论（TournamentDetail.mixed_doubles_available）决定要不要弹那个选择框；
+    # 这里再判一次是接口自己的责任（前端校验只是体验层）。
+    # 条件不满足就**直接拒绝**而不是悄悄降级：用户明确点了"开启混双"，静默按普通双打
+    # 开赛会让人以为开成了，打完才发现搭档不对。
+    mixed_doubles = bool(body and body.mixed_doubles)
+    genders: dict[int, str | None] = {}
+    if mixed_doubles:
+        genders = await player_genders(db, player_ids)
+        if not mixed_doubles_available(genders):
+            men = sum(1 for g in genders.values() if g == "M")
+            women = sum(1 for g in genders.values() if g == "F")
+            unset = len(player_ids) - men - women
+            detail = (f"开启混双需要男女报名人数相等，且每名选手都已设置性别："
+                      f"当前 {men} 男 {women} 女")
+            if unset:
+                detail += f"，另有 {unset} 人未设置性别"
+            raise HTTPException(status_code=400, detail=detail + "。")
+    tournament.mixed_doubles = mixed_doubles
 
     # 场地数校验（与创建/编辑时那条同源）：多场地赛事每片场地至少 5 人
     # （4 人上场 + 至少 1 人场下执裁）。这里是报名截止、真正开赛的那一刻，
@@ -204,12 +230,14 @@ async def start_tournament(
             target_type="tournament", target_id=tournament.id,
             detail={"players": len(player_ids), "matches": M, "rounds": len(created),
                     "schedule_mode": "court_first", "first_batch": len(created),
+                    "mixed_doubles": mixed_doubles,
                     "disabled_registrations_cancelled": disabled_cancelled,
                     "shuffle_seed": shuffle_seed},
             ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         )
         return {"ok": True, "rounds": len(created), "matches": len(created),
-                "total_matches": M, "schedule_mode": "court_first"}
+                "total_matches": M, "schedule_mode": "court_first",
+                "mixed_doubles": mixed_doubles}
 
     # 走到这里说明走的是「完整赛程」那条路（1 片场地 / 人数不足 9 等）。
     # 库里若还记着 court_first，就改回 balanced —— 否则界面会显示"打完一场自动排下一场"，
@@ -231,6 +259,7 @@ async def start_tournament(
             player_ids, cand_M,
             ((partner_history, opponent_history, match_history), ({}, {}, {})),
             per_round=per_round if use_rounds else None,
+            mixed_doubles=mixed_doubles, genders=genders,
         )
         if schedule is not None:
             adjusted_M = cand_M
@@ -302,11 +331,14 @@ async def start_tournament(
                 "disabled_registrations_cancelled": disabled_cancelled,
                 # 开赛时打散名单用的种子：有它才能按同一份输入复现这份赛程
                 "shuffle_seed": shuffle_seed,
+                # 是不是混双开局（每场一男一女搭档）
+                "mixed_doubles": mixed_doubles,
                 # 用上了哪一级避重历史（0 = 带跨赛事历史，1 = 退到不带历史）
                 "history_level": history_level},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
     )
-    return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M}
+    return {"ok": True, "rounds": len(rounds_data), "matches": M, "total_matches": M,
+            "mixed_doubles": mixed_doubles}
 
 
 class AddMatchesBody(BaseModel):
@@ -466,7 +498,8 @@ async def _round_engine_plan(db: AsyncSession, tournament_id: int,
     return True, matches_per_round(num_players, courts)
 
 
-def _try_schedule(players, matches, history_variants, per_round=None):
+def _try_schedule(players, matches, history_variants, per_round=None,
+                  mixed_doubles=False, genders=None):
     """按「历史逐级放宽」的顺序试排一份赛程，返回 (schedule, level)；全失败返回 (None, None)。
 
     - `history_variants`：从最完整的避重到最弱的顺序，例如
@@ -475,17 +508,24 @@ def _try_schedule(players, matches, history_variants, per_round=None):
     - `level` 就是用上的那一级的下标（写进审计，便于事后解释这份赛程的避重口径）。
     - `per_round`：传了就按**轮级构造**排（多场地赛事），返回值仍是扁平列表、顺序即轮顺序；
       不传就是老的逐场贪心（单场地/8 人及以下，行为完全不变）。
+    - `mixed_doubles` + `genders`：混双（每场一男一女搭档）。注意它**不随历史级别放宽** ——
+      混双是硬约束（排不出就是排不出），不是"避重强度"。
 
     注意这两级在 N ≤ 48 时**基本等价**：历史已经退出贪心打分、只影响候选挑选
     （见 scheduler.generate_schedule），所以贪心的可行性与历史无关 —— 第一级排不出来时
     第二级同样排不出来。留着第二级是为了 N > 48（那一档历史仍参与贪心）以及将来万一
     把历史放回打分；因此审计里的 `history_level` 通常就是 0。
     """
+    # 混双参数**只在开启时才传**：不给 generate_schedule / generate_round_schedule 添
+    # 两个永远为默认值的实参，调用形态与改动前逐字一致（单测里有直接替换这两个函数的桩，
+    # 多传一个恒为 False 的关键字会让那些桩签名对不上）。
+    opts = {"mixed_doubles": True, "genders": genders} if mixed_doubles else {}
     for level, hist in enumerate(history_variants):
         try:
             if per_round:
-                return generate_round_schedule(players, matches, per_round, *hist), level
-            return generate_schedule(players, matches, *hist), level
+                return generate_round_schedule(players, matches, per_round, *hist,
+                                               **opts), level
+            return generate_schedule(players, matches, *hist, **opts), level
         except ValueError:
             continue
     return None, None
@@ -596,6 +636,18 @@ async def add_matches(
             detail=f"总场次上限 {MAX_TOTAL_MATCHES} 场（现有 {current} 场）",
         )
 
+    # 混双（每场一男一女搭档）**在分流之前**复核一次，两条分支共用同一个结论：
+    # 名单的性别分布可能在开赛之后变了 —— 典型是「有人退赛」（withdraw_player 已经降级过）
+    # 或「管理员禁用了某个账号 / 选手自己把性别清空」（这两条都不经过 withdraw_player）。
+    # 一旦男女不再相等就降级回普通双打，并把标记**写回库**：否则详情页还挂着「混双」，
+    # 后面的对阵却已经不是混双了。宁可按普通双打排，也不写进一场凑不出 2 男 2 女的比赛。
+    mixed_doubles = bool(tournament.mixed_doubles)
+    add_genders: dict[int, str | None] = {}
+    if mixed_doubles:
+        add_genders = await player_genders(db, players)
+        mixed_doubles = mixed_doubles_available(add_genders)
+        tournament.mixed_doubles = mixed_doubles
+
     # 「优先场地」模式：没有"要不要重排"的问题 —— 只是把**计划场次**调大，
     # 之后每打完一场，补排（core/jit_schedule.jit_fill）会按新配额自然多排几场。
     if tournament.schedule_mode == "court_first":
@@ -616,7 +668,8 @@ async def add_matches(
             target_type="tournament", target_id=tournament_id,
             detail={"added": body.matches, "requested": body.matches,
                     "total_matches": new_plan, "players": n,
-                    "rounds": len(created), "schedule_mode": "court_first"},
+                    "rounds": len(created), "schedule_mode": "court_first",
+                    "mixed_doubles": mixed_doubles},
             ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
         )
         return {
@@ -627,6 +680,7 @@ async def add_matches(
             "rounds": len(created),
             "per_person_added": (4 * body.matches) // n,
             "schedule_mode": "court_first",
+            "mixed_doubles": mixed_doubles,
         }
 
     partner_history, opponent_history, match_history = await _new_match_history(db, tournament_id)
@@ -649,6 +703,7 @@ async def add_matches(
             ((partner_history, opponent_history, match_history),
              (own_partner, own_opponent, own_match)),
             per_round=per_round if use_rounds else None,
+            mixed_doubles=mixed_doubles, genders=add_genders,
         )
         if schedule is not None:
             break
@@ -700,6 +755,7 @@ async def add_matches(
         target_type="tournament", target_id=tournament_id,
         detail={"added": added, "requested": body.matches, "total_matches": total,
                 "players": n, "rounds": len(rounds_data),
+                "mixed_doubles": mixed_doubles,
                 # 用上了哪一级避重历史（0 = 跨赛事+本赛事，1 = 只本赛事）
                 "history_level": history_level},
         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
@@ -711,6 +767,7 @@ async def add_matches(
         "total_matches": total,
         "rounds": len(rounds_data),
         "per_person_added": (4 * added) // n,
+        "mixed_doubles": mixed_doubles,
     }
 
 
@@ -786,6 +843,15 @@ async def reschedule_schedule(
     if n < 4:
         raise HTTPException(status_code=400, detail="在场选手不足 4 人，无法重排赛程")
 
+    # 混双赛事重排后仍是混双（人没变，条件不会变）；万一数据不一致就退回普通双打
+    # （并写回库，见 add_matches 里同样的处理），绝不排出"搭档不是一男一女"的场次。
+    mixed_doubles = bool(tournament.mixed_doubles)
+    genders: dict[int, str | None] = {}
+    if mixed_doubles:
+        genders = await player_genders(db, players)
+        mixed_doubles = mixed_doubles_available(genders)
+        tournament.mixed_doubles = mixed_doubles
+
     # 至此可以断定：库里这个赛事的比赛**全都是 PENDING**（一场没开打），所以下面把
     # **所有轮次**整批删掉重排 —— 注意不能只删 `Round.status == PENDING` 的轮次：
     # `POST /rounds/{id}/start-round` 会把轮次标成 ONGOING 而比赛仍是 PENDING，
@@ -836,6 +902,7 @@ async def reschedule_schedule(
          (recent_partner, recent_opponent, recent_match),
          ({}, {}, {})),
         per_round=(per_round if use_rounds else None),
+        mixed_doubles=mixed_doubles, genders=genders,
     )
     if schedule is None:
         raise HTTPException(status_code=400, detail="当前人数排不出赛程，请调整人数后重试")
@@ -905,6 +972,8 @@ async def reschedule_schedule(
                 "replaced_rounds": replaced_rounds,
                 "released_referees": len(released_referees),
                 "total_matches": tournament.total_matches,
+                # 混双赛事重排后仍然是混双（人没变）
+                "mixed_doubles": mixed_doubles,
                 # 用上了哪一级避重历史（0 = 旧赛程+最近几场，1 = 只最近几场，2 = 不带）
                 "history_level": history_level,
                 # 这次重排打散名单用的种子：与开赛一样，可按它复现"谁跟谁打、怎么分组"
@@ -919,6 +988,7 @@ async def reschedule_schedule(
         "replaced_rounds": replaced_rounds,
         "released_referees": len(released_referees),
         "total_matches": tournament.total_matches,
+        "mixed_doubles": mixed_doubles,
     }
 
 
@@ -1178,6 +1248,22 @@ async def withdraw_player(
         remaining.append(s.user_id)
 
     remaining_count = len(remaining)
+
+    # ---- 混双赛事里有人退赛：男女不再相等，混双就打不成了 ----
+    # 退赛**绝不能被这条拦住**（人已经退出去了，回滚成 400 只会让人退不掉），所以这里是
+    # "自动降级回普通双打"，而不是报错：新的未开打轮次按普通双打排，已经在打/打完的
+    # 混双场次原样保留（它们本来就成立，只是成镜花水月不再追加新的混双场）。
+    # 先判"性别分布"，再判人数（<4 人会自动结束赛事，那条路径也不需要这个标记）。
+    mixed_doubles_disabled = False
+    mixed_doubles = bool(tournament.mixed_doubles)
+    withdraw_genders: dict[int, str | None] = {}
+    if mixed_doubles:
+        withdraw_genders = await player_genders(db, remaining)
+        if not mixed_doubles_available(withdraw_genders):
+            tournament.mixed_doubles = False
+            mixed_doubles = False
+            mixed_doubles_disabled = True
+
     if remaining_count < 4:
         # 剩余人数不足 4 人，无法继续 2v2 比赛，自动结束赛事。
         # 未开打的轮次在上面已经删掉了（人不够，谁也打不了），所以这里**必须**把
@@ -1243,6 +1329,7 @@ async def withdraw_player(
             remaining, new_M,
             ((partner_history, recent_opponent, recent_match), (frozen_partner, {}, {})),
             per_round=(per_round if use_rounds else None),
+            mixed_doubles=mixed_doubles, genders=withdraw_genders,
         )
         if new_schedule is None:
             logger.warning(
@@ -1314,6 +1401,17 @@ async def withdraw_player(
                      "包含他（所在轮次已经开打，不能自动重排）。请现场处理：换人上场或提前结束赛事。"),
         ))
 
+    # 混双因为这个人退出而不再成立（男女不再相等）：房主必须知道赛制被换了 ——
+    # 否则他会一直以为后面还是混双，看到普通双打的对阵会以为排错了。
+    if mixed_doubles_disabled and tournament.creator_id != player_id:
+        db.add(Notification(
+            user_id=tournament.creator_id,
+            tournament_id=tournament_id,
+            type="schedule_changed",
+            message=("选手退出后男女人数不再相等，混双模式已自动切换为普通双打"
+                     "（还没开打的场次已按普通双打重排）。"),
+        ))
+
     # 把真实总场次写回 tournaments.total_matches（详情页「共 N 场」用它）：
     # 重排只删「未开打」的轮次、已结束的比赛保留着，所以它既不等于 new_M，也不等于计划值。
     # 例外是「优先场地」模式：那边库里永远只有"当前这一批"场次（其余还没排），
@@ -1356,6 +1454,8 @@ async def withdraw_player(
                         "new_matches": new_matches_count,
                         "stranded_matches": len(stranded_matches),
                         "auto_finished": auto_finished,
+                        # 混双是否因这次退赛被降级（男女不再相等）
+                        "mixed_doubles_disabled": mixed_doubles_disabled,
                         "by": withdrew_by,
                         # 用上了哪一级避重历史（0 = 冻结轮次+最近几场，1 = 只冻结轮次）
                         "history_level": reschedule_history_level},
@@ -1372,6 +1472,8 @@ async def withdraw_player(
         message = "选手已退出，比赛已全部打完，赛事自动结束"
     elif not new_matches_count:
         message = "选手已退出（剩余额度已排满，不再补排新场次）"
+    elif mixed_doubles_disabled:
+        message = "选手已退出；男女人数不再相等，混双已自动切换为普通双打"
     else:
         message = "选手已退出"
     return {
@@ -1382,6 +1484,7 @@ async def withdraw_player(
         "frozen_matches": frozen_match_count,
         "stranded_matches": len(stranded_matches),
         "auto_finished": auto_finished,
+        "mixed_doubles_disabled": mixed_doubles_disabled,
     }
 
 

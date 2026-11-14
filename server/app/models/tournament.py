@@ -44,6 +44,15 @@ class Tournament(Base):
     schedule_mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="court_first", server_default="court_first"
     )
+    # 混双模式：每场搭档必须一男一女、对手也一男一女（见 engine/scheduler 的混双一节）。
+    # 只在**开赛那一刻**由房主决定（前端「开始比赛」弹窗，条件不满足就不弹）：
+    #   · 只有男女人数相等、且每名选手都设置了性别才允许开启（mixed_doubles_available）；
+    #   · 开赛后锁定。中途有人退赛导致男女不再相等时自动降级回普通双打
+    #     （见 engine_api.withdraw_player）——退赛不能被这条挡住，也不能排出非法对阵。
+    # 老数据一律 false（启动迁移按这个默认值回填）。
+    mixed_doubles: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     max_participants: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[TournamentStatus] = mapped_column(

@@ -177,6 +177,16 @@ class TournamentDetail(BaseModel):
     registration_open_at: datetime | None = None
     # 排赛模式：balanced 优先公平性 / court_first 优先场地（见 models/tournament.py）
     schedule_mode: str = "balanced"
+    # 混双模式（每场搭档一男一女）：开赛时选定，见 models/tournament.py。
+    # 这里给的是**有效值**（库里标记 且 当下男女仍相等、每人都设置了性别才为 True），
+    # 因为赛中可能出现"名单变了、标记还没来得及降级"的窗口（见 api/tournaments._tournament_detail）。
+    mixed_doubles: bool = False
+    # 报名者的性别分布 + "现在能不能开混双"（男女人数相等、每人都设置了性别、男女各≥2）。
+    # 前端据 mixed_doubles_available 决定点「开始比赛」时要不要弹那个选择框 ——
+    # 判定用服务端的结论，不在前端自己数，免得两处口径不一致。
+    male_count: int = 0
+    female_count: int = 0
+    mixed_doubles_available: bool = False
     server_now: datetime
     is_registered: bool = False
     # 「在场选手」：未退赛、且账号未被禁用（与裁判候选人池 `_active_player_ids` 同一口径）。

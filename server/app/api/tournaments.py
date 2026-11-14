@@ -16,6 +16,7 @@ from app.core.websocket import manager
 from app.core.mailer import send_tournament_invite
 from app.engine.scheduler import (
     fairness_step, nearest_valid_total, PLAYERS_PER_COURT, courts_allowed,
+    mixed_doubles_counts_ok,
 )
 
 # 一个赛事最多支持几片场地同时开打（排程引擎里 2 片场地是全枚举最优解，
@@ -927,6 +928,23 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
     )
     registered_count = cnt_result.scalar() or 0
 
+    # 报名者的性别分布：详情页据此决定点「开始比赛」时**要不要弹混双选择框**。
+    # 口径与开赛时一致（有效报名 + 账号未被禁用 —— 开赛那一刻会把被禁用的报名自动取消），
+    # 判定交给排程器的 mixed_doubles_counts_ok，免得前端/后端各数一套。
+    gender_rows = await db.execute(
+        select(User.gender)
+        .join(Registration, Registration.user_id == User.id)
+        .where(
+            Registration.tournament_id == t.id,
+            Registration.is_active == True,
+            User.is_active == True,
+        )
+    )
+    genders = [g for (g,) in gender_rows.all()]
+    male_count = sum(1 for g in genders if g == "M")
+    female_count = sum(1 for g in genders if g == "F")
+    mixed_available = mixed_doubles_counts_ok(male_count, female_count, len(genders))
+
     cancelled_result = await db.execute(
         select(func.count(Registration.id)).where(
             Registration.tournament_id == t.id, Registration.is_active == False
@@ -1025,6 +1043,15 @@ async def _tournament_detail(t: Tournament, db: AsyncSession, user: User | None 
             points_to_win=t.points_to_win,
         registration_open_at=t.registration_open_at,
         schedule_mode=t.schedule_mode or "balanced",
+        # 库里存的是开赛时选定的"意图"，这里返回的是**当下还成立才为真**的有效值：
+        # 赛中可能出现"名单性别变了、标记还没来得及降级"的窗口（管理员禁用某人的账号、
+        # 选手自己把性别清空 —— 这两条都不经过 withdraw_player）。显示口径取"标记 且
+        # 现在还成立"，免得详情页标着混双、实际对阵已经退回普通双打。库里的标记会在
+        # 下一次追加比赛 / 重排 / 退赛时被正式改写（见 engine_api）。
+        mixed_doubles=bool(t.mixed_doubles) and mixed_available,
+        male_count=male_count,
+        female_count=female_count,
+        mixed_doubles_available=mixed_available,
         server_now=datetime.now(),
         courts=court_outs,
         registered_count=registered_count,

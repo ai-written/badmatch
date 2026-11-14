@@ -13,19 +13,39 @@
 - 每人场次**允许差 1 场**（`pick_court_first_match` 只从"最少的一档、必要时放宽一档"里挑）；
 - 搭档/对手/完全相同对局仍然惩罚（同一套权重），但它天生近视 —— 看不到后面谁空出来，
   实测 12 人 36 场搭档重复约 13 次（事前排程是 6 次 = 理论下限）。
+
+混双（`tournaments.mixed_doubles`）：补出来的每一场都必须是"一男一女 vs 一男一女"，
+所以空闲的人里没有 2 男 2 女时这一批就少排一场（场地先空着，等对面打完放人）。
+性别分布一变（典型：有人退赛，男女不再相等）就自动按普通双打补排 —— 退赛不能被
+"混双凑不齐人"拦住；已在打的场次不受影响。
 """
 from collections import Counter
 
+import logging
 import random
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine.jit import pick_court_first_match
-from app.engine.scheduler import _match_key, _pair_key, compute_match_count, matches_per_round
+from app.engine.scheduler import (
+    _match_key, _pair_key, compute_match_count, matches_per_round,
+    mixed_doubles_available,
+)
 from app.models.round import Match, MatchStatus, Round, RoundPairing
 from app.models.tournament import Court, PlayerStats, Tournament
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
+
+
+async def player_genders(db: AsyncSession, player_ids) -> dict[int, str | None]:
+    """这批选手的性别（混双补排要用）。没设置的账号值为 None。"""
+    ids = list(player_ids)
+    if not ids:
+        return {}
+    rows = await db.execute(select(User.id, User.gender).where(User.id.in_(ids)))
+    return {uid: g for (uid, g) in rows.all()}
 
 
 async def active_players(db: AsyncSession, tournament_id: int) -> list[int]:
@@ -102,6 +122,22 @@ async def jit_fill(db: AsyncSession, tournament: Tournament) -> list[int]:
     plan = tournament.plan_total_matches or tournament.total_matches or compute_match_count(n)
     target = max(1, (4 * plan) // n)
 
+    # 混双（每场一男一女搭档）：性别分布一变（有人退赛）就按普通双打补排 ——
+    # 退赛绝不能被"男女不再相等"拦住，但也不能把一场凑不出 2 男 2 女的比赛写进库里。
+    mixed = bool(getattr(tournament, "mixed_doubles", False))
+    genders: dict[int, str | None] = {}
+    if mixed:
+        genders = await player_genders(db, players)
+        mixed = mixed_doubles_available(genders)
+        if not mixed:
+            # 走到这里说明库里的标记与现实不符（正常路径是 withdraw_player 先把标记降级、
+            # 并给房主发消息）。这里只按普通双打补排，**不改标记**（这个函数在记分的写
+            # 事务里被调用，顺手改赛事状态容易引发难以复现的问题），留一条日志便于排查。
+            logger.warning(
+                "jit_fill: 赛事 %s 标着混双，但当前名单男女不相等或有人未设置性别，本次按普通双打补排",
+                tournament.id,
+            )
+
     free = [p for p in players if p not in busy]
     occupied = {m.court_id for m in unfinished if m.court_id}
     last_round = (await db.execute(
@@ -111,7 +147,8 @@ async def jit_fill(db: AsyncSession, tournament: Tournament) -> list[int]:
     created: list[int] = []
     for _ in range(slots):
         pick = pick_court_first_match(free, played, target, partner_c, opponent_c,
-                                       match_c, rng=random)
+                                       match_c, rng=random,
+                                       mixed_doubles=mixed, genders=genders)
         if pick is None:
             break                       # 都打满了 / 凑不齐 4 个人 → 不再排（赛事自然收尾）
         t1, t2 = pick
