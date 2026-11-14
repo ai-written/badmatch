@@ -1428,6 +1428,10 @@ def _profile(u: User, invited_by_username: str | None = None) -> UserProfile:
         is_active=u.is_active,
         invite_code=u.invite_code, invited_by=u.invited_by,
         invited_by_username=invited_by_username,
+        # 注册时间：给「我的」页算「已加入 N 天」用（原先漏了这一项，天数永远显示「—」）。
+        # 与全仓其它时间字段同一口径：isoformat() 出的本地时间串，没有时区后缀，
+        # 前端的 new Date(...) 按本地时间解析，正好对上。
+        created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 

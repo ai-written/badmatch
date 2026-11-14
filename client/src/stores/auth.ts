@@ -13,6 +13,8 @@ export interface UserProfile {
   // 这里只用于管理面板等展示场景
   is_active?: boolean
   invite_code?: string | null
+  // 注册时间（后端返回站点本地的 ISO 串，无时区后缀）。「我的」页算「已加入 N 天」用它
+  created_at?: string | null
 }
 
 export const useAuthStore = defineStore('auth', () => {

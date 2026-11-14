@@ -57,6 +57,10 @@ class UserProfile(BaseModel):
     invite_code: str | None = None
     invited_by: int | None = None
     invited_by_username: str | None = None
+    # 注册时间（站点本地时间的 ISO 串，无时区后缀 —— 与库里 naive TIMESTAMP 一致）。
+    # 「我的」页用它算「已加入 N 天」。原先 ProfileView 已经在读这个字段，但后端从来没
+    # 返回过 → 天数永远显示占位符「—」。
+    created_at: str | None = None
 
     class Config:
         from_attributes = True

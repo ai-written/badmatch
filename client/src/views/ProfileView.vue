@@ -49,7 +49,7 @@
           </div>
           <div class="me-txt">
             <div class="hero-title me-name">{{ auth.user.username }}</div>
-            <div class="hero-sub me-sub">爱玩羽社 · 已加入 {{ joinedDays }} 天</div>
+            <div class="hero-sub me-sub">爱玩羽社 · {{ joinedText }}</div>
           </div>
         </div>
         <div class="me-stats">
@@ -163,13 +163,20 @@ const defaultAvatar = 'https://img.yzcdn.cn/vant/cat.jpeg'
 const loginForm = reactive({ username: '', password: '' })
 const registerForm = reactive({ username: '', password: '', gender: '', invite_code: '', init_code: '', email: '' })
 const stats = reactive({ total_matches: 0, total_wins: 0, win_rate: 0, tournaments_played: 0 })
-/** 加入天数（用 /auth/me 的 created_at；取不到就显示"—"） */
-const joinedDays = computed(() => {
-  const raw = (auth.user as any)?.created_at
-  if (!raw) return '—'
+/** 加入天数（用 /auth/me 的 created_at；取不到就显示"—"）。
+ *
+ *  注册当天算 0 天，显示「今天加入」而不是「已加入 0 天」（后者读着像没加进来）；
+ *  原来这里用 Math.max(1, …) 把当天硬抬成 1 天，反而把"今天刚注册"说成"已加入 1 天"。
+ *  注：后端 /auth/me 以前压根没返回 created_at，所以这段永远走"—"分支（已修）。
+ */
+const joinedText = computed(() => {
+  const raw = auth.user?.created_at
+  if (!raw) return '已加入 — 天'
   const t = new Date(raw).getTime()
-  if (!t || isNaN(t)) return '—'
-  return Math.max(1, Math.floor((Date.now() - t) / 86400000))
+  if (!t || isNaN(t)) return '已加入 — 天'
+  const days = Math.floor((Date.now() - t) / 86400000)
+  if (days <= 0) return '今天加入'
+  return `已加入 ${days} 天`
 })
 
 const inviteCode = ref('')
